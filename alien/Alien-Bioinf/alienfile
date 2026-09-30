@@ -1,0 +1,42 @@
+use alienfile;
+# Every tool is always installed into this distribution's own share directory:
+# the point is a clustalo, BLAST and Python that Bioinf::Basic controls, so there
+# is no system probe. lib/Alien/Bioinf.pm does the fetching (and says where from),
+# because update() has to do exactly the same thing again after install; this
+# file only hands it the staging directory.
+#
+# Alien::Build insists on a download and an extract step, so those two just
+# leave a marker behind. It is recorded as a local file, because a download
+# with no protocol is one a future Alien::Build says it will refuse to extract.
+#
+# The build step runs in a temporary directory, so lib/ is found from where
+# this file is, which is the working directory only while it is being loaded.
+my $lib = Path::Tiny::path('lib')->absolute->stringify;
+my $marker = sub {
+	my ($build) = @_;
+	my $f = Path::Tiny::path('tools');
+	$f->spew('clustalo blast python');
+	$build->install_prop->{download_detail}{ $f->absolute->stringify } = { protocol => 'file' };
+};
+
+probe sub { 'share' };
+
+share {
+	requires 'Alien::CPython3';
+	requires 'Capture::Tiny';
+	download $marker;
+	extract $marker;
+	build sub {
+		my ($build) = @_;
+		unshift @INC, $lib;
+		require Alien::Bioinf;
+		Alien::Bioinf->install($_, $build->install_prop->{stage}) foreach qw(clustalo blast python);
+	};
+	gather sub {
+		my ($build) = @_;
+		unshift @INC, $lib;
+		require Alien::Bioinf;
+		my $v = Alien::Bioinf->versions($build->install_prop->{stage});
+		$build->runtime_prop->{version} = join ', ', map { "$_ $v->{$_}" } sort keys %{ $v };
+	};
+};

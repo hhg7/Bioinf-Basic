@@ -1,0 +1,18 @@
+Revision history for Bioinf-Basic
+
+0.01 2026-09-30 CDT
+
+ [First release]
+
+ - fasta2hash, hash2fasta_file, get_best_alignment_hit, msa_quality_table
+   and clustal_view_residues, taken from the maintainer's bioinf.pm.
+   fasta2hash and hash2fasta_file are now XS: on a 928 MB FASTA, reading
+   went from 3.83 s to 0.80 s and writing from 44.44 s to 0.97 s.
+
+ - bioinf.pm's msa_phylo_plot is split in two. plot_msa aligns sequences
+   with Clustal Omega and draws the alignment; plot_phylo draws the guide
+   tree, either aligning the sequences itself or drawing a tree file that
+   plot_msa kept, so the two images need only one alignment.
+
+ - clustalo, BLAST+ and the plotting Python come from Alien::Bioinf, never
+   from PATH.

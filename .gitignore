@@ -1,0 +1,21 @@
+# build products of Makefile.PL and make, here and in alien/Alien-Bioinf
+blib/
+_alien/
+Makefile
+Makefile.old
+MYMETA.*
+pm_to_blib
+Basic.bs
+Basic.c
+Basic.o
+# dzil build and release products
+/.build/
+/Bioinf-Basic-*
+# what examples.pl writes
+/DEG20010421.aln.fa
+/DEG20010421.msa.svg
+/view_residues.tab.tex
+# LaTeX build products
+*.aux
+*.log
+*.pdf
