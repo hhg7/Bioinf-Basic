@@ -7,8 +7,10 @@ use autodie ':default';
 use Devel::Confess 'color';
 use Bioinf::Basic;
 
+my $h = fasta2hash('t/data/DEG20010421.fa');
+
 # clustal_view_residues shows an alignment it is given; plot_msa makes one
-plot_msa(
+=plot_msa(
 	fasta      => 't/data/DEG20010421.fa',
 	filename   => 'DEG20010421.msa.svg',
 );
@@ -17,7 +19,7 @@ plot_msa(
 	'output.tex.file' => 'view_residues.tab.tex'
 );
 =cut
-clustal_view_residues(
+=clustal_view_residues(
 	'msa.file'        => 't/data/DEG20010421.fa',
 	'output.tex.file' => 'ex.tex',
 	'color.residues'  => {

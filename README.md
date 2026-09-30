@@ -46,6 +46,8 @@ View sequences aligned in a latex file
 
 Read a fasta file to a hash
 
+    my $h = fasta2hash('DEG20010421.fa');
+
 ## get_best_alignment_hit
 
 ## hash2fasta_file
