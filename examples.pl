@@ -9,17 +9,16 @@ use Bioinf::Basic;
 
 my $h = fasta2hash('t/data/DEG20010421.fa');
 
-# clustal_view_residues shows an alignment it is given; plot_msa makes one
-=plot_msa(
+# clustal_view_residues aligns t/data/DEG20010421.fa itself, since its sequences differ in length
+plot_msa(
 	fasta      => 't/data/DEG20010421.fa',
 	filename   => 'DEG20010421.msa.svg',
 );
-=clustal_view_residues(
-	'msa.file'        => $msa->{'msa.file'},
+clustal_view_residues(
+	'msa.file'        => 't/data/DEG20010421.fa',
 	'output.tex.file' => 'view_residues.tab.tex'
 );
-=cut
-=clustal_view_residues(
+clustal_view_residues(
 	'msa.file'        => 't/data/DEG20010421.fa',
 	'output.tex.file' => 'ex.tex',
 	'color.residues'  => {
@@ -31,3 +30,8 @@ my $h = fasta2hash('t/data/DEG20010421.fa');
 	caption     => 'Catalytic residues of \textit{S. cerevisiae}',
 	label       => 'active',
 );
+plot_phylo(
+	fasta => 't/data/DEG20010421.fa',
+	filename => 'phylo.svg'
+);   # phylo.svg
+

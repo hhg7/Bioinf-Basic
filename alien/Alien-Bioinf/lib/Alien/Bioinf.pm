@@ -17,9 +17,10 @@ package Alien::Bioinf;
 #              from that tag's tarball against argtable2-13, the release
 #              clustalo's configure asks for, fetched from SourceForge.
 #   Python     Alien::CPython3 supplies the interpreter; a venv on top of it
-#              gets numpy, matplotlib and adjustText -- what share/msa_plot.py
-#              and Matplotlib::Simple import -- from PyPI. The newest release
-#              for check_updates() is the highest "Python 3.x.y" in
+#              gets numpy, matplotlib, adjustText and biopython -- what
+#              share/msa_plot.py and Matplotlib::Simple import -- from PyPI.
+#              The newest release for check_updates() is the highest
+#              "Python 3.x.y" in
 #              https://www.python.org/api/v2/downloads/release/.
 #
 # Nothing is downloaded twice. Every archive is kept in cache_dir() and reused
@@ -37,7 +38,7 @@ use File::Copy qw(copy);
 use File::Basename qw(basename dirname);
 our $VERSION = '0.01';
 
-my @PY_PACKAGES = qw(numpy matplotlib adjustText);
+my @PY_PACKAGES = qw(numpy matplotlib adjustText biopython);
 my @TOOLS = qw(clustalo blast python python-packages);
 my $BLAST_URL = 'https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/LATEST/';
 my $CLUSTAL_URL = 'https://www.clustal.org/omega/';
@@ -483,8 +484,8 @@ From the shell:
 =head1 DESCRIPTION
 
 Installing this distribution puts the newest Clustal Omega and BLAST+ for the
-running operating system, and a Python venv holding numpy, matplotlib and
-adjustText, into its own share directory. None of it touches PATH.
+running operating system, and a Python venv holding numpy, matplotlib,
+adjustText and Biopython, into its own share directory. None of it touches PATH.
 
 =head2 Nothing is downloaded twice
 

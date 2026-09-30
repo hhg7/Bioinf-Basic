@@ -7,13 +7,14 @@ from Alien::Bioinf. The
 alignment drawing is ~/Scripts/HitList/scripts/x.my.align.py, cut down to what
 it uses; that script was itself derived from CIAlign (Tumescheit, Firth & Brown,
 PeerJ 2022, MIT licence), whose colour-blind-safe "CBS" palette and RasMol-based
-residue colouring are copied below as flat tables. The tree drawing is new: it
-replaces the R/ggtree script bioinf.pm used to write. The table follows the
+residue colouring are copied below as flat tables. The tree is read and drawn by
+Biopython's Bio.Phylo (Cock et al., Bioinformatics 2009), onto matplotlib axes;
+it replaces the R/ggtree script bioinf.pm used to write. The table follows the
 script Matplotlib::Simple 0.317's colored_table wrote for msa_quality_table
 before this took its place: a gist_rainbow-coloured matplotlib table over a
 hidden imshow that carries the colorbar, with empty cells grey.
 """
-import argparse, json
+import argparse, datetime, hashlib, json, os, platform, sys
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -31,7 +32,9 @@ ap.add_argument('--y', default='Protein & Species', help='y-axis label')
 ap.add_argument('--s', help='JSON {label: 0-based alignment column} of vertical lines to draw')
 ap.add_argument('--l', help='JSON {tip name: label} for --tree')
 ap.add_argument('--table', help='JSON file of the table to draw instead: rows, cols, cells (null for none), vmin, vmax, log, numbers, title, cblabel')
+ap.add_argument('--meta', help='JSON of further Dublin Core fields for --tree: Title, Source, Description, Relation, Contributor')
 ap.add_argument('--c', default='Bioinf::Basic', help='Creator metadata: the script and sub that called this')
+ap.add_argument('--quiet', action='store_true', help="don't print 'wrote' and the output file; the caller prints its own")
 a = ap.parse_args()
 
 # CIAlign getAAColours('CBS') and getNtColours('CBS'), in the order CIAlign
@@ -43,12 +46,35 @@ AA = dict(D='#a22c49', E='#a22c49', C='#c9c433', M='#c9c433', K='#0038a2', R='#0
 NT = dict(A='#56ae6c', G='#c9c433', T='#a22c49', C='#0038a2', N='#6979d3', U='#a22c49',
 	**{c: '#6979d3' for c in 'RYSWKMBDHVX'}, **{'-': '#FFFFFF'})
 
-def save(fig):
-	# 'Creator' is metadata only these backends take; jpg and the rest refuse it
+# The Dublin Core fields each backend takes, after matplotlib's savefig(): SVG
+# writes them all into <metadata>, PNG writes any key as a tEXt chunk, PDF takes
+# only its own Info keys (Description going in as Subject), and PS and EPS
+# only Creator. jpg and the rest take none, and refuse any.
+DC = ('Title', 'Date', 'Source', 'Description', 'Identifier', 'Relation', 'Contributor', 'Keywords')
+
+def save(fig, also=None, dc=None):
+	"""also: a further library that drew the image, as "name version"; dc:
+	Dublin Core fields to write beside the Creator, where the format allows."""
 	creator = a.c + ', drawn by ' + __file__ + ' with matplotlib ' + matplotlib.__version__
-	md = {'Creator': creator} if a.o.rsplit('.', 1)[-1].lower() in ('png', 'svg', 'pdf', 'ps', 'eps') else None
+	if also:
+		creator += ' and ' + also
+	fmt = a.o.rsplit('.', 1)[-1].lower()
+	dc = dc or {}
+	if fmt == 'svg':
+		md = {'Creator': creator, **dc}
+	elif fmt == 'png':
+		# tEXt values are plain strings
+		md = {'Creator': creator, **{k: '; '.join(v) if isinstance(v, list) else str(v) for k, v in dc.items()}}
+	elif fmt == 'pdf':
+		md = {'Creator': creator, **{k: v for k, v in (('Title', dc.get('Title')), ('Subject', dc.get('Description')),
+			('Keywords', '; '.join(dc.get('Keywords', [])) or None)) if v}}
+	elif fmt in ('ps', 'eps'):
+		md = {'Creator': creator}
+	else:
+		md = None
 	fig.savefig(a.o, bbox_inches='tight', pad_inches=0.1, metadata=md)
-	print('wrote ' + a.o)
+	if not a.quiet:
+		print('wrote ' + a.o)
 
 def read_fasta(path):
 	names, seqs = [], []
@@ -103,67 +129,53 @@ def draw_alignment():
 		adjust_text(texts, only_move={'text': 'x', 'static': 'x', 'explode': 'x', 'pull': 'x'})
 	save(f)
 
-def parse_newick(s):
-	"""[name, branch length, children]; clustalo writes no quoted names."""
-	s = ''.join(s.split()).rstrip(';')
-	i = 0
-	def node():
-		nonlocal i
-		kids = []
-		if s[i] == '(':
-			i += 1
-			while True:
-				kids.append(node())
-				i += 1
-				if s[i - 1] == ')':
-					break
-		j = i
-		while i < len(s) and s[i] not in ',():':
-			i += 1
-		name, length = s[j:i], 0.0
-		if i < len(s) and s[i] == ':':
-			i += 1
-			j = i
-			while i < len(s) and s[i] not in ',()':
-				i += 1
-			length = float(s[j:i])
-		return [name, length, kids]
-	return node()
-
 def draw_tree():
+	try:
+		import Bio
+		from Bio import Phylo
+	except ImportError:
+		raise SystemExit('--tree needs Biopython, which Alien::Bioinf installs')
 	labels = json.loads(a.l) if a.l else {}
-	with open(a.tree) as fh:
-		root = parse_newick(fh.read())
-	tips, segs = [], []
-	def place(n, x):
-		# clustalo can write a slightly negative length; drawn as 0, as the
-		# ggtree script's ignore.negative.edge=TRUE did
-		x += max(n[1], 0.0)
-		if not n[2]:
-			tips.append((n[0], x))
-			return x, len(tips) - 1
-		ys = [place(k, x) for k in n[2]]
-		for kx, ky in ys:
-			segs.append([(x, ky), (kx, ky)])
-		segs.append([(x, ys[0][1]), (x, ys[-1][1])])
-		return x, (ys[0][1] + ys[-1][1]) / 2
-	place(root, 0.0)
-	right = max(x for _, x in tips)
+	with open(a.tree, 'rb') as fh:
+		raw = fh.read()
+	newick = raw.decode()
+	tree = Phylo.read(a.tree, 'newick')
+	# clustalo can write a slightly negative length; drawn as 0, as the
+	# ggtree script's ignore.negative.edge=TRUE did
+	clamped = 0
+	for clade in tree.find_clades():
+		if clade.branch_length is not None and clade.branch_length < 0:
+			clade.branch_length = 0.0
+			clamped += 1
+	tips = [c.name for c in tree.get_terminals()]
 	f, ax = plt.subplots(figsize=(10, 0.3 * len(tips) + 1))
-	ax.add_collection(LineCollection(segs, colors='black', linewidth=1))
-	# tip labels aligned at the right, joined to their tips by dotted lines
-	ax.add_collection(LineCollection([[(x, y), (right, y)] for y, (_, x) in enumerate(tips)],
-		colors='grey', linewidth=0.5, linestyle='dotted'))
-	for y, (name, _) in enumerate(tips):
-		ax.text(right * 1.02, y, labels.get(name, name), va='center')
-	ax.set_xlim(0, right * 1.02 if right else 1)
-	ax.set_ylim(len(tips) - 0.5, -0.5)
+	# Phylo.draw labels every clade for which label_func is not None, and only
+	# the tips have names
+	Phylo.draw(tree, axes=ax, do_show=False, show_confidence=False,
+		label_func=lambda c: labels.get(c.name, c.name) if c.is_terminal() else None)
 	ax.set_yticks([])
+	ax.set_ylabel('')
 	for side in ('right', 'top', 'left'):
 		ax.spines[side].set_visible(False)
 	ax.set_xlabel('substitutions per site')
 	ax.set_title(a.t)
-	save(f)
+	dc = json.loads(a.meta) if a.meta else {}
+	# to the second, with the UTC offset: matplotlib's own SVG Date is the day
+	# alone. SOURCE_DATE_EPOCH, where set, is left to matplotlib instead, so
+	# that a reproducible build stays reproducible.
+	if 'SOURCE_DATE_EPOCH' not in os.environ:
+		dc['Date'] = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
+	dc['Identifier'] = 'sha256:' + hashlib.sha256(raw).hexdigest() + ' of the newick file drawn'
+	desc = dc.get('Description', '')
+	if clamped:
+		desc += ' ' + str(clamped) + ' negative branch length' + ('s were' if clamped > 1 else ' was') + ' drawn as 0.'
+	shown = [t + (' (shown as ' + labels[t] + ')' if t in labels else '') for t in tips]
+	dc['Description'] = (desc + ' ' + str(len(tips)) + ' tips: ' + ', '.join(shown)
+		+ '. The tree as drawn, in newick: ' + ''.join(newick.split())).strip()
+	dc['Keywords'] = ['phylogenetic tree', 'newick'] + tips
+	dc['Contributor'] = dc.get('Contributor', []) + ['Python ' + platform.python_version() + ' (' + sys.executable + ')',
+		'matplotlib ' + matplotlib.__version__, 'Biopython ' + Bio.__version__, 'NumPy ' + np.__version__]
+	save(f, 'Biopython ' + Bio.__version__, {k: dc[k] for k in DC if k in dc})
 
 def draw_table():
 	with open(a.table) as fh:

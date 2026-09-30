@@ -5,6 +5,7 @@ use Test::More;
 use FindBin;
 use File::Temp qw(tempdir);
 use File::Spec::Functions qw(catfile);
+use Sys::Hostname ();
 use Bioinf::Basic qw(:all);
 # These run the clustalo, blastp and Python that Alien::Bioinf installed, on
 # t/data/DEG20010421.fa (see t/data/make_fixtures.pl). The clustal_view_residues
@@ -17,7 +18,7 @@ tr/-//d foreach values %{ $seqs };
 sub png { open my $fh, '<:raw', $_[0] or return ''; read $fh, my $b, 8; $b }
 sub slurp { open my $fh, '<:raw', $_[0] or return ''; local $/; <$fh> }
 # the Creator each image's metadata carries: an SVG's <dc:title>, a PNG's tEXt chunk
-sub creator { my ($sub, $by) = @_; qr/\Q$FindBin::RealScript\E called using "$sub" in \S+Basic\.pm version \Q$Bioinf::Basic::VERSION\E, drawn by $by/ }
+sub creator { my ($sub, $by) = @_; qr/\Q$FindBin::RealScript\E called using "$sub" in \S+Basic\.pm version \Q$Bioinf::Basic::VERSION\E on host \Q${\ Sys::Hostname::hostname()}\E \(\Q$^O\E, perl [\d.]+\), drawn by $by/ }
 my $by_py = qr/\S+msa_plot\.py with matplotlib [\d.]+/;
 
 # ---- plot_msa and plot_phylo -----------------------------------------------
@@ -35,29 +36,60 @@ is_deeply [sort keys %{ $aln }], [sort keys %{ $seqs }], 'the alignment has ever
 is scalar(keys %{ { map { length $_ => 1 } values %{ $aln } } }), 1, 'all of one length';
 is_deeply { map { (my $s = $aln->{$_}) =~ tr/-//d; $_ => uc $s } keys %{ $aln } }, $seqs, 'and gapped copies of the input';
 ok -s $out{'msa.svg'} && do { open my $fh, '<', $out{'msa.svg'}; local $/; <$fh> =~ /<svg/ }, 'an SVG alignment image';
-like slurp($out{'msa.svg'}), creator('plot_msa', $by_py), 'whose Creator names this script, the sub, the versions and matplotlib';
+like slurp($out{'msa.svg'}), creator('plot_msa', $by_py), 'whose Creator names this script, the sub, the versions, the host and matplotlib';
 open my $nw, '<', $out{'t.newick'} or die $!;
 like do { local $/; <$nw> }, qr/S\.cerevisiae:[\d.]+/, 'the guide tree is newick with the sequence names';
 close $nw;
 
-$r = plot_phylo('tree.file' => $out{'t.newick'}, filename => $out{'tree.png'}, title => 'DEG20010421',
+$r = plot_phylo('tree.file' => $out{'t.newick'}, 'output.file' => $out{'tree.png'}, title => 'DEG20010421',
 	labels => { 'S.cerevisiae' => '$\it{S. cerevisiae}$' });
-is_deeply $r, { filename => $out{'tree.png'}, 'tree.file' => $out{'t.newick'} }, 'plot_phylo draws the tree plot_msa kept';
+is_deeply $r, { 'output.file' => $out{'tree.png'}, 'tree.file' => $out{'t.newick'} }, 'plot_phylo draws the tree plot_msa kept';
 is png($out{'tree.png'}), "\x89PNG\r\n\x1a\n", 'a PNG tree image';
-like slurp($out{'tree.png'}), creator('plot_phylo', $by_py), 'and its Creator';
+my $tree_png = slurp($out{'tree.png'});
+like $tree_png, creator('plot_phylo', $by_py . qr/ and Biopython [\d.]+/), 'and its Creator, which names Biopython too';
+like $tree_png, qr/Source\0the newick file \Q$out{'t.newick'}\E \(SHA-256 [0-9a-f]{64}\)/, 'its Source is the newick file and its digest';
+like $tree_png, qr/Description\0Drawn from an existing newick file; no alignment was made\./, 'its Description says nothing was aligned';
 
 $r = plot_msa(fasta => $seqs, filename => catfile($dir, 'h.png'), order => ['S.cerevisiae', 'C.neoformans.JEC21']);
 is_deeply [sort keys %{ $r }], ['filename', 'msa.file'], 'plot_msa, a hash in: the image and a temporary alignment';
 is png($r->{filename}), "\x89PNG\r\n\x1a\n", 'a PNG, drawing only the sequences in "order"';
 
-$r = plot_phylo(fasta => $seqs, filename => catfile($dir, 'p.png'));
-is_deeply [sort keys %{ $r }], ['filename', 'msa.file'], 'plot_phylo, a hash in: it aligns, and the tree is temporary';
-is png($r->{filename}), "\x89PNG\r\n\x1a\n", 'a PNG tree image from the sequences';
+$r = plot_phylo(fasta => $seqs, 'output.file' => catfile($dir, 'p.png'));
+is_deeply [sort keys %{ $r }], ['msa.file', 'output.file'], 'plot_phylo, a hash in: it aligns, and the tree is temporary';
+is png($r->{'output.file'}), "\x89PNG\r\n\x1a\n", 'a PNG tree image from the sequences';
 
-foreach my $f (\&plot_msa, \&plot_phylo) {
+# "output.file" defaults to phylo.svg, in the working directory
+{
+	require Cwd;
+	require Digest::SHA;
+	my $was = Cwd::getcwd();
+	chdir $dir or die "can't chdir to $dir: $!";
+	my $keep = catfile($dir, 'kept.newick');
+	$r = plot_phylo(fasta => $fa, 'tree.file' => $keep, title => 'DEG20010421');
+	chdir $was or die "can't chdir back to $was: $!";
+	is_deeply [sort keys %{ $r }], ['msa.file', 'output.file', 'tree.file'], 'plot_phylo with no "output.file"';
+	is $r->{'output.file'}, 'phylo.svg', 'reports phylo.svg';
+	my $svg = slurp(catfile($dir, 'phylo.svg'));
+	like $svg, qr/<svg/, 'and writes it';
+	like $svg, qr{<dc:title>DEG20010421</dc:title>}, 'whose Title is the title';
+	like $svg, qr{<dc:date>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[-+]\d\d:\d\d</dc:date>}, 'whose Date is to the second, with its UTC offset';
+	my $fa_sha = Digest::SHA->new(256)->addfile($fa, 'b')->hexdigest;
+	like $svg, qr{<dc:source>the FASTA file \Q$fa\E \(SHA-256 $fa_sha\), written with its gaps stripped to \S+ \(SHA-256 [0-9a-f]{64}\), which Clustal Omega aligned into \S+ \(SHA-256 [0-9a-f]{64}\)</dc:source>},
+		'whose Source names the FASTA, the ungapped copy and the alignment, each with its digest';
+	like $svg, qr{<dc:description>The guide tree Clustal Omega [\d.]+ wrote while aligning 4 sequences, run as: \S+clustalo --in .*--guidetree-out=\Q$keep\E},
+		'whose Description is the clustalo command';
+	like $svg, qr{The tree as drawn, in newick: \(.*S\.cerevisiae:[\d.]+.*\);</dc:description>}, 'and the newick drawn';
+	my $nw_sha = Digest::SHA->new(256)->addfile($keep, 'b')->hexdigest;
+	like $svg, qr{<dc:identifier>sha256:$nw_sha of the newick file drawn</dc:identifier>}, 'whose Identifier is the digest of that newick';
+	like $svg, qr{<dc:relation>kept with it: tree\.file \Q$keep\E</dc:relation>}, 'whose Relation is the tree kept';
+	like $svg, qr{<dc:title>$_ [\d.]+}, "whose Contributors include $_" foreach 'Clustal Omega', 'Bioinf::Basic', 'Alien::Bioinf', 'perl', 'Python', 'matplotlib', 'Biopython', 'NumPy';
+	like $svg, qr{<rdf:li>S\.cerevisiae</rdf:li>}, 'and whose Keywords are the tips';
+}
+
+foreach my $f ([\&plot_msa, 'filename'], [\&plot_phylo, 'output.file']) {
 	my @w;
 	local $SIG{__WARN__} = sub { push @w, $_[0] };
-	is_deeply $f->(fasta => { a => 'MKV' }, filename => catfile($dir, 'one.png')), {}, 'one sequence: nothing made';
+	is_deeply $f->[0]->(fasta => { a => 'MKV' }, $f->[1] => catfile($dir, 'one.png')), {}, 'one sequence: nothing made';
 	like $w[0], qr/clustalo needs at least 2 sequences, and there is only 1/, 'and a warning says why';
 }
 my %two = (fasta => $seqs, filename => catfile($dir, 'x.png'));
@@ -75,11 +107,12 @@ foreach my $bad (
 	like $@, $bad->[1], "plot_msa dies: $bad->[1]";
 }
 foreach my $bad (
-	[{ filename => 'x.png' }, qr/needs "fasta" to align, or "tree.file" to draw/],
-	[{ filename => 'x.png', 'tree.file' => catfile($dir, 'none.newick') }, qr/none\.newick" doesn't exist/],
-	[{ filename => 'x.png', 'tree.file' => $out{'t.newick'}, threads => 2 }, qr/was given "threads" but no "fasta" to align/],
-	[{ %two, order => [] }, qr/doesn't know "order"/],
-	[{ fasta => $seqs }, qr/needs "filename"/],
+	[{ 'output.file' => 'x.png' }, qr/needs "fasta" to align, or "tree.file" to draw/],
+	[{}, qr/needs "fasta" to align, or "tree.file" to draw/],
+	[{ 'output.file' => 'x.png', 'tree.file' => catfile($dir, 'none.newick') }, qr/none\.newick" doesn't exist/],
+	[{ 'output.file' => 'x.png', 'tree.file' => $out{'t.newick'}, threads => 2 }, qr/was given "threads" but no "fasta" to align/],
+	[{ fasta => $seqs, 'output.file' => 'x.png', order => [] }, qr/doesn't know "order"/],
+	[{ fasta => $seqs, filename => 'x.png' }, qr/doesn't know "filename"/],
 ) {
 	eval { plot_phylo(%{ $bad->[0] }) };
 	like $@, $bad->[1], "plot_phylo dies: $bad->[1]";
@@ -96,8 +129,14 @@ foreach my $f (\&plot_msa, \&plot_phylo, \&msa_quality_table, \&clustal_view_res
 my $unaligned = hash2fasta_file($seqs, catfile($dir, 'u.fa'));
 my $json = catfile($dir, 'all.json');
 my $img = catfile($dir, 'q.png');
+is msa_quality_table(fasta => $fa, filename => $img), $img, 'a FASTA file in: blastp is run, into a temporary report';
+is png($img), "\x89PNG\r\n\x1a\n", 'a PNG table';
+unlink $img;
+msa_quality_table(fasta => $aln, filename => $img);
+is png($img), "\x89PNG\r\n\x1a\n", 'an aligned hash in: its gaps are stripped for blastp';
+unlink $img;
 is msa_quality_table('alignment.json' => $json, 'unaligned.fa' => $unaligned, filename => $img, metric => 'bit_score'), $img,
-	'blastp is run when "alignment.json" does not exist yet';
+	'blastp is run when "alignment.json" does not exist yet, on "unaligned.fa", the old name for "fasta"';
 ok -s $json, 'and its report kept';
 is png($img), "\x89PNG\r\n\x1a\n", 'a PNG table';
 like slurp($img), creator('msa_quality_table', $by_py), 'and its Creator';
@@ -108,9 +147,11 @@ unlink $img;
 msa_quality_table('alignment.json' => $json, filename => $img, normalize => 1, cblogscale => 1);
 is png($img), "\x89PNG\r\n\x1a\n", 'normalize and cblogscale together: a log scale from the smallest value above 0 to 1';
 foreach my $bad (
-	[{ filename => $img }, qr/needs "alignment.json"/],
+	[{ filename => $img }, qr/needs "fasta" to align, or an existing "alignment.json"/],
+	[{ filename => $img, fasta => $fa, 'unaligned.fa' => $fa }, qr/both "fasta" and "unaligned.fa"/],
+	[{ filename => $img, fasta => [] }, qr/"fasta" must be a FASTA file name or a hash ref/],
 	[{ filename => $img, 'alignment.json' => $json, metric => 'hseq' }, qr/"hseq" isn't one of the metrics/],
-	[{ filename => $img, 'alignment.json' => catfile($dir, 'new.json') }, qr/"unaligned.fa" must be given/],
+	[{ filename => $img, 'alignment.json' => catfile($dir, 'new.json') }, qr/needs "fasta" to align, or an existing "alignment.json" \(\S+new\.json doesn't exist yet\)/],
 	[{ filename => $img, 'alignment.json' => $json, order => ['nodot'] }, qr/can't get a genus and species from "nodot"/],
 ) {
 	eval { msa_quality_table(%{ $bad->[0] }) };
@@ -153,13 +194,18 @@ is body($tex), "$head$rows[0]\\end{tabular}\n\\caption{C}\n\\label{tab:L0}\n\\en
 clustal_view_residues(%view, 'msa.file' => $out{'aln.fa'}, 'color.residues' => {}, track => undef, 'row.width' => 100);
 like body($tex), qr/^\\textit\{S\.cerevisiae\} & \\texttt\{\Q${\ substr($aln->{'S.cerevisiae'}, 0, 100)}\E\} & \d+$/m,
 	'plot_msa\'s alignment is shown as it is';
+my $before = slurp($unaligned);
+is clustal_view_residues(%view, 'msa.file' => $unaligned, 'color.residues' => {}, track => undef, 'row.width' => 1e5), $tex, # 1 block, so every row is the full width
+	'sequences of different lengths are aligned rather than dying';
+my @shown = body($tex) =~ /^\\textit\{[^}]+\} & \\texttt\{([^}]*)\}/mg;
+ok @shown && (grep { /-/ } @shown) && !(grep { length $_ != length $shown[0] } @shown), 'into gapped rows of one width';
+is slurp($unaligned), $before, 'and "msa.file" is left as it was';
 foreach my $bad (
 	[{ %view, track => 'z' }, qr/tracker "z" isn't in the alignment/],
 	[{ %view, 'color.residues' => { z => {} } }, qr/names proteins that aren't in the alignment: z/],
 	[{ %view, 'color.residues' => { a => { 9 => 'red' } } }, qr/a has no residue 9/],
 	[{ %view, 'color.residues' => { a => { 1 => [1, 0] } } }, qr/must be a name or 3 numbers/],
 	[{ %view, order => ['z'] }, qr/"order" names proteins that aren't in the alignment: z/],
-	[{ %view, 'msa.file' => $unaligned }, qr/u\.fa isn't aligned: its sequences are of different lengths/],
 	[{ %view, 'msa.file' => catfile($dir, 'none.fa') }, qr/"msa.file" \S+none\.fa doesn't exist/],
 	[{ %view, fasta => $ab }, qr/doesn't know "fasta"/],
 	[{ %view, alignment => '\\centering' }, qr/doesn't know "alignment"/],

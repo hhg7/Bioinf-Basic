@@ -30,7 +30,7 @@ View sequences aligned in a latex file
 
 | Argument        | Default | Meaning |
 |-----------------|---------|-------------------------------------------------------------------------|
-| `msa.file`        | (required) | An already-aligned FASTA file, such as the one `plot_msa` keeps; its sequences must all be one length |
+| `msa.file`        | (required) | A FASTA file. If its sequences are all one length (such as the alignment `plot_msa` keeps) it is shown as it is; if not, it is first aligned with Clustal Omega into a temporary file, and `msa.file` itself is never written |
 | `output.tex.file` | (required) | The LaTeX file to write, meant to be `\input` into a document; it is also the return value |
 | `color.residues`  | none       | `{ protein => { residue number => colour } }`: residue numbers are 1-based, and a colour is an xcolor name or `[r, g, b]`; a coloured column is coloured in every protein |
 | `track`           | none       | A protein that gets a row under it showing its coloured residue numbers |
@@ -40,6 +40,8 @@ View sequences aligned in a latex file
 | `caption`         | empty      | The table caption |
 | `label`           | none       | Written as `\label{tab:label}`, or as `tab:label0`, `tab:label1`, ... when there is more than one table |
 | `table.text.size` | `\footnotesize` | The LaTeX size command put at the start of each table |
+| `threads`         | 1          | Threads for clustalo, when `msa.file` has to be aligned |
+| `clustal.args`    | none       | An array ref of further clustalo arguments, when `msa.file` has to be aligned |
 
 
 ## fasta2hash
@@ -54,9 +56,12 @@ Read a fasta file to a hash
 
 Write a FASTA to a file.
 
-
-
 ## msa_quality_table
+
+    msa_quality_table(
+    	fasta      => 't/data/DEG20010421.fa',  # or { name => sequence }, aligned or not
+    	filename   => 'DEG20010421.scores.png',
+    );
 
 ## plot_msa
 
@@ -67,10 +72,26 @@ Write a FASTA to a file.
 
 ## plot_phylo
 
+Draw a guide tree with Biopython's `Bio.Phylo`, from a FASTA (aligned with
+Clustal Omega first) or from a newick file that `plot_msa` kept. The image is
+`output.file`, `phylo.svg` by default:
+
+    plot_phylo(fasta => 't/data/DEG20010421.fa');   # writes phylo.svg
+    plot_phylo(
+    	'tree.file'   => 'DEG20010421.newick',
+    	'output.file' => 'DEG20010421.tree.png',
+    );
+
+The image records its own provenance: in an SVG's Dublin Core `<metadata>` (or
+a PNG's text chunks) are the date to the second, the input files and the
+alignment with each one's SHA-256, the exact clustalo command, the newick tree
+drawn and its SHA-256, and every program and library that took part, with its
+version.
+
 # COPYRIGHT AND LICENSE
 
 This software is free.  It is licensed under the same terms as Perl itself
 
 # Thanks
 
-A lot of this work used Claude AI, which was paid for by the University of Idaho's IMCI
+A lot of this work (not all!) used Claude AI, which was paid for by the University of Idaho's IMCI

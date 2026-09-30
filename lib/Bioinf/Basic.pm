@@ -17,6 +17,7 @@ use warnings;
 use Carp qw(croak carp);
 use Cwd 'getcwd';
 use FindBin '$RealScript';
+use Sys::Hostname 'hostname';
 use Exporter 'import';
 use XSLoader;
 our $VERSION = '0.01';
@@ -25,42 +26,46 @@ our @EXPORT = @EXPORT_OK;
 our %EXPORT_TAGS = (all => \@EXPORT_OK);
 XSLoader::load('Bioinf::Basic', $VERSION);
 
-# ---- private helpers --------------------------------------------------------
+# ---- private helpers
 
 # The name => value pairs in @$list as a hash ref. Dies unless they hold every
-# @$required key and nothing outside @$required and @$optional.
+# @$required key and nothing outside @$required and @$optional. Its messages
+# are prefixed with $sub, the public function whose arguments they are, not
+# with "_args".
 sub _args {
 	my ($list, $sub, $required, $optional) = @_;
-	croak "$sub takes name => value pairs, not a hash ref" if @{ $list } == 1 && ref $list->[0] eq 'HASH';
-	croak "$sub takes name => value pairs, and was given an odd number of arguments" if @{ $list } % 2;
+	croak "$sub: takes name => value pairs, not a hash ref" if @{ $list } == 1 && ref $list->[0] eq 'HASH';
+	croak "$sub: takes name => value pairs, and was given an odd number of arguments" if @{ $list } % 2;
 	my $args = { @{ $list } };
 	my @missing = grep { !defined $args->{$_} } @{ $required };
-	croak "$sub needs " . join(', ', map { "\"$_\"" } @missing) if @missing;
+	croak "$sub: needs " . join(', ', map { "\"$_\"" } @missing) if @missing;
 	my %ok = map { $_ => 1 } @{ $required }, @{ $optional };
 	my @bad = sort grep { !$ok{$_} } keys %{ $args };
-	croak "$sub doesn't know " . join(', ', map { "\"$_\"" } @bad) . '; it takes ' . join(', ', sort keys %ok) if @bad;
+	croak "$sub: doesn't know " . join(', ', map { "\"$_\"" } @bad) . '; it takes ' . join(', ', sort keys %ok) if @bad;
 	$args;
 }
 
 # The "Creator" written into an image's metadata, after the one
 # Matplotlib::Simple writes:
-# which script, run where, called which sub of which version of this module.
+# which script, run where, called which sub of which version of this module,
+# on which computer (its hostname, OS and perl).
 sub _creator {
 	my ($sub) = @_;
-	getcwd() . "/$RealScript called using \"$sub\" in " . __FILE__ . " version $VERSION";
+	getcwd() . "/$RealScript called using \"$sub\" in " . __FILE__ . " version $VERSION on host " . hostname()
+		. " ($^O, perl " . sprintf('%vd', $^V) . ')';
 }
 
 sub _json_file {
 	my ($file) = @_;
 	require JSON::MaybeXS;
-	open my $fh, '<:raw', $file or croak "can't read $file: $!";
+	open my $fh, '<:raw', $file or croak "_json_file: can't read $file: $!";
 	local $/;
 	JSON::MaybeXS::decode_json(<$fh>);
 }
 
 sub _run {
 	my @cmd = @_;
-	system(@cmd) == 0 or croak "\"@cmd\" failed: " . ($? == -1 ? $! : 'exit ' . ($? >> 8));
+	system(@cmd) == 0 or croak "_run: \"@cmd\" failed: " . ($? == -1 ? $! : 'exit ' . ($? >> 8));
 }
 
 sub _tmp {
@@ -88,12 +93,12 @@ sub _fasta_ordered {
 
 sub _open_fasta {
 	my ($file) = @_;
-	croak "\"$file\" doesn't exist or isn't a readable file" unless defined $file && -f $file && -r _;
+	croak "_open_fasta: \"$file\" doesn't exist or isn't a readable file" unless defined $file && -f $file && -r _;
 	my $fh;
 	if ($file =~ /\.gz\z/) {
-		open $fh, '-|', 'gzip', '-dc', $file or croak "can't run gzip on $file: $!";
+		open $fh, '-|', 'gzip', '-dc', $file or croak "_open_fasta: can't run gzip on $file: $!";
 	} else {
-		open $fh, '<:raw', $file or croak "can't read $file: $!";
+		open $fh, '<:raw', $file or croak "_open_fasta: can't read $file: $!";
 	}
 	$fh;
 }
@@ -101,7 +106,7 @@ sub _open_fasta {
 sub _first_letter {
 	my ($string) = @_;
 	return $1 if $string =~ /^([A-Za-z])/;
-	croak "\"$string\" doesn't start with a letter, so it has no first letter";
+	croak "_first_letter: \"$string\" doesn't start with a letter, so it has no first letter";
 }
 
 # Narrow but unambiguous labels, e.g. "$\it{C.al.}$", for [genus, species,
@@ -122,10 +127,10 @@ sub _abbreviated_labels {
 		my %seen;
 		return \@labels unless grep { $seen{$_}++ } @labels;
 	}
-	croak "can't tell " . join(', ', map { join '.', @{ $_ } } @{ $names }) . ' apart, even with the full species name and strain';
+	croak "_abbreviated_labels: can't tell " . join(', ', map { join '.', @{ $_ } } @{ $names }) . ' apart, even with the full species name and strain';
 }
 
-# ---- FASTA ------------------------------------------------------------------
+# ---- FASTA
 
 sub fasta2hash {
 	my ($file, $key) = @_;
@@ -136,24 +141,24 @@ sub fasta2hash {
 	close $fh;
 	if (defined $key) {
 		return $r if defined $r;
-		croak "couldn't find \"$key\" in $file";
+		croak "fasta2hash: couldn't find \"$key\" in $file";
 	}
-	croak "couldn't find any sequences in $file" unless %{ $r };
+	croak "fasta2hash: couldn't find any sequences in $file" unless %{ $r };
 	$r;
 }
 
 sub hash2fasta_file {
 	my ($hash, $filename, $order, $width) = @_;
-	croak '1st argument to hash2fasta_file must be a hash ref' unless ref $hash eq 'HASH';
-	croak '2nd argument to hash2fasta_file must be a file name' unless defined $filename && ref $filename eq '';
-	croak '3rd argument to hash2fasta_file must be an array ref or undef' if defined $order && ref $order ne 'ARRAY';
-	open my $fh, '>:raw', $filename or croak "can't write $filename: $!";
+	croak "hash2fasta_file: 1st argument must be a hash ref" unless ref $hash eq 'HASH';
+	croak "hash2fasta_file: 2nd argument must be a file name" unless defined $filename && ref $filename eq '';
+	croak "hash2fasta_file: 3rd argument must be an array ref or undef" if defined $order && ref $order ne 'ARRAY';
+	open my $fh, '>:raw', $filename or croak "hash2fasta_file: can't write $filename: $!";
 	_write_fasta($fh, $hash, $order // [sort keys %{ $hash }], $width // 80);
-	close $fh or croak "can't write $filename: $!";
+	close $fh or croak "hash2fasta_file: can't write $filename: $!";
 	$filename;
 }
 
-# ---- BLAST ------------------------------------------------------------------
+# ---- BLAST
 
 sub get_best_alignment_hit {
 	my ($json_file, $sort_criterion) = @_;
@@ -166,22 +171,22 @@ sub get_best_alignment_hit {
 	# share a title (one protein deposited under two accessions): in
 	# identify.target/potato/new/f.sambunicum.json 76 hits carry 44 distinct
 	# titles, and a hash kept 44.
-	croak "\"$json_file\" doesn't exist or isn't a readable file" unless defined $json_file && -f $json_file && -r _;
+	croak "get_best_alignment_hit: \"$json_file\" doesn't exist or isn't a readable file" unless defined $json_file && -f $json_file && -r _;
 	# Which way is better for each numeric hsp field: -1 = smaller, 1 = larger.
 	# The other hsp keys (hseq, qseq, midline, num, *_from/*_to) are content
 	# or position, not quality.
 	my %better = (align_len => 1, bit_score => 1, evalue => -1, gaps => -1, identity => 1, positive => 1, score => 1);
 	my $direction = $better{$sort_criterion}
-		// croak "\"$sort_criterion\" isn't a sortable hsp field; use one of " . join(', ', sort keys %better);
+		// croak "get_best_alignment_hit: \"$sort_criterion\" isn't a sortable hsp field; use one of " . join(', ', sort keys %better);
 	my $blast = _json_file($json_file);
 	my %alignments;
 	foreach my $report (@{ $blast->{BlastOutput2} }) {
 		my @hits;
 		foreach my $hit (@{ $report->{report}{results}{search}{hits} }) {
-			croak 'a hit has more than 1 description' if @{ $hit->{description} } > 1;
+			croak "get_best_alignment_hit: a hit has more than 1 description" if @{ $hit->{description} } > 1;
 			my $best; # undef until an hsp is seen; a hit with no hsps has nothing to record
 			foreach my $hsp (@{ $hit->{hsps} }) {
-				croak "an hsp of \"$hit->{description}[0]{title}\" in $json_file has no \"$sort_criterion\" to sort on"
+				croak "get_best_alignment_hit: an hsp of \"$hit->{description}[0]{title}\" in $json_file has no \"$sort_criterion\" to sort on"
 					unless defined $hsp->{$sort_criterion};
 				unless (defined $best) {
 					$best = $hsp;
@@ -216,57 +221,68 @@ sub get_best_alignment_hit {
 	\%alignments;
 }
 
-# ---- alignment plots and tables ---------------------------------------------
+# ---- alignment plots and tabless
+
+# "fasta" -- a FASTA file name or a hash ref of name => sequence -- written to a
+# temporary FASTA file with its gaps stripped, so that an input that is already
+# aligned is aligned afresh. clustalo's --dealign does the same, but prints a
+# "FORCED DEBUG" warning about them first; blastp would take a gap for a residue.
+# Returns that file and the sequence names in input order (sorted for a hash).
+sub _ungapped_fasta {
+	my ($fasta) = @_;
+	my ($seqs, @names);
+	if (ref $fasta eq 'HASH') {
+		$seqs = $fasta;
+		@names = sort keys %{ $seqs };
+	} elsif (ref $fasta eq '') {
+		my $order;
+		($seqs, $order) = _fasta_ordered($fasta);
+		@names = @{ $order };
+	} else {
+		croak "_ungapped_fasta: \"fasta\" must be a FASTA file name or a hash ref of name => sequence, not a " . ref($fasta) . ' ref';
+	}
+	my %ungapped = map { (my $s = $seqs->{$_}) =~ tr/-.//d; $_ => $s } @names;
+	(hash2fasta_file(\%ungapped, _tmp('.fa'), \@names), \@names);
+}
 
 # Aligns "fasta" with clustalo for $sub. The alignment goes to "msa.file" and
 # the guide tree to "tree.file" when those are given, and to temporary files
 # otherwise; the tree is not asked for at all unless it is kept or $want_tree.
 # Returns the hash ref of files to report (the alignment always, the tree only
-# when it was named), the tree's file, and the sequence names in input order
-# (sorted for a hash); or nothing, after a warning, for fewer than 2 sequences.
+# when it was named), the tree's file, the sequence names in input order
+# (sorted for a hash), and an array ref of the clustalo command as it was run,
+# with the ungapped FASTA it read as its "--in"; or nothing, after a warning,
+# for fewer than 2 sequences.
 sub _align {
 	my ($args, $sub, $want_tree) = @_;
-	my ($seqs, @names);
-	if (ref $args->{fasta} eq 'HASH') {
-		$seqs = $args->{fasta};
-		@names = sort keys %{ $seqs };
-	} elsif (ref $args->{fasta} eq '') {
-		my $order;
-		($seqs, $order) = _fasta_ordered($args->{fasta});
-		@names = @{ $order };
-	} else {
-		croak "\"fasta\" must be a FASTA file name or a hash ref of name => sequence, not a " . ref($args->{fasta}) . ' ref';
-	}
-	if (@names < 2) {
-		carp "$sub: clustalo needs at least 2 sequences, and there " . (@names ? 'is only 1' : 'are none');
+	my ($in, $names) = _ungapped_fasta($args->{fasta});
+	if (@{ $names } < 2) {
+		carp "$sub: clustalo needs at least 2 sequences, and there " . (@{ $names } ? 'is only 1' : 'are none');
 		return;
 	}
-	# Gaps are stripped here, so an already-aligned input is realigned; clustalo's
-	# --dealign does the same, but prints a "FORCED DEBUG" warning about them first.
-	my %ungapped = map { (my $s = $seqs->{$_}) =~ tr/-.//d; $_ => $s } @names;
-	my $in = hash2fasta_file(\%ungapped, _tmp('.fa'), \@names);
 	my %r = ('msa.file' => $args->{'msa.file'} // _tmp('.aln.fa'));
 	my $tree = $args->{'tree.file'} // ($want_tree ? _tmp('.newick') : undef);
 	$r{'tree.file'} = $tree if defined $args->{'tree.file'};
 	require Alien::Bioinf;
-	_run(Alien::Bioinf->clustalo, '--in', $in, '--out', $r{'msa.file'}, '--outfmt=fa', '--force',
+	my @cmd = (Alien::Bioinf->clustalo, '--in', $in, '--out', $r{'msa.file'}, '--outfmt=fa', '--force',
 		'--threads', $args->{threads} // 1, (defined $tree ? "--guidetree-out=$tree" : ()), @{ $args->{'clustal.args'} // [] });
-	(\%r, $tree, \@names);
+	_run(@cmd);
+	(\%r, $tree, $names, \@cmd);
 }
 
 sub plot_msa {
 	my $sub = 'plot_msa';
 	my $args = _args(\@_, $sub, [qw(fasta filename)], [qw(active.site.aa clustal.args labels msa.file order query threads title
 		tree.file xlabel ylabel)]);
-	croak "$sub needs \"query\" to place \"active.site.aa\"" if defined $args->{'active.site.aa'} && !defined $args->{query};
+	croak "$sub: needs \"query\" to place \"active.site.aa\"" if defined $args->{'active.site.aa'} && !defined $args->{query};
 	my ($r, undef, $names) = _align($args, $sub, 0) or return {};
 	my $aln = fasta2hash($r->{'msa.file'});
 	my @order = @{ $args->{order} // $names };
 	my @unknown = grep { !defined $aln->{$_} } @order;
-	croak "\"order\" names sequences that aren't in the alignment: @unknown" if @unknown;
+	croak "$sub: \"order\" names sequences that aren't in the alignment: @unknown" if @unknown;
 	my @segments;
 	if (defined $args->{'active.site.aa'}) {
-		my $q = $aln->{ $args->{query} } // croak "the query \"$args->{query}\" isn't in the alignment";
+		my $q = $aln->{ $args->{query} } // croak "$sub: the query \"$args->{query}\" isn't in the alignment";
 		# 1-based residue number => 0-based alignment column
 		my (@col, %sites);
 		while ($q =~ /[^-]/g) {
@@ -274,7 +290,7 @@ sub plot_msa {
 		}
 		foreach my $label (sort keys %{ $args->{'active.site.aa'} }) {
 			my $n = $args->{'active.site.aa'}{$label};
-			$sites{$label} = $col[$n - 1] // croak "active site $label ($n) is past the end of \"$args->{query}\", which has " . scalar(@col) . ' residues';
+			$sites{$label} = $col[$n - 1] // croak "$sub: active site $label ($n) is past the end of \"$args->{query}\", which has " . scalar(@col) . ' residues';
 		}
 		require JSON::MaybeXS;
 		@segments = ('--s', JSON::MaybeXS::encode_json(\%sites));
@@ -283,60 +299,113 @@ sub plot_msa {
 	my %shown = map { ($labels->{$_} // $_) => $aln->{$_} } @order;
 	my $fa = hash2fasta_file(\%shown, _tmp('.fa'), [map { $labels->{$_} // $_ } @order], 0);
 	require Alien::Bioinf;
-	_run(Alien::Bioinf->python, _script(), '--f', $fa, '--o', $args->{filename}, '--c', _creator($sub),
+	_run(Alien::Bioinf->python, _script(), '--f', $fa, '--o', $args->{filename}, '--c', _creator($sub), '--quiet',
 		(defined $args->{title} ? ('--t', $args->{title}) : ()),
 		(defined $args->{xlabel} ? ('--x', $args->{xlabel}) : ()),
 		(defined $args->{ylabel} ? ('--y', $args->{ylabel}) : ()), @segments);
+	# Black (30) on yellow (43), then reset (0), written out rather than loaded
+	# from Term::ANSIColor; the reset comes before the newline so the colour
+	# doesn't run on into the next line.
+	print STDOUT "\e[30;43mwrote $args->{filename}\e[0m\n";
 	$r->{filename} = $args->{filename};
 	$r;
 }
 
+# "path (SHA-256 hex)" of an existing file, for the provenance of an image.
+sub _file_id {
+	my ($file) = @_;
+	require Digest::SHA;
+	require File::Spec;
+	File::Spec->rel2abs($file) . ' (SHA-256 ' . Digest::SHA->new(256)->addfile($file, 'b')->hexdigest . ')';
+}
+
+# Everything plot_phylo knows about where its tree came from, as the Dublin
+# Core fields msa_plot.py writes into the image beside the Creator: what was
+# read (Source), how the tree was made (Description), the files kept with it
+# (Relation), and the Perl-side software that took part (Contributor). $cmd,
+# $names and $msa are what _align returned, and undef when nothing was aligned.
+# msa_plot.py adds the date, the newick it drew and its digest, the tip names,
+# and its own Python, matplotlib, Biopython and NumPy.
+sub _phylo_provenance {
+	my ($args, $tree, $cmd, $names, $msa) = @_;
+	require Alien::Bioinf;
+	require File::Spec;
+	my $v = Alien::Bioinf->versions;
+	my %p = (Title => $args->{title} // 'Phylogenetic tree');
+	my @contrib = ("Bioinf::Basic $VERSION (" . __FILE__ . ')', "Alien::Bioinf $Alien::Bioinf::VERSION",
+		"perl " . sprintf('%vd', $^V) . " ($^X)");
+	if (defined $cmd) {
+		my $fasta = $args->{fasta};
+		# $cmd->[2] is clustalo's "--in", the ungapped copy _ungapped_fasta wrote
+		$p{Source} = (ref $fasta ? 'a hash ref of ' . scalar(@{ $names }) . ' sequences' : 'the FASTA file ' . _file_id($fasta))
+			. ', written with its gaps stripped to ' . _file_id($cmd->[2]) . ', which Clustal Omega aligned into '
+			. _file_id($msa);
+		$p{Description} = "The guide tree Clustal Omega $v->{clustalo} wrote while aligning "
+			. scalar(@{ $names }) . ' sequences, run as: ' . join(' ', map { /[^\w\/.,:=+-]/ ? "'$_'" : $_ } @{ $cmd }) . '.';
+		unshift @contrib, "Clustal Omega $v->{clustalo} ($cmd->[0])";
+		my @kept = map { defined $args->{$_} ? "$_ " . File::Spec->rel2abs($args->{$_}) : () } qw(msa.file tree.file);
+		$p{Relation} = 'kept with it: ' . join('; ', @kept) if @kept;
+	} else {
+		$p{Source} = 'the newick file ' . _file_id($tree);
+		$p{Description} = 'Drawn from an existing newick file; no alignment was made.';
+	}
+	$p{Contributor} = \@contrib;
+	\%p;
+}
+
 sub plot_phylo {
 	my $sub = 'plot_phylo';
-	my $args = _args(\@_, $sub, ['filename'], [qw(clustal.args fasta labels msa.file threads title tree.file)]);
-	my ($r, $tree);
+	my $args = _args(\@_, $sub, [], [qw(clustal.args fasta labels msa.file output.file threads title tree.file)]);
+	$args->{'output.file'} //= 'phylo.svg';
+	my ($r, $tree, $names, $cmd);
 	if (defined $args->{fasta}) {
-		($r, $tree) = _align($args, $sub, 1) or return {};
+		($r, $tree, $names, $cmd) = _align($args, $sub, 1) or return {};
 	} else {
 		# no alignment to make, so "tree.file" is the tree to draw, not where to keep one
-		$tree = $args->{'tree.file'} // croak "$sub needs \"fasta\" to align, or \"tree.file\" to draw";
+		$tree = $args->{'tree.file'} // croak "$sub: needs \"fasta\" to align, or \"tree.file\" to draw";
 		my @moot = grep { defined $args->{$_} } qw(clustal.args msa.file threads);
-		croak "$sub was given " . join(', ', map { "\"$_\"" } @moot) . ' but no "fasta" to align' if @moot;
-		croak "\"$tree\" doesn't exist or isn't a readable file" unless -f $tree && -r _;
+		croak "$sub: was given " . join(', ', map { "\"$_\"" } @moot) . ' but no "fasta" to align' if @moot;
+		croak "$sub: \"$tree\" doesn't exist or isn't a readable file" unless -f $tree && -r _;
 		$r = { 'tree.file' => $tree };
 	}
 	my $labels = $args->{labels} // {};
 	require Alien::Bioinf;
 	require JSON::MaybeXS;
-	_run(Alien::Bioinf->python, _script(), '--tree', $tree, '--o', $args->{filename}, '--c', _creator($sub),
+	_run(Alien::Bioinf->python, _script(), '--tree', $tree, '--o', $args->{'output.file'}, '--c', _creator($sub),
+		'--meta', JSON::MaybeXS::encode_json(_phylo_provenance($args, $tree, $cmd, $names, $r->{'msa.file'})),
 		(defined $args->{title} ? ('--t', $args->{title}) : ()),
 		(%{ $labels } ? ('--l', JSON::MaybeXS::encode_json($labels)) : ()));
-	$r->{filename} = $args->{filename};
+	$r->{'output.file'} = $args->{'output.file'};
 	$r;
 }
 
 sub msa_quality_table {
 	my $sub = 'msa_quality_table';
-	my $args = _args(\@_, $sub, ['filename'], [qw(alignment.json cb_label cb_max cb_min cblogscale default_undefined logscale.add metric
-		msa.file normalize order show.numbers title unaligned.fa)]);
+	my $args = _args(\@_, $sub, ['filename'], [qw(alignment.json cb_label cb_max cb_min cblogscale default_undefined fasta
+		logscale.add metric msa.file normalize order show.numbers title unaligned.fa)]);
 	my %metric = map { $_ => 1 } qw(num bit_score score evalue identity positive align_len);
 	my $metric = $args->{metric} // 'score';
-	croak "\"$metric\" isn't one of the metrics: " . join(', ', sort keys %metric) unless $metric{$metric};
+	croak "$sub: \"$metric\" isn't one of the metrics: " . join(', ', sort keys %metric) unless $metric{$metric};
+	# "unaligned.fa" is the old name for "fasta"
+	croak "$sub: was given both \"fasta\" and \"unaligned.fa\", which are the same thing" if defined $args->{fasta} && defined $args->{'unaligned.fa'};
+	my $fasta = $args->{fasta} // $args->{'unaligned.fa'};
 	# All-against-all blastp of the sequences: given as the parsed report, read
-	# from "alignment.json", or -- when that file does not exist yet -- made by
-	# running blastp on "unaligned.fa" and saved there for next time.
+	# from "alignment.json", or -- when that file does not exist yet, or none is
+	# named -- made by running blastp on "fasta", and kept in "alignment.json"
+	# for next time if that is named.
 	my $aj = $args->{'alignment.json'};
-	croak "$sub needs \"alignment.json\"" unless defined $aj;
 	my $blast;
 	if (ref $aj eq 'HASH') {
 		$blast = $aj;
-	} elsif (-f $aj) {
+	} elsif (defined $aj && -f $aj) {
 		$blast = _json_file($aj);
 	} else {
-		my $fa = $args->{'unaligned.fa'} // croak "\"unaligned.fa\" must be given when \"alignment.json\" ($aj) doesn't exist yet";
-		croak "\"$fa\" isn't a readable file, so blastp can't be run on it" unless -f $fa && -r _;
+		croak "$sub: needs \"fasta\" to align, or an existing \"alignment.json\"" . (defined $aj ? " ($aj doesn't exist yet)" : '')
+			unless defined $fasta;
+		my ($in) = _ungapped_fasta($fasta);
+		$aj //= _tmp('.json');
 		require Alien::Bioinf;
-		_run(Alien::Bioinf->blast('blastp'), '-query', $fa, '-subject', $fa, '-out', $aj, '-outfmt', 15);
+		_run(Alien::Bioinf->blast('blastp'), '-query', $in, '-subject', $in, '-out', $aj, '-outfmt', 15);
 		$blast = _json_file($aj);
 	}
 	my (%data, $max);
@@ -349,11 +418,11 @@ sub msa_quality_table {
 			}
 		}
 	}
-	croak "no \"$metric\" values in the BLAST report" unless defined $max;
+	croak "$sub: no \"$metric\" values in the BLAST report" unless defined $max;
 	my @order = @{ $args->{order} // [sort { lc $a cmp lc $b } keys %data] };
 	my (@row_labels, @names);
 	foreach my $key (@order) {
-		my ($genus, $species) = $key =~ /^([^.]+)\.(.+)/ or croak "can't get a genus and species from \"$key\"";
+		my ($genus, $species) = $key =~ /^([^.]+)\.(.+)/ or croak "$sub: can't get a genus and species from \"$key\"";
 		my ($sp, @strain) = split /\./, $species; # C.neoformans.B.3501A
 		push @names, [$genus, $sp, "@strain"];
 		push @row_labels, '$\it{' . ucfirst(_first_letter($genus)) . ". $sp}\$" . (@strain ? " @strain" : '');
@@ -384,17 +453,17 @@ sub msa_quality_table {
 	@{ $args }{qw(cb_min cb_max)} = ($log ? undef : 0, 1) if $norm;
 	$lo = $args->{cb_min} // ($log ? $lo_positive : $lo);
 	$hi = $args->{cb_max} // $hi;
-	croak '"cblogscale" needs a value above 0 to start the scale at, or a "cb_min" above 0' if $log && (!defined $lo || $lo <= 0);
+	croak "$sub: \"cblogscale\" needs a value above 0 to start the scale at, or a \"cb_min\" above 0" if $log && (!defined $lo || $lo <= 0);
 	require JSON::MaybeXS;
 	my $table = _tmp('.json');
-	open my $fh, '>:raw', $table or croak "can't write $table: $!";
+	open my $fh, '>:raw', $table or croak "$sub: can't write $table: $!";
 	print {$fh} JSON::MaybeXS::encode_json({
 		cells => \@cells, cols => \@col_labels, rows => \@row_labels, vmin => $lo + 0, vmax => $hi + 0,
 		log => $log ? JSON::MaybeXS::true() : JSON::MaybeXS::false(),
 		numbers => $args->{'show.numbers'} ? JSON::MaybeXS::true() : JSON::MaybeXS::false(),
 		title => $args->{title} // '', cblabel => $args->{cb_label},
 	});
-	close $fh or croak "can't write $table: $!";
+	close $fh or croak "$sub: can't write $table: $!";
 	require Alien::Bioinf;
 	_run(Alien::Bioinf->python, _script(), '--table', $table, '--o', $args->{filename}, '--c', _creator($sub));
 	$args->{filename};
@@ -402,28 +471,36 @@ sub msa_quality_table {
 
 sub clustal_view_residues {
 	my $sub = 'clustal_view_residues';
-	# msa.file: an aligned FASTA file, such as plot_msa's; color.residues:
+	# msa.file: a FASTA file, aligned (such as plot_msa's) or not; color.residues:
 	# {protein => {1-based residue number => colour}}, the colour an xcolor
 	# name or an [r, g, b] ref; order: proteins top to bottom; row.width:
 	# columns per block (100); split: blocks per LaTeX table (4); track: a
-	# protein whose coloured residue numbers get a row of their own.
-	my $args = _args(\@_, $sub, ['msa.file', 'output.tex.file'], [qw(caption color.residues label order
-		row.width split table.text.size track)]);
+	# protein whose coloured residue numbers get a row of their own; threads and
+	# clustal.args: for clustalo, if msa.file has to be aligned.
+	my $args = _args(\@_, $sub, ['msa.file', 'output.tex.file'], [qw(caption clustal.args color.residues label
+		order row.width split table.text.size threads track)]);
 	my $color = $args->{'color.residues'} // {};
-	croak '"color.residues" must be a hash ref' unless ref $color eq 'HASH';
-	croak "\"msa.file\" $args->{'msa.file'} doesn't exist" unless -e $args->{'msa.file'};
+	croak "$sub: \"color.residues\" must be a hash ref" unless ref $color eq 'HASH';
+	croak "$sub: \"msa.file\" $args->{'msa.file'} doesn't exist" unless -e $args->{'msa.file'};
 	my $data = fasta2hash($args->{'msa.file'});
-	croak "$sub has no sequences to show in $args->{'msa.file'}" unless %{ $data };
+	croak "$sub: has no sequences to show in $args->{'msa.file'}" unless %{ $data };
 	my %len = map { length $_ => 1 } values %{ $data };
-	croak "$args->{'msa.file'} isn't aligned: its sequences are of different lengths" if keys %len != 1;
+	if (keys %len > 1) {
+		# Sequences of different lengths can't be an alignment, so align them,
+		# into a temporary file: "msa.file" is the input, and is never written.
+		my %clustal = map { $_ => $args->{$_} } grep { defined $args->{$_} } qw(clustal.args threads);
+		my ($r) = _align({ %clustal, fasta => $args->{'msa.file'} }, $sub, 0);
+		$data = fasta2hash($r->{'msa.file'});
+		%len = map { length $_ => 1 } values %{ $data };
+	}
 	my $track = $args->{track};
-	croak "tracker \"$track\" isn't in the alignment" if defined $track && !defined $data->{$track};
+	croak "$sub: tracker \"$track\" isn't in the alignment" if defined $track && !defined $data->{$track};
 	my ($aln_len) = keys %len;
 	my @undef = grep { !defined $data->{$_} } sort keys %{ $color };
-	croak "\"color.residues\" names proteins that aren't in the alignment: @undef" if @undef;
+	croak "$sub: \"color.residues\" names proteins that aren't in the alignment: @undef" if @undef;
 	my @proteins = @{ $args->{order} // [sort { lc $a cmp lc $b } keys %{ $data }] };
 	my @bad = grep { !defined $data->{$_} } @proteins;
-	croak "\"order\" names proteins that aren't in the alignment: @bad" if @bad;
+	croak "$sub: \"order\" names proteins that aren't in the alignment: @bad" if @bad;
 	my $width = $args->{'row.width'} // 100;
 	# Alignment column => colour, and for the tracked protein column => its
 	# residue number. A coloured column is coloured in every protein.
@@ -435,8 +512,8 @@ sub clustal_view_residues {
 		}
 		foreach my $n (sort { $a <=> $b } keys %{ $color->{$protein} }) {
 			my $c = $color->{$protein}{$n};
-			my $col = $col[$n - 1] // croak "$protein has no residue $n";
-			croak "the colour of $protein residue $n must be a name or 3 numbers" if ref $c && (ref $c ne 'ARRAY' || @{ $c } != 3);
+			my $col = $col[$n - 1] // croak "$sub: $protein has no residue $n";
+			croak "$sub: the colour of $protein residue $n must be a name or 3 numbers" if ref $c && (ref $c ne 'ARRAY' || @{ $c } != 3);
 			$col_color{$col} = $c;
 			$col_number{$col} = $n if defined $track && $protein eq $track;
 		}
@@ -473,7 +550,7 @@ sub clustal_view_residues {
 	my $per_table = ($args->{split} // 4) * (1 + @proteins + (defined $track ? 1 : 0));
 	my $size = $args->{'table.text.size'} // '\footnotesize';
 	my $caption = $args->{caption} // '';
-	open my $tex, '>', $args->{'output.tex.file'} or croak "can't write $args->{'output.tex.file'}: $!";
+	open my $tex, '>', $args->{'output.tex.file'} or croak "$sub: can't write $args->{'output.tex.file'}: $!";
 	print {$tex} "%written by $0, calling $sub in " . __FILE__ . "\n";
 	my $n_tables = int((@table + $per_table - 1) / $per_table);
 	foreach my $t (0 .. $n_tables - 1) {
@@ -486,7 +563,7 @@ sub clustal_view_residues {
 		print {$tex} "\\label{tab:$args->{label}", ($n_tables > 1 ? $t : ''), "}\n" if defined $args->{label};
 		print {$tex} "\\end{table} \\FloatBarrier\n";
 	}
-	close $tex or croak "can't write $args->{'output.tex.file'}: $!";
+	close $tex or croak "$sub: can't write $args->{'output.tex.file'}: $!";
 	# LikeR's write_table confirmation line: black (30) on cyan (46), then
 	# reset (0), written out rather than loaded from Term::ANSIColor.
 	print STDOUT "wrote \e[30;46m$args->{'output.tex.file'}\e[0m\n";
@@ -518,15 +595,25 @@ __END__
 =head1 DESCRIPTION
 
 Nothing is exported by default; ask for functions by name or with C<:all>.
-Every function dies (via L<Carp/croak>) on bad arguments. C<plot_msa>,
+Every function dies (via L<Carp/croak>) on bad arguments, with a message that
+starts with the name of the function that raised it, as in
+C<fasta2hash: couldn't find "four" in x.fa>. C<plot_msa>,
 C<plot_phylo>, C<msa_quality_table> and C<clustal_view_residues> take
 C<< name => value >> pairs, not a hash ref.
 
 Every PNG, SVG, PDF, PS or EPS image these functions draw carries its
 provenance as C<Creator> metadata: the calling script (as the working
 directory plus the script's name, like Matplotlib::Simple), the function,
-this file and its version, and what drew it: C<msa_plot.py> and the
-matplotlib version.
+this file and its version, the computer it ran on (hostname, operating system
+and perl version), and what drew it: C<msa_plot.py> and the matplotlib
+version, and for a tree the Biopython version too. For example:
+
+  /home/me/work/run.pl called using "plot_msa" in /.../Bioinf/Basic.pm
+  version 0.01 on host myhost (linux, perl 5.44.0), drawn by /.../msa_plot.py
+  with matplotlib 3.10.0
+
+An SVG holds it in C<< <dc:creator> >>; C<exiftool> or C<identify -verbose>
+shows it in a PNG or PDF.
 
 Clustal Omega, BLAST+ and the Python that draws the plots are the ones
 L<Alien::Bioinf> installed alongside this module. See there to check them for
@@ -561,6 +648,8 @@ order.
 
 Aligns sequences with Clustal Omega and draws the alignment. Returns a hash ref
 of the files made: C<filename>, C<msa.file>, and C<tree.file> if it was given.
+Once the image is written it prints C<wrote> and its file name to STDOUT, in
+black on yellow.
 
 =over
 
@@ -603,14 +692,17 @@ With fewer than two sequences it warns and returns an empty hash ref.
 
 =head2 plot_phylo(%args)
 
-Draws a guide tree. Returns a hash ref of the files made or used:
-C<filename>, and C<tree.file> and C<msa.file> as below.
+Draws a guide tree, with Biopython's C<Bio.Phylo>. Returns a hash ref of the
+files made or used: C<output.file>, and C<tree.file> and C<msa.file> as below.
+
+ plot_phylo(fasta => 'orthologs.fa');   # writes phylo.svg
 
 =over
 
-=item filename (required)
+=item output.file
 
-The image to draw; the extension picks the format.
+The image to draw (default F<phylo.svg>, in the working directory); the
+extension picks the format.
 
 =item fasta, tree.file
 
@@ -629,24 +721,91 @@ A hash ref of name => label for the tips, as for C<plot_msa>; plot title.
 With C<fasta> of fewer than two sequences it warns and returns an empty hash
 ref.
 
+Besides the C<Creator> every image carries, a tree records where it came from
+in the image's own metadata, so the file can be traced and checked without
+the script that made it. An SVG holds all of this as Dublin Core in its
+C<< <metadata> >>, and a PNG as text chunks:
+
+=over
+
+=item Title, Date
+
+The title (default "Phylogenetic tree"), and when it was drawn, to the second
+and with the UTC offset. Where C<SOURCE_DATE_EPOCH> is set, matplotlib's date
+from it is kept instead, so a reproducible build stays reproducible.
+
+=item Source
+
+The input, with the full path and SHA-256 of each file: the FASTA file (or the
+number of sequences in a hash ref), the ungapped copy of it that Clustal Omega
+read, and the alignment Clustal Omega wrote; or the newick file drawn.
+
+=item Description
+
+How the tree was made: the Clustal Omega version and the exact command line;
+how many negative branch lengths were drawn as 0; the tips, with the label each
+was shown as; and the whole newick tree that was drawn.
+
+=item Identifier, Relation
+
+The SHA-256 of the newick file drawn, and the C<msa.file> and C<tree.file>
+kept with the image, if any.
+
+=item Contributor
+
+Each piece of software that took part, with its version and, where it runs as
+a program, its path: Clustal Omega, Bioinf::Basic, Alien::Bioinf, perl,
+Python, matplotlib, Biopython and NumPy.
+
+=item Keywords
+
+"phylogenetic tree", "newick" and the tip names.
+
+=back
+
+A PDF keeps the Title, the Description (as its Subject) and the Keywords; PS
+and EPS keep only the C<Creator>, and other formats nothing.
+
 =head2 msa_quality_table(%args)
 
-Draws an all-against-all BLAST score table with matplotlib. C<filename>
-(required) is the output image. C<alignment.json> is the C<blastp -outfmt 15> report, as a parsed hash
-ref or a file name; when the file does not exist, C<blastp> is run on
-C<unaligned.fa> to make it. Names must look like C<Genus.species[.strain]>.
-Optional: C<metric> (default C<score>), C<order>, C<normalize>,
-C<logscale.add>, C<default_undefined>, C<title>, C<cb_label>, C<cb_min>,
-C<cb_max>, C<cblogscale>, C<show.numbers>. C<msa.file> is accepted and ignored,
-for old callers.
+Draws an all-against-all BLAST score table with matplotlib, and returns
+C<filename>. The simplest call is
+
+ msa_quality_table(fasta => 'orthologs.fa', filename => 'scores.png');
+
+=over
+
+=item fasta, filename (required)
+
+The sequences, as a FASTA file name or a hash ref of name => sequence, as for
+C<plot_msa>; they are aligned all against all with C<blastp>. Gaps are stripped
+first, so an aligned FASTA, such as the one C<plot_msa> keeps, will do. Names
+must look like C<Genus.species[.strain]>. C<fasta> is not needed when an
+existing C<alignment.json> is given. C<unaligned.fa> is its old name.
+
+=item alignment.json
+
+The C<blastp -outfmt 15> report, as a parsed hash ref or a file name. An
+existing file is read, and nothing is aligned; otherwise C<blastp> is run on
+C<fasta> and its report kept there for next time. Without it, the report is a
+temporary file.
+
+=item metric, order, normalize, logscale.add, default_undefined, title, cb_label, cb_min, cb_max, cblogscale, show.numbers
+
+C<metric> is an hsp field (default C<score>). C<msa.file> is accepted and
+ignored, for old callers.
+
+=back
 
 =head2 clustal_view_residues(%args)
 
 Writes an alignment as LaTeX tables with chosen residues coloured, and returns
 C<output.tex.file>, printing C<wrote> and that file name (on cyan) to STDOUT
-once it is written. C<msa.file> (required) is a FASTA file that is already
-aligned, such as the one C<plot_msa> keeps; it dies if the sequences in it are
-not all one length. Nothing is aligned here.
+once it is written. C<msa.file> (required) is a FASTA file. One whose
+sequences are all one length, such as the one C<plot_msa> keeps, is shown as it
+is; one whose sequences differ in length is first aligned with Clustal Omega,
+into a temporary file (C<msa.file> is never written), using C<threads> and
+C<clustal.args> as C<plot_msa> does.
 C<color.residues> is C<< { protein => { residue number => colour } } >>, where
 residue numbers are 1-based and a colour is an xcolor name or C<[r, g, b]>; a
 coloured column is coloured in every protein. C<track> adds a row under that

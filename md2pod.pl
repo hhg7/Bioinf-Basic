@@ -1,0 +1,601 @@
+#!/usr/bin/env perl
+
+# Regenerate the POD of lib/Bioinf/Basic.pm from README.md.
+#
+# README.md is the source of the documentation; everything after the "1;" line
+# that ends the code in lib/Bioinf/Basic.pm is replaced on every run by
+# "__END__" and the POD converted from README.md, which is also written to
+# read.me.pod for inspection. Re-run it with "perl md2pod.pl" after
+# editing README.md, from any directory, since it changes to its own first; it
+# then checks the module with pod_file_ok() and Changes with changes_file_ok().
+#
+# This is an author-only helper. dist.ini's [PruneFiles] keeps it and
+# read.me.pod out of the tarball, so like ~/Scripts/stats's helper scripts it
+# may use modern perl rather than the 5.10 the module is held to.
+#
+# Provenance: copied on 2026-09-30 from ~/Scripts/stats/md2pod.pl as of commit
+# fa4ed3a there, which converts Stats::LikeR's README.md the same way. Only
+# the file names and the Changes check differ; a fix to the conversion itself
+# belongs in both copies. The examples in the comments below of what the
+# converter got wrong come from Stats::LikeR's README.md, where each was seen.
+
+use 5.044;
+no source::encoding;
+use warnings FATAL => 'all';
+use autodie ':default';
+use Devel::Confess 'color';
+use FindBin;
+use Markdown::To::POD 'markdown_to_pod';
+use Test::More;
+use Test::Pod;
+use Test::CPAN::Changes;
+
+my $readme  = 'README.md';
+my $module  = 'lib/Bioinf/Basic.pm';
+my $pod_out = 'read.me.pod';
+chdir $FindBin::Bin;    # the paths above are relative to the repository root
+
+sub file2string {
+	my $file = shift;
+	open my $fh, '<', $file;
+	return do { local $/; <$fh> };
+}
+
+# Split one GFM table row into its cells.
+#
+# GFM lets a cell contain a literal pipe as "\\|", so splitting on every pipe
+# tears such a cell in two and shifts every later cell one column left. Split
+# on unescaped pipes only, then unescape. The -1 limit keeps a trailing empty
+# cell, which plain split() would discard (leaving the row a column short).
+sub split_row {
+	my ($row) = @_;
+	my @cells = split /(?<!\\)\|/, $row, -1;
+	# a row wrapped in pipes yields an empty field at each end
+	shift @cells if @cells && $cells[0]  =~ /^\s*$/ && $row =~ /^\s*\|/;
+	pop   @cells if @cells && $cells[-1] =~ /^\s*$/ && $row =~ /\|\s*$/;
+	for my $c (@cells) {
+		$c =~ s/\\\|/|/g;
+		$c =~ s/^\s+|\s+$//g;
+	}
+	return @cells;
+}
+
+# Make text safe to drop inside an HTML element. Without this a cell such as
+# "`>` `<` `>=`" (Stats::LikeR's filter operator table) turns into "<code><</code>", which
+# every HTML parser reads as an unclosed tag and swallows -- two operators went
+# missing from the rendered documentation that way.
+sub html_escape {
+	my ($text) = @_;
+	$text =~ s/&/&amp;/g;
+	$text =~ s/</&lt;/g;
+	$text =~ s/>/&gt;/g;
+	return $text;
+}
+
+# Markdown inline formatting -> HTML, for the inside of a table cell. Escaping
+# has to come first, so that the tags this adds are the only markup present.
+sub md_inline_to_html {
+	my ($cell) = @_;
+	$cell = html_escape($cell);
+	$cell =~ s/`([^`]+)`/<code>$1<\/code>/g;
+	$cell =~ s/\*\*([^\*]+)\*\*/<b>$1<\/b>/g;
+	$cell =~ s/\*([^\*]+)\*/<i>$1<\/i>/g;
+	return $cell;
+}
+
+# One GFM table as an "=begin html" block; POD has no table markup of its own.
+sub table_to_html {
+	my ($header, $sep, $body_ref) = @_;
+	my $html = "<table>\n";
+
+	$html .= "<thead>\n<tr>\n";
+	my @headers = split_row($header);
+	$html .= '  <th>' . md_inline_to_html($_) . "</th>\n" for @headers;
+	$html .= "</tr>\n</thead>\n<tbody>\n";
+
+	for my $row (@$body_ref) {
+		my @cells = split_row($row);
+
+		# Pad a row that was short of cells, and fold a row that has too many
+		# back into its last column rather than widening the whole table (which
+		# would leave every later cell under the wrong heading).
+		push @cells, '' while @cells < @headers;
+		if (@headers && @cells > @headers) {
+			warn "table_to_html: table row has " . scalar(@cells) . ' cells for '
+			   . scalar(@headers) . " headings, folding the surplus into the "
+			   . "last column:\n  $row\n";
+			my @tail = splice @cells, $#headers;
+			$cells[$#headers] = join ' ', grep { length } @tail;
+		}
+
+		$html .= "<tr>\n";
+		$html .= '  <td>' . md_inline_to_html($_) . "</td>\n" for @cells;
+		$html .= "</tr>\n";
+	}
+	$html .= "</tbody>\n</table>\n";
+
+	# Ensure blank lines around the =begin and =end directives for valid POD
+	return "\n\n=begin html\n\n$html\n=end html\n\n";
+}
+
+# Replace each GFM table with a placeholder and keep its HTML aside, so the
+# Markdown converter never sees the pipes.
+sub extract_and_convert_tables {
+	my ($text) = @_;
+	my @lines = split /\n/, $text;
+	my @out;
+	my @saved_tables;
+	my $i = 0;
+
+	while ($i < @lines) {
+	  # Look for a table header followed by a standard GFM separator row
+	  if ($i + 1 < @lines &&
+		   $lines[$i] =~ /\|/ &&
+		   $lines[$i+1] =~ /^[ \t]*\|?[ \t]*:?-+[-: \t]*\|/) {
+
+		   my $header = $lines[$i];
+		   my $sep = $lines[$i+1];
+		   my @body;
+		   $i += 2;
+
+		   # Consume consecutive data rows (must contain at least one pipe)
+		   while ($i < @lines && $lines[$i] =~ /\|/) {
+		       push @body, $lines[$i];
+		       $i++;
+		   }
+
+		   my $html = table_to_html($header, $sep, \@body);
+		   push @saved_tables, $html;
+		   # Use an alphanumeric placeholder to prevent Markdown parser interference
+		   push @out, "\n\nHTMLTABLEPLACEHOLDER" . ($#saved_tables) . "\n\n";
+	  } else {
+		   push @out, $lines[$i];
+		   $i++;
+	  }
+	}
+	return (join("\n", @out), \@saved_tables);
+}
+
+# Markdown::To::POD applies "_..._" emphasis inside a word, which GFM does not.
+# A bare Perl identifier is one word, so "_rename_inplace" came out as
+# "I<rename>inplace" -- the heading named after that helper lost its name.
+# Backslash-escaping the underscores is honoured by the converter and produces
+# the identifier verbatim, so do that to every identifier-shaped token that is
+# not already inside an inline code span (whose contents are passed through as
+# written, and where backslashes would show up literally).
+sub protect_underscore_identifiers {
+	my ($text) = @_;
+	my @out;
+	for my $chunk (split /(`[^`\n]*`)/, $text) {
+		if ($chunk =~ /\A`/) { push @out, $chunk; next }
+		$chunk =~ s{(?<![\\\w])(_*[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+_*)(?![\w])}
+		           {my $t = $1; $t =~ s/_/\\_/g; $t}gex;
+		push @out, $chunk;
+	}
+	return join '', @out;
+}
+
+# The GitHub anchor for a heading: lowercased, formatting and punctuation
+# dropped, spaces turned into hyphens. Used to resolve "[text](#anchor)" back
+# to the heading it points at.
+sub gh_anchor {
+	my ($text) = @_;
+	$text = lc $text;
+	$text =~ s/`//g;
+	$text =~ s/\*//g;
+	$text =~ s/[^\w\- ]//g;
+	$text =~ s/ /-/g;
+	return $text;
+}
+
+# Markdown inline formatting -> POD formatting codes, for link text.
+sub md_inline_to_pod {
+	my ($text) = @_;
+	$text =~ s/`([^`]+)`/C<$1>/g;
+	$text =~ s/\*\*([^\*]+)\*\*/B<$1>/g;
+	$text =~ s/\*([^\*]+)\*/I<$1>/g;
+	return $text;
+}
+
+# An image is the one piece of Markdown with no POD equivalent: POD has no
+# formatting code for a picture, and both renderers that can show one -- GitHub
+# for README.md, MetaCPAN for the POD -- take it as raw HTML. So "![alt](src)"
+# alone on a line becomes an "=begin html" block holding an <img>, exactly the
+# way a GFM table becomes one.
+#
+# The source has to be an absolute URL. The POD is read on MetaCPAN, and a
+# repository-relative path such as "img/density.what.png" resolves to nothing
+# there, so README.md points at raw.githubusercontent.com instead and both
+# renderings load the same file. Say so rather than emitting a broken <img>.
+#
+# This has to run before extract_links(), whose "[text](target)" pattern also
+# matches the "[alt](src)" half of an image and would leave a stray "!" in
+# front of the placeholder.
+sub extract_images {
+	my ($text) = @_;
+	my @saved;
+	my @out;
+	for my $ln (split /\n/, $text, -1) {
+		if ($ln =~ /\A[ \t]*!\[([^\]\[]*)\]\(([^()\s]+)\)[ \t]*\z/) {
+			my ($alt, $src) = ($1, $2);
+			warn "extract_images: image src '$src' is not an absolute URL, so MetaCPAN "
+			   . "will not be able to load it; use the raw.githubusercontent.com "
+			   . "URL of the file\n"
+				unless $src =~ m{\A[A-Za-z][A-Za-z0-9+.-]*://};
+			for ($alt, $src) {
+				$_ = html_escape($_);
+				s/"/&quot;/g;                 # both land in an attribute
+			}
+			push @saved, qq{\n\n=begin html\n\n<p><img src="$src" alt="$alt" }
+			           . qq{width="100%" /></p>\n\n=end html\n\n};
+			push @out, '', 'PODIMAGEPLACEHOLDER' . $#saved . 'Z', '';
+			next;
+		}
+		push @out, $ln;
+	}
+	return (join("\n", @out), \@saved);
+}
+
+# Markdown::To::POD mangles links: "[text](#anchor)" becomes "L<#anchor>",
+# which is not POD link syntax, and the link text is thrown away entirely --
+# "[`read_table`](#)" came out as "L<#>", with the words gone. An external
+# "[CPAN](https://...)" fares worse and comes out as "LL<https://...>".
+#
+# Convert them here instead. An in-document link is resolved against the
+# document's own headings and becomes a real POD section link; one that resolves
+# to nothing keeps its text and loses only the link. Placeholders keep the
+# result away from the converter, the same way the tables and code blocks do.
+sub extract_links {
+	my ($text, $headings) = @_;
+	my @saved;
+	my $unresolved = 0;
+
+	$text =~ s{(?<!\\)\[([^\]\[]*)\]\(([^()\s]*)\)}{
+		my ($label, $target) = ($1, $2);
+		my $pod = md_inline_to_pod($label);
+		if ($target =~ /\A#(.*)\z/s) {
+			my $section = $headings->{$1};
+			if (!defined $section) {
+				$unresolved++;
+				warn "extract_links: link [$label](#$1) matches no heading; "
+				   . "keeping the text, dropping the link\n" if length $1;
+			}
+			elsif ($section eq $pod) { $pod = qq{L</"$section">} }
+			else                     { $pod = qq{L<$pod|/"$section">} }
+		}
+		elsif (length $target) {
+			$pod = qq{L<$pod|$target>};
+		}
+		push @saved, $pod;
+		'PODLINKPLACEHOLDER' . $#saved . 'Z';
+	}gex;
+
+	return ($text, \@saved);
+}
+
+# Every ATX heading, keyed by its GitHub anchor, with the text as it will read
+# in the POD. Fenced and indented code is skipped so a "# comment" line is
+# never mistaken for a heading.
+sub collect_headings {
+	my ($text) = @_;
+	my %by_anchor;
+	my $in_fence = 0;
+	for my $ln (split /\n/, $text, -1) {
+		$in_fence = !$in_fence if $ln =~ /^[ \t]*(?:```|~~~)/;
+		next if $in_fence;
+		next if $ln =~ /^(?:\t| {4,})/;
+		next unless $ln =~ /^\#{1,6}[ \t]+(\S.*?)[ \t]*\#*[ \t]*$/;
+		my $heading = $1;
+		my $anchor  = gh_anchor($heading);
+		next unless length $anchor;
+		# GitHub disambiguates repeats with -1, -2, ...; first one wins here
+		$by_anchor{$anchor} = md_inline_to_pod($heading)
+			unless exists $by_anchor{$anchor};
+	}
+	return \%by_anchor;
+}
+
+# Pull indented (4-space) code blocks out before conversion, and put them back
+# as POD verbatim paragraphs afterwards.
+#
+# Handing them to the Markdown converter is not safe. It reads them as prose
+# whenever the block follows a list, and prose is then reformatted: the
+# indentation is flattened, a leading "#" on a comment line becomes a heading
+# (Stats::LikeR's dropna example produced "=head1 { A => [1, 2], ... }" that way,
+# which truncates the section), "_name_" turns into italics, ">" turns into
+# "E<gt>", and backticks turn into C<>. None of that belongs in a code sample.
+#
+# A block starts at a line indented by >= 4 columns that follows a blank line
+# and is not a list marker (a nested "  - item" continuation can also be
+# indented, and must be left to the converter). Interior blank lines are kept
+# as long as indented content resumes after them.
+sub extract_code_blocks {
+	my ($text) = @_;
+	my @lines = split /\n/, $text, -1;
+	my @out;
+	my @saved;
+	my $blank = 1;                       # start of file counts as a blank line
+	my $i = 0;
+
+	while ($i < @lines) {
+		my $is_indented = $lines[$i] =~ /^(?:\t| {4,})\S/
+		               && $lines[$i] !~ /^\s+(?:[-*+]|[0-9]+[.)])\s/;
+		if (!($blank && $is_indented)) {
+			$blank = $lines[$i] =~ /^\s*$/ ? 1 : 0;
+			push @out, $lines[$i++];
+			next;
+		}
+
+		my @body;
+		while ($i < @lines) {
+			if ($lines[$i] =~ /^\s*$/) {           # keep an interior blank line
+				my $j = $i;
+				$j++ while $j < @lines && $lines[$j] =~ /^\s*$/;
+				last if $j >= @lines || $lines[$j] !~ /^(?:\t| {4,})\S/;
+				push @body, '' for $i .. $j - 1;
+				$i = $j;
+				next;
+			}
+			last unless $lines[$i] =~ /^(?:\t| {4,})/;
+			push @body, $lines[$i++];
+		}
+
+		push @saved, \@body;
+		push @out, '', 'PODVERBATIMPLACEHOLDER' . $#saved . 'Z', '';
+		$blank = 1;
+	}
+	return (join("\n", @out), \@saved);
+}
+
+# One saved block as a POD verbatim paragraph: strip the indentation the whole
+# block shares, then re-indent by a single space, so relative indentation
+# inside the sample survives exactly.
+sub code_block_to_pod {
+	my ($body) = @_;
+	my $common;
+	for my $line (@$body) {
+		next unless $line =~ /\S/;
+		my ($lead) = $line =~ /^([ \t]*)/;
+		$lead =~ s/\t/    /g;
+		my $n = length $lead;
+		$common = $n if !defined($common) || $n < $common;
+	}
+	$common = 0 unless defined $common;
+
+	my @out;
+	for my $line (@$body) {
+		if ($line !~ /\S/) { push @out, ''; next }
+		$line =~ s/\t/    /g;
+		push @out, ' ' . substr($line, $common);
+	}
+	return join "\n", @out;
+}
+
+# Markdown::To::POD's list-detection regex has no blank line requirement before
+# a following heading, so a heading glued straight onto a list (no blank line
+# between them) gets swallowed into the final list item: the "=headN" is then
+# emitted *inside* the "=over", and the list's "=back" lands after it
+# ("You forgot a '=back' before '=headN'", "=back without =over"). This is a
+# parse-time failure, so it must be repaired in the Markdown before conversion.
+#
+# Guarantee a blank line before every heading (ATX "# X" and Setext "X" over a
+# row of "=" or "-"). The "\S" mirrors the converter's own header regex (header
+# text required, so a bare "###" is left alone). Fenced code regions are
+# skipped so "# comment" lines inside them are untouched. GFM table separators
+# never match the Setext underline test because they contain pipes.
+sub ensure_blank_before_headings {
+	my ($text) = @_;
+	my @lines = split /\n/, $text, -1;
+	my @out;
+	my $in_fence = 0;
+	for my $j (0 .. $#lines) {
+		my $ln = $lines[$j];
+		$in_fence = !$in_fence if $ln =~ /^[ \t]*(?:```|~~~)/;
+		my $is_atx = !$in_fence && $ln =~ /^\#{1,6}[ \t]*\S/;
+		my $is_setext = !$in_fence && $ln =~ /\S/
+			&& $j < $#lines && $lines[$j+1] =~ /^[ \t]*(?:=+|-+)[ \t]*$/;
+		push @out, ''
+			if ($is_atx || $is_setext) && @out && $out[-1] ne '';
+		push @out, $ln;
+	}
+	return join "\n", @out;
+}
+
+# Markdown::To::POD emits a nested list's "=over" directly after the parent
+# "=item" line with no blank line between them. POD requires a blank line
+# before every command paragraph, so without it the "=over" is absorbed into
+# the item's text rather than opening a list; the matching inner "=back" then
+# closes the *outer* list, orphaning later "=item"/"=back" directives
+# ("'=item' outside of any '=over'", "=back without =over").
+#
+# Repair by guaranteeing a blank line before every POD command paragraph.
+# "=begin X" / "=end X" data blocks (the HTML tables) are copied verbatim so
+# their raw contents are never rewritten.
+sub fix_pod_command_spacing {
+	my ($pod) = @_;
+	my @in = split /\n/, $pod, -1;
+	my @out;
+	my $in_data = 0;
+	for my $cmd_line (@in) {
+		if ($in_data) {
+			push @out, $cmd_line;
+			$in_data = 0 if $cmd_line =~ /^=end\b/;
+			next;
+		}
+		if ($cmd_line =~ /^=\w+/) {
+			# a command paragraph must be preceded by a blank line
+			push @out, '' if @out && $out[-1] ne '';
+			push @out, $cmd_line;
+			$in_data = 1 if $cmd_line =~ /^=begin\b/;
+		}
+		else {
+			push @out, $cmd_line;
+		}
+	}
+	return join "\n", @out;
+}
+
+# Guarantee balanced =over/=back. Even with the blank-line repairs above, the
+# converter can emit a heading while a list is still open (e.g. a Setext-
+# underlined heading, or any heading the pre-processor's normalization missed),
+# leaving the matching =back stranded after the heading. Close any list still
+# open when a heading / =cut / end-of-file is reached, and drop any =back that
+# has no open =over. "=begin X" / "=end X" data blocks are passed through
+# verbatim so their contents are never miscounted.
+sub balance_pod_over_back {
+	my ($pod) = @_;
+	my @in = split /\n/, $pod, -1;
+	my @out;
+	my $depth = 0;
+	my $in_data = 0;
+	for my $bal_line (@in) {
+		if ($in_data) {
+			push @out, $bal_line;
+			$in_data = 0 if $bal_line =~ /^=end\b/;
+			next;
+		}
+		if ($bal_line =~ /^=begin\b/) {
+			push @out, $bal_line;
+			$in_data = 1;
+			next;
+		}
+		if ($bal_line =~ /^=over\b/) {
+			$depth++;
+			push @out, $bal_line;
+			next;
+		}
+		if ($bal_line =~ /^=back\b/) {
+			# drop a =back that has no matching open =over
+			if ($depth > 0) {
+				$depth--;
+				push @out, $bal_line;
+			}
+			next;
+		}
+		if ($bal_line =~ /^=(?:head\d+|cut|pod|encoding)\b/) {
+			while ($depth > 0) {
+				push @out, '', '=back';
+				$depth--;
+			}
+			push @out, '' if @out && $out[-1] ne '';
+			push @out, $bal_line;
+			next;
+		}
+		push @out, $bal_line;
+	}
+	while ($depth > 0) {
+		push @out, '', '=back';
+		$depth--;
+	}
+	return join "\n", @out;
+}
+
+my $md = file2string($readme);
+
+# 0. Ensure headings are separated from preceding blocks so the converter's
+#    list detection terminates correctly before them
+$md = ensure_blank_before_headings($md);
+
+# 1. Pre-process the Markdown to convert GFM tables into POD HTML blocks
+my ($md_processed, $tables_ref) = extract_and_convert_tables($md);
+
+# 1a. Turn image lines into HTML blocks, before the link pass can claim them
+my $images_ref;
+($md_processed, $images_ref) = extract_images($md_processed);
+
+# 1b. Set indented code blocks aside so the converter cannot reformat them
+my $code_ref;
+($md_processed, $code_ref) = extract_code_blocks($md_processed);
+
+# 1c. Resolve links against the document's headings, and keep identifiers with
+#     a leading underscore from being read as emphasis. Both run after the code
+#     blocks are out of the way, so code samples are never rewritten.
+my $links_ref;
+($md_processed, $links_ref) = extract_links($md_processed, collect_headings($md));
+$md_processed = protect_underscore_identifiers($md_processed);
+
+my $pod = markdown_to_pod($md_processed);
+
+# 3. Restore the HTML tables back into the generated POD
+for my $idx (0 .. $#$tables_ref) {
+	my $table_html = $tables_ref->[$idx];
+	# Anchor the end of the number with \b: without it the /g replace for a
+	# short index (e.g. 1) also matches the prefix of longer placeholders
+	# (HTMLTABLEPLACEHOLDER10, ...11), dropping the wrong table there and
+	# leaving a stray leftover digit. \b stops after the last digit, so
+	# HTMLTABLEPLACEHOLDER1 no longer matches inside HTMLTABLEPLACEHOLDER10.
+	$pod =~ s/HTMLTABLEPLACEHOLDER${idx}\b/$table_html/g;
+}
+
+# 3a. Restore the images as HTML blocks
+for my $idx (0 .. $#$images_ref) {
+	my $img = $images_ref->[$idx];
+	$pod =~ s/^[ \t]*PODIMAGEPLACEHOLDER${idx}Z[ \t]*$/$img/mg;
+}
+if ($pod =~ /(PODIMAGEPLACEHOLDER\d+Z)/) {
+	die "md2pod: image placeholder $1 survived conversion\n";
+}
+
+# 3b. Restore the code blocks as verbatim paragraphs. The trailing Z does for
+#     these what \b does for the tables above: PLACEHOLDER1Z cannot match
+#     inside PLACEHOLDER10Z.
+for my $idx (0 .. $#$code_ref) {
+	my $verbatim = code_block_to_pod($code_ref->[$idx]);
+	$pod =~ s/^[ \t]*PODVERBATIMPLACEHOLDER${idx}Z[ \t]*$/$verbatim/mg;
+}
+if ($pod =~ /(PODVERBATIMPLACEHOLDER\d+Z)/) {
+	die "md2pod: code-block placeholder $1 survived conversion\n";
+}
+
+# 3c. Restore the links
+for my $idx (0 .. $#$links_ref) {
+	my $link = $links_ref->[$idx];
+	$pod =~ s/PODLINKPLACEHOLDER${idx}Z/$link/g;
+}
+if ($pod =~ /(PODLINKPLACEHOLDER\d+Z)/) {
+	die "md2pod: link placeholder $1 survived conversion\n";
+}
+
+# 4. Repair command-paragraph spacing so nested lists stay balanced POD
+$pod = fix_pod_command_spacing($pod);
+
+# 5. Close any list left open across a heading and drop stray =back directives
+$pod = balance_pod_over_back($pod);
+
+my @pod = split /\n/, $pod;
+unshift @pod, "=encoding utf8\n";
+
+say "Writing $pod_out and the POD of $module from $readme";
+open my $fh, '>', $pod_out;
+say $fh join ("\n", @pod);
+close $fh;
+
+my @lib = split /\n/, file2string($module);
+my @marks = grep { $lib[$_] eq '1;' } 0 .. $#lib;
+if (!@marks) {
+	die "md2pod: no '1;' line in $module to append the POD after\n";
+}
+if (@marks > 1) {
+	die "md2pod: $module has " . scalar(@marks) . " lines that are "
+	  . "just '1;' (at " . join(', ', map { $_ + 1 } @marks) . '); cannot tell '
+	  . "which one ends the code\n";
+}
+
+# Everything after "1;" is the previous run's output, or the POD that was
+# written by hand before this script existed. "__END__" is put back in front
+# of the new POD so perl stops compiling at "1;" rather than scanning the POD.
+splice @lib, $marks[0] + 1;
+push @lib, '__END__', '', @pod;
+
+open my $out_fh, '>', $module;
+say $out_fh join ("\n", @lib);
+close $out_fh;
+
+pod_file_ok($module);
+
+# Changes is written by hand, not generated from README.md. changes_file_ok()
+# parses it the way CPAN and PAUSE do, so an edit that breaks the CPAN::Changes
+# spec -- a release with no date, a version line that does not parse -- fails
+# here rather than at upload time.
+changes_file_ok('Changes');
+done_testing();

@@ -10,7 +10,11 @@ left. On the file described at FASTA_BLOCK below, bioinf.pm read it in 3.83 s
 with a peak RSS of 1,098 MB, and this in 0.80 s and 967 MB, 900 MB of which is
 the sequences themselves; writing it back took 44.44 s and takes 0.97 s, and
 the two files are byte-identical. The perl side (lib/Bioinf/Basic.pm) opens and
-closes the files.*/
+closes the files.
+
+Every croak() and warn() here starts with C99's __func__, so a message names
+the C function that raised it (read_fasta or write_fasta) and stays right if
+one is renamed.*/
 #define PERL_NO_GET_CONTEXT
 #include "EXTERN.h"
 #include "perl.h"
@@ -84,7 +88,7 @@ static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 	SAVEFREEPV(buf); // freed at the caller's LEAVE, croak or not
 	while (!done) {
 		SSize_t n = PerlIO_read(fh, buf, FASTA_BLOCK);
-		if (n < 0 || PerlIO_error(fh)) croak("error reading %s: %s", name, Strerror(errno));
+		if (n < 0 || PerlIO_error(fh)) croak("%s: error reading %s: %s", __func__, name, Strerror(errno));
 		if (n == 0) {
 			if (bol || fed) break;
 			buf[0] = '\n';
@@ -108,7 +112,7 @@ static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 			if (in_hdr) sv_catpvn(hdr, p, (STRLEN)(e - p));
 			else if (seq) sv_catpvn(seq, p, (STRLEN)(e - p));
 			else if (!have_def && e > p && !(e - p == 1 && *p == '\r'))
-				croak("%s line %" UVuf " is sequence, but no defline (\">...\") has come before it", name, line);
+				croak("%s: %s line %" UVuf " is sequence, but no defline (\">...\") has come before it", __func__, name, line);
 			if (!nl) break;
 			p = nl + 1;
 			bol = TRUE;
@@ -118,7 +122,7 @@ static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 			}
 			in_hdr = FALSE;
 			chop_cr(hdr);
-			if (!SvCUR(hdr)) croak("%s line %" UVuf " is a defline with no name", name, line);
+			if (!SvCUR(hdr)) croak("%s: %s line %" UVuf " is a defline with no name", __func__, name, line);
 			if (seq) SvPV_shrink_to_cur(seq);
 			bool is_key = key && sv_eq(hdr, key);
 			if (key && !is_key && hv_exists_ent(out, key, 0)) {
@@ -127,7 +131,7 @@ static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 			}
 			have_def = TRUE;
 			if (hv_exists_ent(is_key ? out : seen, hdr, 0))
-				warn("\"%s\" appears more than once in %s (line %" UVuf "); its sequences will be concatenated", SvPV_nolen(hdr), name, line);
+				warn("%s: \"%s\" appears more than once in %s (line %" UVuf "); its sequences will be concatenated", __func__, SvPV_nolen(hdr), name, line);
 			else if (order) av_push(order, newSVsv(hdr));
 			if (key && !is_key) {
 				(void)hv_store_ent(seen, hdr, newSV(0), 0);
@@ -149,12 +153,12 @@ lines of width characters; width 0 puts each sequence on one line.*/
 static void write_fasta(pTHX_ PerlIO *fh, HV *h, AV *order, STRLEN width) {
 	for (SSize_t i = 0; i <= av_len(order); i++) {
 		SV **k = av_fetch(order, i, 0);
-		if (!k || !SvOK(*k)) croak("element %" IVdf " of the order is undefined", (IV)i);
+		if (!k || !SvOK(*k)) croak("%s: element %" IVdf " of the order is undefined", __func__, (IV)i);
 		HE *he = hv_fetch_ent(h, *k, 0, 0);
 		STRLEN kl, sl;
 		// kp and sp not restrict: a defline and its sequence may share one COW buffer
 		const char *kp = SvPV_const(*k, kl);
-		if (!he || !SvOK(HeVAL(he))) croak("\"%s\" has no sequence in the hash", kp);
+		if (!he || !SvOK(HeVAL(he))) croak("%s: \"%s\" has no sequence in the hash", __func__, kp);
 		const char *sp = SvPV_const(HeVAL(he), sl);
 		PerlIO_putc(fh, '>');
 		PerlIO_write(fh, kp, kl);
@@ -165,7 +169,7 @@ static void write_fasta(pTHX_ PerlIO *fh, HV *h, AV *order, STRLEN width) {
 			PerlIO_putc(fh, '\n');
 		}
 	}
-	if (PerlIO_error(fh)) croak("error writing FASTA: %s", Strerror(errno));
+	if (PerlIO_error(fh)) croak("%s: error writing FASTA: %s", __func__, Strerror(errno));
 }
 
 MODULE = Bioinf::Basic	PACKAGE = Bioinf::Basic
