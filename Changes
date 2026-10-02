@@ -15,4 +15,20 @@ Revision history for Bioinf-Basic
    plot_msa kept, so the two images need only one alignment.
 
  - clustalo, BLAST+ and the plotting Python come from Alien::Bioinf, never
-   from PATH.
+   from PATH. Alien::Bioinf is recommended rather than required, since it
+   installs only where NCBI builds BLAST+; the functions that need it say so
+   when it is missing, and t/msa.t is skipped without it.
+
+ - Fixed before release: a truncated .gz now dies rather than being read
+   in part; residue numbers below 1 in active.site.aa and color.residues die
+   rather than counting from the last residue; row.width or split of 0 dies
+   rather than looping forever; msa_quality_table's normalize no longer
+   divides by 0 when every e-value is 0, and divides by the largest value
+   plus logscale.add; get_best_alignment_hit dies on two queries of one
+   title rather than dropping one; plot_msa dies on two sequences given one
+   label; and clustal_view_residues escapes every LaTeX special character in
+   a protein name.
+
+ - fasta2hash with a key no longer keeps every other defline it passes, to
+   warn about their repeats: finding the last of 400,000 records went from
+   87 MB and 0.25 s to 8 MB and 0.06 s.

@@ -10,6 +10,13 @@ use Bioinf::Basic qw(:all);
 # These run the clustalo, blastp and Python that Alien::Bioinf installed, on
 # t/data/DEG20010421.fa (see t/data/make_fixtures.pl). The clustal_view_residues
 # expectations are worked out by hand from the 2-sequence alignment below.
+# Alien::Bioinf is only recommended, so without a working one this is skipped;
+# the argument checks that need none of its programs are in t/checks.t.
+unless (eval { require Alien::Bioinf; !grep { !-x $_ } Alien::Bioinf->clustalo, Alien::Bioinf->blast('blastp'), Alien::Bioinf->python }) {
+	# the reason up to "(@INC contains: ...", which would fill the screen
+	my ($why) = $@ ? $@ =~ /\A(.*?)(?: \(| at \S+ line \d|\n|\z)/ : 'no clustalo, blastp or python';
+	plan skip_all => "Alien::Bioinf can't run its tools here: $why";
+}
 
 my $dir = tempdir(CLEANUP => 1);
 my $fa = "$FindBin::Bin/data/DEG20010421.fa";
@@ -102,6 +109,7 @@ foreach my $bad (
 	[{ %two, 'active.site.aa' => { X => 1 }, query => 'nope' }, qr/the query "nope" isn't in the alignment/],
 	[{ %two, 'active.site.aa' => { X => 9999 }, query => 'S.cerevisiae' }, qr/active site X \(9999\) is past the end of "S.cerevisiae", which has 713 residues/],
 	[{ %two, order => ['nope'] }, qr/"order" names sequences that aren't in the alignment: nope/],
+	[{ %two, labels => { 'C.neoformans.JEC21' => 'S.cerevisiae' } }, qr/"C.neoformans.JEC21", "S.cerevisiae" would all be drawn as "S.cerevisiae"/],
 ) {
 	eval { plot_msa(%{ $bad->[0] }) };
 	like $@, $bad->[1], "plot_msa dies: $bad->[1]";

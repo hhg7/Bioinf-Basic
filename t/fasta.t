@@ -3,6 +3,7 @@ use strict;
 use warnings FATAL => 'all';
 use Test::More;
 use File::Temp qw(tempdir);
+use File::Spec;
 use File::Spec::Functions qw(catfile);
 use Bioinf::Basic qw(fasta2hash hash2fasta_file);
 # The expected values are what bioinf.pm's pure-perl fasta2hash and
@@ -45,6 +46,10 @@ is scalar @w, 1, 'with one warning';
 like $w[0], qr/"x" appears more than once in .*dup\.fa \(line 5\)/, 'naming the defline and its line';
 @w = warnings_of(sub { is fasta2hash(spew('dupk.fa', ">x\nA\n>x\nG\n>y\nC\n"), 'x'), 'AG', 'also when only that record is wanted' });
 is scalar @w, 1, 'with one warning there too';
+# Differs from bioinf.pm: with a key, the other deflines are not kept, so a
+# repeat of one of them goes unremarked.
+@w = warnings_of(sub { is fasta2hash(spew('dupo.fa', ">x\nA\n>x\nG\n>y\nC\n"), 'y'), 'C', 'a record after a repeated one' });
+is scalar @w, 0, 'with no warning about the repeat, which was not asked for';
 
 eval { fasta2hash(spew('bad.fa', "ACGT\n>x\nA\n")) };
 like $@, qr/line 1 is sequence, but no defline/, 'sequence before any defline dies';
@@ -69,6 +74,24 @@ SKIP: {
 	skip 'no gzip program to make the .gz with', 2 if system("gzip -c \Q$plain\E > \Q$gz\E") != 0;
 	is_deeply fasta2hash($gz), fasta2hash($plain), '.gz is decompressed';
 	is fasta2hash($gz, 'one desc'), 'ACGTAC', 'and can be read for one record';
+}
+
+SKIP: {
+	# 20,000 60-residue lines compress to about 3 KB; half of that is a gzip
+	# stream that ends early, and gzip says so on STDERR and in its exit status
+	my $big = spew('big.fa', ">x\n" . (('A' x 60) . "\n") x 20_000);
+	my $gz = catfile($dir, 'big.fa.gz');
+	skip 'no gzip program to make the .gz with', 2 if system("gzip -c \Q$big\E > \Q$gz\E") != 0;
+	truncate $gz, int((-s $gz) / 2) or die "truncate $gz: $!";
+	open my $saved, '>&', \*STDERR or die $!;
+	open STDERR, '>', File::Spec->devnull or die $!;
+	my $r = eval { fasta2hash($gz) };
+	my $err = $@;
+	my $one = eval { fasta2hash($gz, 'nope') };
+	my $err_key = $@;
+	open STDERR, '>&', $saved or die $!;
+	like $err, qr/^fasta2hash: couldn't read all of \S+big\.fa\.gz: gzip exited [1-9]/, 'a truncated .gz dies, rather than returning part of it';
+	like $err_key, qr/couldn't read all of/, 'and so it does when a key was looked for to the end';
 }
 
 my %h = (b => 'ABCDEFGHIJ', a => 'XYZ', e => '');

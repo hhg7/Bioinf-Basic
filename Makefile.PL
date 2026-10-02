@@ -38,11 +38,10 @@ WriteMakefile(
 	MIN_PERL_VERSION => '5.010',
 	CCFLAGS          => $Config{ccflags} . $std,
 	CONFIGURE_REQUIRES => { 'ExtUtils::MakeMaker' => '6.64', 'File::ShareDir::Install' => '0.06' },
-	PREREQ_PM        => {
-		'Alien::Bioinf' => '0', 'File::ShareDir' => '1.00', 'JSON::MaybeXS' => '0',
-	},
+	PREREQ_PM        => { 'File::ShareDir' => '1.00', 'JSON::MaybeXS' => '0' },
 	TEST_REQUIRES    => { 'Test::More' => '0.88' },
-	META_MERGE       => { 'meta-spec' => { version => 2 } },
+	# recommended, not required: see the [Prereqs / RuntimeRecommends] comment in dist.ini
+	META_MERGE       => { 'meta-spec' => { version => 2 }, prereqs => { runtime => { recommends => { 'Alien::Bioinf' => '0' } } } },
 );
 
 package MY;

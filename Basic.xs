@@ -75,10 +75,11 @@ gets each defline in file order.
 
 A repeated defline is warned about and its sequences concatenated, which is
 what bioinf.pm did: it is the file that is wrong, and nothing here can say
-which of the two records was meant.*/
+which of the two records was meant. With key given, only a repeat of key is
+looked for. Finding the others would mean keeping every defline read on the way
+to key: a hash of 400,000 keys, for one record of a proteome.*/
 static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 	HV *out = (HV*)sv_2mortal((SV*)newHV());
-	HV *seen = key ? (HV*)sv_2mortal((SV*)newHV()) : out; // other deflines met so far; with every record kept, out already is that
 	SV *hdr = sv_2mortal(newSVpvs(""));
 	SV *seq = NULL; // record being filled; NULL before the first defline and while skipping
 	bool have_def = FALSE, in_hdr = FALSE, bol = TRUE, done = FALSE, fed = FALSE; // fed: the '\n' that ends an unterminated last line has been supplied
@@ -130,14 +131,13 @@ static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 				break;
 			}
 			have_def = TRUE;
-			if (hv_exists_ent(is_key ? out : seen, hdr, 0))
-				warn("%s: \"%s\" appears more than once in %s (line %" UVuf "); its sequences will be concatenated", __func__, SvPV_nolen(hdr), name, line);
-			else if (order) av_push(order, newSVsv(hdr));
 			if (key && !is_key) {
-				(void)hv_store_ent(seen, hdr, newSV(0), 0);
 				seq = NULL;
 				continue;
 			}
+			if (hv_exists_ent(out, hdr, 0))
+				warn("%s: \"%s\" appears more than once in %s (line %" UVuf "); its sequences will be concatenated", __func__, SvPV_nolen(hdr), name, line);
+			else if (order) av_push(order, newSVsv(hdr));
 			seq = HeVAL(hv_fetch_ent(out, hdr, 1, 0));
 			if (!SvOK(seq)) sv_setpvs(seq, "");
 		}

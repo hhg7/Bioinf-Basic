@@ -5,7 +5,7 @@ no source::encoding;
 use warnings FATAL => 'all';
 use autodie ':default';
 use Devel::Confess 'color';
-use Bioinf::Basic;
+use Bioinf::Basic qw(:all);
 
 my $h = fasta2hash('t/data/DEG20010421.fa');
 

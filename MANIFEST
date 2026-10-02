@@ -9,6 +9,7 @@ README.md
 SECURITY.md
 share/msa_plot.py
 t/blast.t
+t/checks.t
 t/data/DEG20010421.fa
 t/data/hits.json
 t/data/make_fixtures.pl

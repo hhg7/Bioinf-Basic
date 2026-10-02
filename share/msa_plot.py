@@ -25,7 +25,7 @@ from matplotlib.colors import ListedColormap, LogNorm, Normalize
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--f', help='aligned FASTA to draw')
 ap.add_argument('--tree', help='newick tree to draw instead')
-ap.add_argument('--o', required=True, help='output image')
+ap.add_argument('--o', help='output image (required)')
 ap.add_argument('--t', default='', help='title')
 ap.add_argument('--x', default='Amino Acid Residue', help='x-axis label')
 ap.add_argument('--y', default='Protein & Species', help='y-axis label')
@@ -35,7 +35,17 @@ ap.add_argument('--table', help='JSON file of the table to draw instead: rows, c
 ap.add_argument('--meta', help='JSON of further Dublin Core fields for --tree: Title, Source, Description, Relation, Contributor')
 ap.add_argument('--c', default='Bioinf::Basic', help='Creator metadata: the script and sub that called this')
 ap.add_argument('--quiet', action='store_true', help="don't print 'wrote' and the output file; the caller prints its own")
+ap.add_argument('--argfile', help='a JSON array of every other argument, in place of them on the command line')
 a = ap.parse_args()
+# Bioinf::Basic passes everything through --argfile, because perl's system(LIST)
+# on Windows does not escape a '"' inside an argument, and the JSON options and
+# the Creator ("... called using \"plot_msa\" ...") are full of them.
+if a.argfile:
+	with open(a.argfile, encoding='utf-8') as fh:
+		a = ap.parse_args(json.load(fh))
+# checked here rather than with required=True, which would refuse --argfile alone
+if not a.o:
+	ap.error('--o is required')
 
 # CIAlign getAAColours('CBS') and getNtColours('CBS'), in the order CIAlign
 # assigns them to the colour map.
