@@ -11,7 +11,10 @@ Basic.o
 # dzil build and release products
 /.build/
 /Bioinf-Basic-*
+# what md2pod.pl writes besides the POD in lib/Bioinf/Basic.pm
+/read.me.pod
 # what examples.pl writes
+/phylo.svg
 /DEG20010421.aln.fa
 /DEG20010421.msa.svg
 /view_residues.tab.tex
