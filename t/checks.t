@@ -47,7 +47,7 @@ like slurp($err), qr/^_alien: plot_msa needs Alien::Bioinf, for Clustal Omega, B
 
 my $report = '{"report":{"results":{"search":{"query_title":"q","hits":[]}}}}';
 dies_like sub { get_best_alignment_hit(spew('twice.json', qq({"BlastOutput2":[$report,$report]}))) },
-	qr/^get_best_alignment_hit: two queries in \S+twice\.json are both titled "q"/, 'two queries of one title die rather than one being lost';
+	qr/^get_best_alignment_hit: two queries in .+twice\.json are both titled "q"/, 'two queries of one title die rather than one being lost';
 
 # ---- plot_msa ---------------------------------------------------------------
 

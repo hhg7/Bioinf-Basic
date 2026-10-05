@@ -14,7 +14,7 @@ use Bioinf::Basic qw(:all);
 # the argument checks that need none of its programs are in t/checks.t.
 unless (eval { require Alien::Bioinf; !grep { !-x $_ } Alien::Bioinf->clustalo, Alien::Bioinf->blast('blastp'), Alien::Bioinf->python }) {
 	# the reason up to "(@INC contains: ...", which would fill the screen
-	my ($why) = $@ ? $@ =~ /\A(.*?)(?: \(| at \S+ line \d|\n|\z)/ : 'no clustalo, blastp or python';
+	my ($why) = $@ ? $@ =~ /\A(.*?)(?: \(| at .+ line \d|\n|\z)/ : 'no clustalo, blastp or python';
 	plan skip_all => "Alien::Bioinf can't run its tools here: $why";
 }
 
@@ -25,8 +25,8 @@ tr/-//d foreach values %{ $seqs };
 sub png { open my $fh, '<:raw', $_[0] or return ''; read $fh, my $b, 8; $b }
 sub slurp { open my $fh, '<:raw', $_[0] or return ''; local $/; <$fh> }
 # the Creator each image's metadata carries: an SVG's <dc:title>, a PNG's tEXt chunk
-sub creator { my ($sub, $by) = @_; qr/\Q$FindBin::RealScript\E called using "$sub" in \S+Basic\.pm version \Q$Bioinf::Basic::VERSION\E on host \Q${\ Sys::Hostname::hostname()}\E \(\Q$^O\E, perl [\d.]+\), drawn by $by/ }
-my $by_py = qr/\S+msa_plot\.py with matplotlib [\d.]+/;
+sub creator { my ($sub, $by) = @_; qr/\Q$FindBin::RealScript\E called using "$sub" in .+Basic\.pm version \Q$Bioinf::Basic::VERSION\E on host \Q${\ Sys::Hostname::hostname()}\E \(\Q$^O\E, perl [\d.]+\), drawn by $by/ }
+my $by_py = qr/.+msa_plot\.py with matplotlib [\d.]+/;
 
 # ---- plot_msa and plot_phylo -----------------------------------------------
 
@@ -81,9 +81,9 @@ is png($r->{'output.file'}), "\x89PNG\r\n\x1a\n", 'a PNG tree image from the seq
 	like $svg, qr{<dc:title>DEG20010421</dc:title>}, 'whose Title is the title';
 	like $svg, qr{<dc:date>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[-+]\d\d:\d\d</dc:date>}, 'whose Date is to the second, with its UTC offset';
 	my $fa_sha = Digest::SHA->new(256)->addfile($fa, 'b')->hexdigest;
-	like $svg, qr{<dc:source>the FASTA file \Q$fa\E \(SHA-256 $fa_sha\), written with its gaps stripped to \S+ \(SHA-256 [0-9a-f]{64}\), which Clustal Omega aligned into \S+ \(SHA-256 [0-9a-f]{64}\)</dc:source>},
+	like $svg, qr{<dc:source>the FASTA file \Q$fa\E \(SHA-256 $fa_sha\), written with its gaps stripped to .+ \(SHA-256 [0-9a-f]{64}\), which Clustal Omega aligned into .+ \(SHA-256 [0-9a-f]{64}\)</dc:source>},
 		'whose Source names the FASTA, the ungapped copy and the alignment, each with its digest';
-	like $svg, qr{<dc:description>The guide tree Clustal Omega [\d.]+ wrote while aligning 4 sequences, run as: \S+clustalo --in .*--guidetree-out=\Q$keep\E},
+	like $svg, qr{<dc:description>The guide tree Clustal Omega [\d.]+ wrote while aligning 4 sequences, run as: .+clustalo --in .*--guidetree-out=\Q$keep\E},
 		'whose Description is the clustalo command';
 	like $svg, qr{The tree as drawn, in newick: \(.*S\.cerevisiae:[\d.]+.*\);</dc:description>}, 'and the newick drawn';
 	my $nw_sha = Digest::SHA->new(256)->addfile($keep, 'b')->hexdigest;
@@ -159,7 +159,7 @@ foreach my $bad (
 	[{ filename => $img, fasta => $fa, 'unaligned.fa' => $fa }, qr/both "fasta" and "unaligned.fa"/],
 	[{ filename => $img, fasta => [] }, qr/"fasta" must be a FASTA file name or a hash ref/],
 	[{ filename => $img, 'alignment.json' => $json, metric => 'hseq' }, qr/"hseq" isn't one of the metrics/],
-	[{ filename => $img, 'alignment.json' => catfile($dir, 'new.json') }, qr/needs "fasta" to align, or an existing "alignment.json" \(\S+new\.json doesn't exist yet\)/],
+	[{ filename => $img, 'alignment.json' => catfile($dir, 'new.json') }, qr/needs "fasta" to align, or an existing "alignment.json" \(.+new\.json doesn't exist yet\)/],
 	[{ filename => $img, 'alignment.json' => $json, order => ['nodot'] }, qr/can't get a genus and species from "nodot"/],
 ) {
 	eval { msa_quality_table(%{ $bad->[0] }) };
@@ -214,7 +214,7 @@ foreach my $bad (
 	[{ %view, 'color.residues' => { a => { 9 => 'red' } } }, qr/a has no residue 9/],
 	[{ %view, 'color.residues' => { a => { 1 => [1, 0] } } }, qr/must be a name or 3 numbers/],
 	[{ %view, order => ['z'] }, qr/"order" names proteins that aren't in the alignment: z/],
-	[{ %view, 'msa.file' => catfile($dir, 'none.fa') }, qr/"msa.file" \S+none\.fa doesn't exist/],
+	[{ %view, 'msa.file' => catfile($dir, 'none.fa') }, qr/"msa.file" .+none\.fa doesn't exist/],
 	[{ %view, fasta => $ab }, qr/doesn't know "fasta"/],
 	[{ %view, alignment => '\\centering' }, qr/doesn't know "alignment"/],
 	[{ 'output.tex.file' => $tex }, qr/needs "msa.file"/],

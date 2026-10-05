@@ -22,7 +22,8 @@ unless ($Config{cc} =~ /(?:^|[\/\\])cl(?:\.exe)?$/i) {
 	close $fh;
 	my $null = File::Spec->devnull;
 	foreach my $flag ('-std=gnu99', '-std=c99', '-xc99=all', '-qlanglvl=extc99', '-AC99', '') {
-		next if system("$Config{cc} $flag -c $src -o " . File::Spec->catfile($dir, 'c99.o') . " > $null 2> $null") != 0;
+		# quoted, since a temporary directory can have a space in it (a Windows user name)
+		next if system("$Config{cc} $flag -c \"$src\" -o \"" . File::Spec->catfile($dir, 'c99.o') . "\" > $null 2> $null") != 0;
 		$std = " $flag" if $flag ne '';
 		last;
 	}

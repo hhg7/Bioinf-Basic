@@ -90,7 +90,7 @@ SKIP: {
 	my $one = eval { fasta2hash($gz, 'nope') };
 	my $err_key = $@;
 	open STDERR, '>&', $saved or die $!;
-	like $err, qr/^fasta2hash: couldn't read all of \S+big\.fa\.gz: gzip exited [1-9]/, 'a truncated .gz dies, rather than returning part of it';
+	like $err, qr/^fasta2hash: couldn't read all of .+big\.fa\.gz: gzip exited [1-9]/, 'a truncated .gz dies, rather than returning part of it';
 	like $err_key, qr/couldn't read all of/, 'and so it does when a key was looked for to the end';
 }
 
