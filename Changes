@@ -32,3 +32,9 @@ Revision history for Bioinf-Basic
  - fasta2hash with a key no longer keeps every other defline it passes, to
    warn about their repeats: finding the last of 400,000 records went from
    87 MB and 0.25 s to 8 MB and 0.06 s.
+
+ - Arguments are named with underscores rather than dots: msa_file,
+   tree_file, output_file, output_tex_file, clustal_args, active_site_aa,
+   alignment_json, unaligned_fa, logscale_add, show_numbers,
+   color_residues, row_width and table_text_size. The dotted names now die
+   as unknown arguments.

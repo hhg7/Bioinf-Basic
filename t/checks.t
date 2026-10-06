@@ -53,10 +53,10 @@ dies_like sub { get_best_alignment_hit(spew('twice.json', qq({"BlastOutput2":[$r
 
 my %two = (fasta => { a => 'MK', b => 'MV' }, filename => catfile($dir, 'x.png'), query => 'a');
 foreach my $n (0, -1, 1.5, 'two') {
-	dies_like sub { plot_msa(%two, 'active.site.aa' => { X => $n }) },
+	dies_like sub { plot_msa(%two, 'active_site_aa' => { X => $n }) },
 		qr/^plot_msa: active site X must be a residue number, 1 or more, not "\Q$n\E"/, "active site $n dies, rather than counting from the end";
 }
-dies_like sub { plot_msa(%two, 'active.site.aa' => [1]) }, qr/^plot_msa: "active.site.aa" must be a hash ref/, 'active.site.aa must be a hash ref';
+dies_like sub { plot_msa(%two, 'active_site_aa' => [1]) }, qr/^plot_msa: "active_site_aa" must be a hash ref/, 'active_site_aa must be a hash ref';
 
 # ---- msa_quality_table ------------------------------------------------------
 
@@ -66,7 +66,7 @@ my $blast = { BlastOutput2 => [map {
 	my $q = $_;
 	{ report => { results => { bl2seq => [{ query_title => $q, hits => [map { $hit->($_) } 'A.b', 'C.d'] }] } } }
 } 'A.b', 'C.d'] };
-my %q = ('alignment.json' => $blast, filename => catfile($dir, 'q.png'), metric => 'evalue');
+my %q = ('alignment_json' => $blast, filename => catfile($dir, 'q.png'), metric => 'evalue');
 dies_like sub { msa_quality_table(%q, normalize => 1) },
 	qr/^msa_quality_table: can't normalize "evalue", since its largest value is 0, not above 0/, 'normalizing all-zero e-values dies, rather than dividing by 0';
 dies_like sub { msa_quality_table(%q, order => ['E.f']) },
@@ -76,16 +76,16 @@ dies_like sub { msa_quality_table(%q, order => ['E.f']) },
 
 my $ab = hash2fasta_file({ 'a_b^c~d' => 'MK-LV', 'e{f}' => 'M-QLV' }, catfile($dir, 'ab.aln.fa'));
 my $tex = catfile($dir, 'r.tex');
-my %view = ('msa.file' => $ab, 'output.tex.file' => $tex);
-foreach my $k ('row.width', 'split') {
+my %view = ('msa_file' => $ab, 'output_tex_file' => $tex);
+foreach my $k ('row_width', 'split') {
 	foreach my $v (0, -3, 'x') {
 		dies_like sub { clustal_view_residues(%view, $k => $v) }, qr/^clustal_view_residues: "\Q$k\E" must be a whole number, 1 or more, not "\Q$v\E"/,
-			"$k $v dies" . ($k eq 'row.width' && $v eq '0' ? ', rather than looping forever' : '');
+			"$k $v dies" . ($k eq 'row_width' && $v eq '0' ? ', rather than looping forever' : '');
 	}
 }
 foreach my $n (0, -1) {
-	dies_like sub { clustal_view_residues(%view, 'color.residues' => { 'e{f}' => { $n => 'red' } }) },
-		qr/^clustal_view_residues: a residue of e\{f\} in "color.residues" must be a residue number, 1 or more, not "$n"/,
+	dies_like sub { clustal_view_residues(%view, 'color_residues' => { 'e{f}' => { $n => 'red' } }) },
+		qr/^clustal_view_residues: a residue of e\{f\} in "color_residues" must be a residue number, 1 or more, not "$n"/,
 		"colouring residue $n dies, rather than colouring the last";
 }
 {

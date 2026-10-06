@@ -47,7 +47,7 @@ Out of scope:
 
 - **Paths the caller supplies.** Every function reads and writes exactly the
   files it is given, and `msa_quality_table()` writes its BLAST report to
-  `alignment.json` when that file does not exist yet. A program that builds a
+  `alignment_json` when that file does not exist yet. A program that builds a
   path out of untrusted data, or writes into a directory other users can
   write to, has the problem in the *calling* program.
 - **The LaTeX that `clustal_view_residues()` writes.** It is meant to be

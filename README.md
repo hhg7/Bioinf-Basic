@@ -12,10 +12,10 @@
     plot_msa(
     	fasta       => 'orthologs.fa',     # or { name => sequence }
     	filename    => 'msa.svg',          # .png, .pdf, ... too
-    	'tree.file' => 'orthologs.newick',
+    	'tree_file' => 'orthologs.newick',
     	title       => 'EF-3',
     );
-    plot_phylo('tree.file' => 'orthologs.newick', 'output.file' => 'tree.svg', title => 'EF-3');
+    plot_phylo('tree_file' => 'orthologs.newick', 'output_file' => 'tree.svg', title => 'EF-3');
 
 # DESCRIPTION
 
@@ -101,7 +101,7 @@ could be returned.
 ## plot_msa(%args)
 
 Aligns sequences with Clustal Omega and draws the alignment. Returns a hash ref
-of the files made: `filename`, `msa.file`, and `tree.file` if it was given.
+of the files made: `filename`, `msa_file`, and `tree_file` if it was given.
 Once the image is written it prints `wrote` and its file name to STDOUT, the
 name in black on yellow when STDOUT is a terminal.
 
@@ -113,7 +113,7 @@ name in black on yellow when STDOUT is a terminal.
 - `fasta`, `filename` (required): the sequences, as a FASTA file name or a
   hash ref of name => sequence (the function tells the two apart by whether it
   is a reference); and the image to draw, whose extension picks the format.
-- `msa.file`, `tree.file`: where to keep clustalo's alignment (FASTA; a
+- `msa_file`, `tree_file`: where to keep clustalo's alignment (FASTA; a
   temporary file otherwise) and its guide tree (newick; not made otherwise).
   Keep the tree to draw it with `plot_phylo` without aligning a second time.
 - `order`: names, first to last (default: the input order; for a hash,
@@ -121,10 +121,10 @@ name in black on yellow when STDOUT is a terminal.
 - `labels`: a hash ref of name => label to show instead. matplotlib mathtext
   works: `'C.albicans' => '$\it{C. albicans}$'`. Two sequences drawn under one
   label die, since they would be one row of the image.
-- `active.site.aa`, `query`: `{ His395 => 395, ... }`, a dashed vertical line
+- `active_site_aa`, `query`: `{ His395 => 395, ... }`, a dashed vertical line
   at each of these 1-based residue numbers of the sequence named by `query`.
   A number below 1 dies.
-- `title`, `xlabel`, `ylabel`, `threads`, `clustal.args`: the plot title; the
+- `title`, `xlabel`, `ylabel`, `threads`, `clustal_args`: the plot title; the
   axis labels (default "Amino Acid Residue" and "Protein & Species");
   clustalo threads (default 1); and an array ref of extra clustalo arguments.
 
@@ -134,21 +134,21 @@ With fewer than two sequences it warns and returns an empty hash ref.
 
 Draws a guide tree, with Biopython's `Bio.Phylo`, from a FASTA (aligned with
 Clustal Omega first) or from a newick file that `plot_msa` kept. Returns a
-hash ref of the files made or used: `output.file`, and `tree.file` and
-`msa.file` as below.
+hash ref of the files made or used: `output_file`, and `tree_file` and
+`msa_file` as below.
 
     plot_phylo(fasta => 't/data/DEG20010421.fa');   # writes phylo.svg
     plot_phylo(
-    	'tree.file'   => 'DEG20010421.newick',
-    	'output.file' => 'DEG20010421.tree.png',
+    	'tree_file'   => 'DEG20010421.newick',
+    	'output_file' => 'DEG20010421.tree.png',
     );
 
-- `output.file`: the image to draw (default `phylo.svg`, in the working
+- `output_file`: the image to draw (default `phylo.svg`, in the working
   directory); the extension picks the format.
-- `fasta`, `tree.file`: with `fasta` (as for `plot_msa`), the sequences are
-  aligned with Clustal Omega and the guide tree drawn; `tree.file` and
-  `msa.file` then say where to keep the tree and alignment, and `threads` and
-  `clustal.args` are as for `plot_msa`. Without `fasta`, `tree.file` is an
+- `fasta`, `tree_file`: with `fasta` (as for `plot_msa`), the sequences are
+  aligned with Clustal Omega and the guide tree drawn; `tree_file` and
+  `msa_file` then say where to keep the tree and alignment, and `threads` and
+  `clustal_args` are as for `plot_msa`. Without `fasta`, `tree_file` is an
   existing newick file to draw, such as one `plot_msa` kept, and no alignment
   is made.
 - `labels`, `title`: a hash ref of name => label for the tips, as for
@@ -174,7 +174,7 @@ the script that made it. An SVG holds all of this as Dublin Core in its
   command line; how many negative branch lengths were drawn as 0; the tips,
   with the label each was shown as; and the whole newick tree that was drawn.
 - Identifier, Relation: the SHA-256 of the newick file drawn, and the
-  `msa.file` and `tree.file` kept with the image, if any.
+  `msa_file` and `tree_file` kept with the image, if any.
 - Contributor: each piece of software that took part, with its version and,
   where it runs as a program, its path: Clustal Omega, Bioinf::Basic,
   Alien::Bioinf, perl, Python, matplotlib, Biopython and NumPy.
@@ -198,53 +198,53 @@ Draws an all-against-all BLAST score table with matplotlib, and returns
   against all with `blastp`. Gaps are stripped first, so an aligned FASTA,
   such as the one `plot_msa` keeps, will do. Names must look like
   `Genus.species[.strain]`. `fasta` is not needed when an existing
-  `alignment.json` is given. `unaligned.fa` is its old name.
-- `alignment.json`: the `blastp -outfmt 15` report, as a parsed hash ref or a
+  `alignment_json` is given. `unaligned_fa` is its old name.
+- `alignment_json`: the `blastp -outfmt 15` report, as a parsed hash ref or a
   file name. An existing file is read, and nothing is aligned; otherwise
   `blastp` is run on `fasta` and its report kept there for next time. Without
   it, the report is a temporary file.
 - `metric`: the hsp field to show (default `score`).
 - `normalize`: divide every value by the largest, after adding
-  `logscale.add` to both, so the scale runs to 1. A largest value of 0 or
+  `logscale_add` to both, so the scale runs to 1. A largest value of 0 or
   less, as `evalue` has when BLAST has rounded every e-value to 0, dies.
-- `order`, `logscale.add`, `default_undefined`, `title`, `cb_label`, `cb_min`,
-  `cb_max`, `cblogscale`, `show.numbers`: the sequences to show, in order; a
+- `order`, `logscale_add`, `default_undefined`, `title`, `cb_label`, `cb_min`,
+  `cb_max`, `cblogscale`, `show_numbers`: the sequences to show, in order; a
   number added to every value; the value of a pair with no hit (otherwise
   drawn grey); the title; the colour bar's label, lower and upper ends, and
   whether it is logarithmic; and whether each cell shows its number.
 
-`msa.file` is accepted and ignored, for old callers.
+`msa_file` is accepted and ignored, for old callers.
 
 ## clustal_view_residues(%args)
 
 Writes an alignment as LaTeX tables with chosen residues coloured, and returns
-`output.tex.file`, printing `wrote` and that file name to STDOUT, the name in
+`output_tex_file`, printing `wrote` and that file name to STDOUT, the name in
 black on cyan when STDOUT is a terminal. Protein names are written so that
 LaTeX prints them as they are, `_`, `^`, `{` and the like included.
 
-- `msa.file` (required): a FASTA file. If its sequences are all one length
+- `msa_file` (required): a FASTA file. If its sequences are all one length
   (such as the alignment `plot_msa` keeps) it is shown as it is; if not, it is
-  first aligned with Clustal Omega into a temporary file, and `msa.file`
+  first aligned with Clustal Omega into a temporary file, and `msa_file`
   itself is never written.
-- `output.tex.file` (required): the LaTeX file to write, meant to be
+- `output_tex_file` (required): the LaTeX file to write, meant to be
   `\input` into a document.
-- `color.residues`: `{ protein => { residue number => colour } }`, where
+- `color_residues`: `{ protein => { residue number => colour } }`, where
   residue numbers are 1-based and a colour is an xcolor name or
   `[r, g, b]`; a coloured column is coloured in every protein.
 - `track`: a protein that gets a row under it showing its coloured residue
   numbers.
 - `order`: an array ref of the proteins to show, top to bottom (default:
   sorted, ignoring case).
-- `row.width`: alignment columns per block (default 100).
+- `row_width`: alignment columns per block (default 100).
 - `split`: blocks per LaTeX table (default 4); further tables are captioned
   "(continued)".
 - `caption`: the table caption (default empty).
 - `label`: written as `\label{tab:label}`, or as `tab:label0`, `tab:label1`,
   ... when there is more than one table.
-- `table.text.size`: the LaTeX size command put at the start of each table
+- `table_text_size`: the LaTeX size command put at the start of each table
   (default `\footnotesize`).
-- `threads`, `clustal.args`: clustalo threads (default 1) and an array ref of
-  further clustalo arguments, when `msa.file` has to be aligned.
+- `threads`, `clustal_args`: clustalo threads (default 1) and an array ref of
+  further clustalo arguments, when `msa_file` has to be aligned.
 
 # Thanks
 

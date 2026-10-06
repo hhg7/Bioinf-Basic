@@ -15,18 +15,18 @@ plot_msa(
 	filename   => 'DEG20010421.msa.svg',
 );
 clustal_view_residues(
-	'msa.file'        => 't/data/DEG20010421.fa',
-	'output.tex.file' => 'view_residues.tab.tex'
+	'msa_file'        => 't/data/DEG20010421.fa',
+	'output_tex_file' => 'view_residues.tab.tex'
 );
 clustal_view_residues(
-	'msa.file'        => 't/data/DEG20010421.fa',
-	'output.tex.file' => 'ex.tex',
-	'color.residues'  => {
+	'msa_file'        => 't/data/DEG20010421.fa',
+	'output_tex_file' => 'ex.tex',
+	'color_residues'  => {
      # residue numbers are 1-based in S.cerevisiae's own sequence, not alignment columns
      'S.cerevisiae' => { 3 => 'red', 8 => 'blue', 9 => [0, 0.6, 0] },   # xcolor name, or [r,
 	},
 	track       => 'S.cerevisiae',   # adds a row under it with those residue numbers
-	'row.width' => 7,
+	'row_width' => 7,
 	caption     => 'Catalytic residues of \textit{S. cerevisiae}',
 	label       => 'active',
 );
