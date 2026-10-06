@@ -1,0 +1,451 @@
+        -:    0:Source:Basic.xs
+        -:    0:Graph:./Basic.gcno
+        -:    0:Data:./Basic.gcda
+        -:    0:Runs:6
+        -:    1:/*FASTA reading and writing for Bioinf::Basic.
+        -:    2:
+        -:    3:fasta2hash() and hash2fasta_file() used to be pure perl in ~/Scripts/bioinf.pm:
+        -:    4:one readline, chomp and string append per line in, and one substr-sized SV per
+        -:    5:80-column line out. Here a file is read in large blocks and every line of a
+        -:    6:record is appended straight onto that record's SV, so no per-line SV is ever
+        -:    7:made, and each finished sequence is shrunk to its length, which is the RAM a
+        -:    8:proteome or genome actually needs rather than whatever the last buffer growth
+        -:    9:left. On the file described at FASTA_BLOCK below, bioinf.pm read it in 3.83 s
+        -:   10:with a peak RSS of 1,098 MB, and this in 0.80 s and 967 MB, 900 MB of which is
+        -:   11:the sequences themselves; writing it back took 44.44 s and takes 0.97 s, and
+        -:   12:the two files are byte-identical. The perl side (lib/Bioinf/Basic.pm) opens and
+        -:   13:closes the files.
+        -:   14:
+        -:   15:Every croak() and warn() here starts with C99's __func__, so a message names
+        -:   16:the C function that raised it (read_fasta or write_fasta) and stays right if
+        -:   17:one is renamed.*/
+        -:   18:#define PERL_NO_GET_CONTEXT
+        -:   19:#include "EXTERN.h"
+        -:   20:#include "perl.h"
+        -:   21:#include "XSUB.h"
+        -:   22:#include <string.h>
+        -:   23:/*`restrict` is spelled bare, which is C99 syntax.
+        -:   24:
+        -:   25:It is carried only by read_fasta()'s block buffer, which this file allocates
+        -:   26:itself and reaches through nothing but that pointer and the ones derived from
+        -:   27:it. Every other pointer here is perl's: an SV, AV or HV, or the PV inside one,
+        -:   28:which the perl API may alias behind the code's back -- in write_fasta() a
+        -:   29:defline and its sequence can be COW copies of the one buffer -- so the
+        -:   30:qualifier would be a false promise. perl is built with -fno-strict-aliasing,
+        -:   31:where `restrict` is the only disambiguation there is, but it earns nothing even
+        -:   32:on the buffer: the loop over it stores only through memchr() and sv_catpvn(),
+        -:   33:which are opaque calls the compiler must assume write anywhere. The generated
+        -:   34:code for this file was byte-identical with and without it (gcc -O2 -std=gnu99,
+        -:   35:2026-09-30), so the one annotation records the contract rather than buying
+        -:   36:speed.
+        -:   37:
+        -:   38:Makefile.PL probes for a C99 flag but cannot always find one. MSVC accepts the
+        -:   39:keyword only under /std:c11 or later and otherwise spells it __restrict, older
+        -:   40:gcc spells it __restrict__, and a strict C89 compiler has no equivalent. Map it
+        -:   41:where a spelling exists and define it away where none does -- the same block as
+        -:   42:~/Scripts/stats/LikeR.xs. It sits below every #include so that it cannot
+        -:   43:rewrite a parameter named `restrict` inside a system header.*/
+        -:   44:#if !defined(__cplusplus) && !defined(restrict)
+        -:   45:#  if defined(_MSC_VER)
+        -:   46:#    define restrict __restrict
+        -:   47:#  elif !defined(__STDC_VERSION__) || __STDC_VERSION__ < 199901L
+        -:   48:#    if defined(__GNUC__)
+        -:   49:#      define restrict __restrict__
+        -:   50:#    else
+        -:   51:#      define restrict /*no spelling available; annotation only*/
+        -:   52:#    endif
+        -:   53:#  endif
+        -:   54:#endif
+        -:   55:/*PerlIO_read() request size. Reading a 928 MB FASTA of 400,000 records in
+        -:   56:60-column lines, on this machine on 2026-09-29, took 0.84 s with 16 KiB blocks,
+        -:   57:0.80 s with 64 KiB, 0.81 s with 256 KiB and 0.82 s with 1 MiB (best of three
+        -:   58:each, file in the page cache), so nothing is gained past 64 KiB. Build with
+        -:   59:DEFINE=-DFASTA_BLOCK=<bytes> to try another.*/
+        -:   60:#ifndef FASTA_BLOCK
+        -:   61:#define FASTA_BLOCK 65536
+        -:   62:#endif
+        -:   63:
+        -:   64:/*Drop a trailing '\r' left by a CRLF file. It is chopped when the line ends
+        -:   65:rather than when it is read, because a block can end between the '\r' and
+        -:   66:its '\n'.*/
+function chop_cr called 10640 returned 100% blocks executed 100%
+    10640:   67:static void chop_cr(SV *sv) {
+    10640:   68:	if (SvCUR(sv) && SvPVX(sv)[SvCUR(sv) - 1] == '\r') SvCUR_set(sv, SvCUR(sv) - 1);
+    10640:   68-block  0
+branch  0 taken 10631 (fallthrough)
+branch  1 taken 9
+    10631:   68-block  1
+branch  2 taken 11 (fallthrough)
+branch  3 taken 10620
+       11:   68-block  2
+    10640:   69:}
+        -:   70:
+        -:   71:/*Every record of fh as a hash of defline => sequence, or with key given only
+        -:   72:that record's sequence (undef if it is absent), reading no further than the
+        -:   73:defline after it. name is the file's name, for messages. order, when not NULL,
+        -:   74:gets each defline in file order.
+        -:   75:
+        -:   76:A repeated defline is warned about and its sequences concatenated, which is
+        -:   77:what bioinf.pm did: it is the file that is wrong, and nothing here can say
+        -:   78:which of the two records was meant. With key given, only a repeat of key is
+        -:   79:looked for. Finding the others would mean keeping every defline read on the way
+        -:   80:to key: a hash of 400,000 keys, for one record of a proteome.*/
+function read_fasta called 57 returned 96% blocks executed 93%
+       57:   81:static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
+       57:   82:	HV *out = (HV*)sv_2mortal((SV*)newHV());
+       57:   82-block  0
+call    0 returned 57
+call    1 returned 57
+       57:   83:	SV *hdr = sv_2mortal(newSVpvs(""));
+call    0 returned 57
+call    1 returned 57
+       57:   84:	SV *seq = NULL; // record being filled; NULL before the first defline and while skipping
+       57:   85:	bool have_def = FALSE, in_hdr = FALSE, bol = TRUE, done = FALSE, fed = FALSE; // fed: the '\n' that ends an unterminated last line has been supplied
+       57:   86:	UV line = 0; // 1-based, as $. would count it
+        -:   87:	char *restrict buf;
+       57:   88:	Newx(buf, FASTA_BLOCK, char);
+call    0 returned 57
+       57:   89:	SAVEFREEPV(buf); // freed at the caller's LEAVE, croak or not
+call    0 returned 57
+      136:   90:	while (!done) {
+      136:   90-block  0
+branch  0 taken 132
+branch  1 taken 4 (fallthrough)
+      132:   91:		SSize_t n = PerlIO_read(fh, buf, FASTA_BLOCK);
+      132:   91-block  0
+call    0 returned 132
+     132*:   92:		if (n < 0 || PerlIO_error(fh)) croak("%s: error reading %s: %s", __func__, name, Strerror(errno));
+branch  0 taken 132 (fallthrough)
+branch  1 taken 0
+      132:   92-block  0
+call    2 returned 132
+branch  3 taken 0 (fallthrough)
+branch  4 taken 132
+    %%%%%:   92-block  1
+call    5 never executed
+call    6 never executed
+      132:   93:		if (n == 0) {
+      132:   93-block  0
+branch  0 taken 56 (fallthrough)
+branch  1 taken 76
+       56:   94:			if (bol || fed) break;
+       56:   94-block  0
+branch  0 taken 5 (fallthrough)
+branch  1 taken 51
+        5:   94-block  1
+branch  2 taken 5 (fallthrough)
+branch  3 taken 0
+        5:   95:			buf[0] = '\n';
+        5:   96:			n = 1;
+        5:   97:			fed = TRUE;
+        5:   97-block  0
+        -:   98:		}
+       81:   99:		const char *p = buf, *end = buf + n;
+    20822:  100:		while (p < end) {
+       81:  100-block  0
+    20822:  100-block  1
+branch  0 taken 20772
+branch  1 taken 50 (fallthrough)
+    20772:  101:			if (bol) {
+    20772:  101-block  0
+branch  0 taken 20592 (fallthrough)
+branch  1 taken 180
+    20592:  102:				line++;
+    20592:  103:				bol = FALSE;
+    20592:  104:				if (*p == '>') {
+    20592:  104-block  0
+branch  0 taken 155 (fallthrough)
+branch  1 taken 20437
+      155:  105:					in_hdr = TRUE;
+      155:  106:					SvCUR_set(hdr, 0);
+      155:  107:					p++;
+      155:  108:					continue;
+      155:  108-block  0
+        -:  109:				}
+        -:  110:			}
+    20617:  111:			const char *nl = (const char*)memchr(p, '\n', (size_t)(end - p));
+    20617:  112:			const char *e = nl ? nl : end;
+    20617:  112-block  0
+branch  0 taken 20592 (fallthrough)
+branch  1 taken 25
+    20592:  112-block  1
+       25:  112-block  2
+    20617:  113:			if (in_hdr) sv_catpvn(hdr, p, (STRLEN)(e - p));
+    20617:  113-block  0
+branch  0 taken 157 (fallthrough)
+branch  1 taken 20460
+      157:  113-block  1
+call    2 returned 157
+    20460:  114:			else if (seq) sv_catpvn(seq, p, (STRLEN)(e - p));
+    20460:  114-block  0
+branch  0 taken 10497 (fallthrough)
+branch  1 taken 9963
+    10497:  114-block  1
+call    2 returned 10497
+     9963:  115:			else if (!have_def && e > p && !(e - p == 1 && *p == '\r'))
+     9963:  115-block  0
+branch  0 taken 3 (fallthrough)
+branch  1 taken 9960
+        3:  115-block  1
+branch  2 taken 2 (fallthrough)
+branch  3 taken 1
+        2:  115-block  2
+branch  4 taken 1 (fallthrough)
+branch  5 taken 1
+        1:  115-block  3
+branch  6 taken 0 (fallthrough)
+branch  7 taken 1
+        1:  116:				croak("%s: %s line %" UVuf " is sequence, but no defline (\">...\") has come before it", __func__, name, line);
+        1:  116-block  0
+call    0 returned 0
+    20616:  117:			if (!nl) break;
+    20616:  117-block  0
+branch  0 taken 25 (fallthrough)
+branch  1 taken 20591
+       25:  117-block  1
+    20591:  118:			p = nl + 1;
+    20591:  119:			bol = TRUE;
+    20591:  120:			if (!in_hdr) {
+    20591:  120-block  0
+branch  0 taken 20436 (fallthrough)
+branch  1 taken 155
+    20436:  121:				if (seq) chop_cr(seq);
+    20436:  121-block  0
+branch  0 taken 10485 (fallthrough)
+branch  1 taken 9951
+    10485:  121-block  1
+call    2 returned 10485
+    20436:  122:				continue;
+    20436:  122-block  0
+        -:  123:			}
+      155:  124:			in_hdr = FALSE;
+      155:  125:			chop_cr(hdr);
+      155:  125-block  0
+call    0 returned 155
+      155:  126:			if (!SvCUR(hdr)) croak("%s: %s line %" UVuf " is a defline with no name", __func__, name, line);
+branch  0 taken 1 (fallthrough)
+branch  1 taken 154
+        1:  126-block  0
+call    2 returned 0
+     154*:  127:			if (seq) SvPV_shrink_to_cur(seq);
+      154:  127-block  0
+branch  0 taken 82 (fallthrough)
+branch  1 taken 72
+       82:  127-block  1
+branch  2 taken 49 (fallthrough)
+branch  3 taken 33
+       49:  127-block  2
+branch  4 taken 0 (fallthrough)
+branch  5 taken 49
+    %%%%%:  127-block  3
+call    6 never executed
+       49:  127-block  4
+       33:  127-block  5
+       82:  127-block  6
+branch  7 taken 36 (fallthrough)
+branch  8 taken 46
+       36:  127-block  7
+call    9 returned 36
+      154:  128:			bool is_key = key && sv_eq(hdr, key);
+      154:  128-block  0
+branch  0 taken 36 (fallthrough)
+branch  1 taken 118
+       36:  128-block  1
+call    2 returned 36
+branch  3 taken 9 (fallthrough)
+branch  4 taken 27
+        9:  128-block  2
+      145:  128-block  3
+      154:  129:			if (key && !is_key && hv_exists_ent(out, key, 0)) {
+      154:  129-block  0
+branch  0 taken 36 (fallthrough)
+branch  1 taken 118
+       36:  129-block  1
+branch  2 taken 27 (fallthrough)
+branch  3 taken 9
+       27:  129-block  2
+call    4 returned 27
+branch  5 taken 4 (fallthrough)
+branch  6 taken 23
+        4:  130:				done = TRUE; // the wanted record is complete
+        4:  131:				break;
+        4:  131-block  0
+        -:  132:			}
+      150:  133:			have_def = TRUE;
+      150:  134:			if (key && !is_key) {
+      150:  134-block  0
+branch  0 taken 32 (fallthrough)
+branch  1 taken 118
+       32:  134-block  1
+branch  2 taken 23 (fallthrough)
+branch  3 taken 9
+       23:  135:				seq = NULL;
+       23:  136:				continue;
+       23:  136-block  0
+        -:  137:			}
+      127:  138:			if (hv_exists_ent(out, hdr, 0))
+      127:  138-block  0
+call    0 returned 127
+branch  1 taken 2 (fallthrough)
+branch  2 taken 125
+        2:  139:				warn("%s: \"%s\" appears more than once in %s (line %" UVuf "); its sequences will be concatenated", __func__, SvPV_nolen(hdr), name, line);
+        2:  139-block  0
+call    0 returned 2
+      125:  140:			else if (order) av_push(order, newSVsv(hdr));
+      125:  140-block  0
+branch  0 taken 20 (fallthrough)
+branch  1 taken 105
+       20:  140-block  1
+call    2 returned 20
+call    3 returned 20
+      127:  141:			seq = HeVAL(hv_fetch_ent(out, hdr, 1, 0));
+      127:  141-block  0
+call    0 returned 127
+      127:  142:			if (!SvOK(seq)) sv_setpvs(seq, "");
+branch  0 taken 125 (fallthrough)
+branch  1 taken 2
+      125:  142-block  0
+call    2 returned 125
+        -:  143:		}
+        -:  144:	}
+      55*:  145:	if (seq) SvPV_shrink_to_cur(seq);
+       55:  145-block  0
+branch  0 taken 48 (fallthrough)
+branch  1 taken 7
+       48:  145-block  1
+branch  2 taken 18 (fallthrough)
+branch  3 taken 30
+       18:  145-block  2
+branch  4 taken 0 (fallthrough)
+branch  5 taken 18
+    %%%%%:  145-block  3
+call    6 never executed
+       18:  145-block  4
+       30:  145-block  5
+       48:  145-block  6
+branch  7 taken 10 (fallthrough)
+branch  8 taken 38
+       10:  145-block  7
+call    9 returned 10
+       55:  146:	if (!key) return newRV_inc((SV*)out);
+       55:  146-block  0
+branch  0 taken 41 (fallthrough)
+branch  1 taken 14
+       41:  146-block  1
+call    2 returned 41
+       14:  147:	HE *he = hv_fetch_ent(out, key, 0, 0);
+       14:  147-block  0
+call    0 returned 14
+       14:  148:	return he ? SvREFCNT_inc_simple_NN(HeVAL(he)) : newSV(0); // not a copy: out is mortal, so this becomes the only reference
+branch  0 taken 8 (fallthrough)
+branch  1 taken 6
+        8:  148-block  0
+        6:  148-block  1
+call    2 returned 6
+       14:  148-block  2
+        -:  149:}
+        -:  150:
+        -:  151:/*Each key of h named in order, as ">key" and then its sequence broken into
+        -:  152:lines of width characters; width 0 puts each sequence on one line.*/
+function write_fasta called 29 returned 93% blocks executed 82%
+       29:  153:static void write_fasta(pTHX_ PerlIO *fh, HV *h, AV *order, STRLEN width) {
+      109:  154:	for (SSize_t i = 0; i <= av_len(order); i++) {
+       29:  154-block  0
+       80:  154-block  1
+      109:  154-block  2
+call    0 returned 109
+branch  1 taken 82
+branch  2 taken 27 (fallthrough)
+       82:  155:		SV **k = av_fetch(order, i, 0);
+       82:  155-block  0
+call    0 returned 82
+       82:  156:		if (!k || !SvOK(*k)) croak("%s: element %" IVdf " of the order is undefined", __func__, (IV)i);
+branch  0 taken 82 (fallthrough)
+branch  1 taken 0
+       82:  156-block  0
+branch  2 taken 1 (fallthrough)
+branch  3 taken 81
+        1:  156-block  1
+call    4 returned 0
+       81:  157:		HE *he = hv_fetch_ent(h, *k, 0, 0);
+       81:  157-block  0
+call    0 returned 81
+        -:  158:		STRLEN kl, sl;
+        -:  159:		// kp and sp not restrict: a defline and its sequence may share one COW buffer
+       81:  160:		const char *kp = SvPV_const(*k, kl);
+       81:  161:		if (!he || !SvOK(HeVAL(he))) croak("%s: \"%s\" has no sequence in the hash", __func__, kp);
+       81:  161-block  0
+branch  0 taken 80 (fallthrough)
+branch  1 taken 1
+       80:  161-block  1
+branch  2 taken 0 (fallthrough)
+branch  3 taken 80
+        1:  161-block  2
+call    4 returned 0
+       80:  162:		const char *sp = SvPV_const(HeVAL(he), sl);
+       80:  162-block  0
+       80:  163:		PerlIO_putc(fh, '>');
+       80:  163-block  0
+call    0 returned 80
+       80:  164:		PerlIO_write(fh, kp, kl);
+call    0 returned 80
+       80:  165:		PerlIO_putc(fh, '\n');
+call    0 returned 80
+       80:  166:		STRLEN w = width ? width : sl;
+branch  0 taken 73 (fallthrough)
+branch  1 taken 7
+       73:  166-block  0
+        7:  166-block  1
+      304:  167:		for (STRLEN o = 0; o < sl; o += w) {
+       80:  167-block  0
+      304:  167-block  1
+branch  0 taken 224
+branch  1 taken 80 (fallthrough)
+      224:  168:			PerlIO_write(fh, sp + o, sl - o < w ? sl - o : w);
+      224:  168-block  0
+call    0 returned 224
+      224:  169:			PerlIO_putc(fh, '\n');
+call    0 returned 224
+        -:  170:		}
+        -:  171:	}
+      27*:  172:	if (PerlIO_error(fh)) croak("%s: error writing FASTA: %s", __func__, Strerror(errno));
+       27:  172-block  0
+call    0 returned 27
+branch  1 taken 0 (fallthrough)
+branch  2 taken 27
+    %%%%%:  172-block  1
+call    3 never executed
+call    4 never executed
+       27:  173:}
+        -:  174:
+        -:  175:MODULE = Bioinf::Basic	PACKAGE = Bioinf::Basic
+        -:  176:PROTOTYPES: DISABLE
+        -:  177:
+        -:  178:SV *
+        -:  179:_read_fasta(fh, key, name, order = NULL)
+        -:  180:	PerlIO *fh
+        -:  181:	SV *key
+        -:  182:	const char *name
+        -:  183:	AV *order
+        -:  184:CODE:
+       57:  185:	RETVAL = read_fasta(aTHX_ fh, SvOK(key) ? key : NULL, name, order);
+       57:  185-block  0
+branch  0 taken 14 (fallthrough)
+branch  1 taken 43
+       14:  185-block  1
+       43:  185-block  2
+       57:  185-block  3
+call    2 returned 55
+        -:  186:OUTPUT:
+        -:  187:	RETVAL
+        -:  188:
+        -:  189:void
+        -:  190:_write_fasta(fh, h, order, width)
+        -:  191:	PerlIO *fh
+        -:  192:	HV *h
+        -:  193:	AV *order
+        -:  194:	UV width
+        -:  195:CODE:
+       29:  196:	write_fasta(aTHX_ fh, h, order, (STRLEN)width);
+       29:  196-block  0
+call    0 returned 27

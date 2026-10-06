@@ -14,7 +14,7 @@ script Matplotlib::Simple 0.317's colored_table wrote for msa_quality_table
 before this took its place: a gist_rainbow-coloured matplotlib table over a
 hidden imshow that carries the colorbar, with empty cells grey.
 """
-import argparse, datetime, hashlib, json, os, platform, sys
+import argparse, json, platform, sys
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -32,8 +32,8 @@ ap.add_argument('--y', default='Protein & Species', help='y-axis label')
 ap.add_argument('--s', help='JSON {label: 0-based alignment column} of vertical lines to draw')
 ap.add_argument('--l', help='JSON {tip name: label} for --tree')
 ap.add_argument('--table', help='JSON file of the table to draw instead: rows, cols, cells (null for none), vmin, vmax, log, numbers, title, cblabel')
-ap.add_argument('--meta', help='JSON of further Dublin Core fields for --tree: Title, Source, Description, Relation, Contributor')
 ap.add_argument('--c', default='Bioinf::Basic', help='Creator metadata: the script and sub that called this')
+ap.add_argument('--p', help='JSON array of further provenance clauses to end the Creator with: the inputs and the commands that made them')
 ap.add_argument('--quiet', action='store_true', help="don't print 'wrote' and the output file; the caller prints its own")
 ap.add_argument('--argfile', help='a JSON array of every other argument, in place of them on the command line')
 a = ap.parse_args()
@@ -56,32 +56,22 @@ AA = dict(D='#a22c49', E='#a22c49', C='#c9c433', M='#c9c433', K='#0038a2', R='#0
 NT = dict(A='#56ae6c', G='#c9c433', T='#a22c49', C='#0038a2', N='#6979d3', U='#a22c49',
 	**{c: '#6979d3' for c in 'RYSWKMBDHVX'}, **{'-': '#FFFFFF'})
 
-# The Dublin Core fields each backend takes, after matplotlib's savefig(): SVG
-# writes them all into <metadata>, PNG writes any key as a tEXt chunk, PDF takes
-# only its own Info keys (Description going in as Subject), and PS and EPS
-# only Creator. jpg and the rest take none, and refuse any.
-DC = ('Title', 'Date', 'Source', 'Description', 'Identifier', 'Relation', 'Contributor', 'Keywords')
-
-def save(fig, also=None, dc=None):
-	"""also: a further library that drew the image, as "name version"; dc:
-	Dublin Core fields to write beside the Creator, where the format allows."""
-	creator = a.c + ', drawn by ' + __file__ + ' with matplotlib ' + matplotlib.__version__
-	if also:
-		creator += ' and ' + also
+def save(fig, title, also=(), notes=()):
+	"""Writes the figure to --o, with its whole provenance as one Creator line,
+	as Matplotlib::Simple 0.319 writes it: --c, this script and the versions
+	it ran with, then the title (title, or None for none), the
+	--p clauses, and notes, a list of this script's own. also: further
+	libraries that drew the image, as "name version"."""
+	# the Python and matplotlib versions are read here, not by the perl that
+	# wrote a.c, which never sees this interpreter, after Matplotlib::Simple
+	creator = ', '.join([a.c + ', drawn by ' + __file__ + ' with Python ' + platform.python_version()
+		+ ' (' + sys.executable + ')', 'matplotlib ' + matplotlib.__version__, *also])
+	clauses = ['titled ' + json.dumps(title, ensure_ascii=False) if title else 'untitled']
+	creator += ''.join('; ' + c for c in clauses + (json.loads(a.p) if a.p else []) + list(notes))
+	# savefig() takes a Creator in these formats only, and refuses any metadata
+	# in jpg and the rest
 	fmt = a.o.rsplit('.', 1)[-1].lower()
-	dc = dc or {}
-	if fmt == 'svg':
-		md = {'Creator': creator, **dc}
-	elif fmt == 'png':
-		# tEXt values are plain strings
-		md = {'Creator': creator, **{k: '; '.join(v) if isinstance(v, list) else str(v) for k, v in dc.items()}}
-	elif fmt == 'pdf':
-		md = {'Creator': creator, **{k: v for k, v in (('Title', dc.get('Title')), ('Subject', dc.get('Description')),
-			('Keywords', '; '.join(dc.get('Keywords', [])) or None)) if v}}
-	elif fmt in ('ps', 'eps'):
-		md = {'Creator': creator}
-	else:
-		md = None
+	md = {'Creator': creator} if fmt in ('svg', 'png', 'pdf', 'ps', 'eps') else None
 	fig.savefig(a.o, bbox_inches='tight', pad_inches=0.1, metadata=md)
 	if not a.quiet:
 		print('wrote ' + a.o)
@@ -137,7 +127,7 @@ def draw_alignment():
 		ax.add_collection(LineCollection([[(col, height), (col, 0)] for col in sites.values()],
 			colors='black', linewidth=3, alpha=0.5, linestyle='dashed'))
 		adjust_text(texts, only_move={'text': 'x', 'static': 'x', 'explode': 'x', 'pull': 'x'})
-	save(f)
+	save(f, a.t)
 
 def draw_tree():
 	try:
@@ -147,8 +137,7 @@ def draw_tree():
 		raise SystemExit('--tree needs Biopython, which Alien::Bioinf installs')
 	labels = json.loads(a.l) if a.l else {}
 	with open(a.tree, 'rb') as fh:
-		raw = fh.read()
-	newick = raw.decode()
+		newick = fh.read().decode()
 	tree = Phylo.read(a.tree, 'newick')
 	# clustalo can write a slightly negative length; drawn as 0, as the
 	# ggtree script's ignore.negative.edge=TRUE did
@@ -169,23 +158,10 @@ def draw_tree():
 		ax.spines[side].set_visible(False)
 	ax.set_xlabel('substitutions per site')
 	ax.set_title(a.t)
-	dc = json.loads(a.meta) if a.meta else {}
-	# to the second, with the UTC offset: matplotlib's own SVG Date is the day
-	# alone. SOURCE_DATE_EPOCH, where set, is left to matplotlib instead, so
-	# that a reproducible build stays reproducible.
-	if 'SOURCE_DATE_EPOCH' not in os.environ:
-		dc['Date'] = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
-	dc['Identifier'] = 'sha256:' + hashlib.sha256(raw).hexdigest() + ' of the newick file drawn'
-	desc = dc.get('Description', '')
-	if clamped:
-		desc += ' ' + str(clamped) + ' negative branch length' + ('s were' if clamped > 1 else ' was') + ' drawn as 0.'
-	shown = [t + (' (shown as ' + labels[t] + ')' if t in labels else '') for t in tips]
-	dc['Description'] = (desc + ' ' + str(len(tips)) + ' tips: ' + ', '.join(shown)
-		+ '. The tree as drawn, in newick: ' + ''.join(newick.split())).strip()
-	dc['Keywords'] = ['phylogenetic tree', 'newick'] + tips
-	dc['Contributor'] = dc.get('Contributor', []) + ['Python ' + platform.python_version() + ' (' + sys.executable + ')',
-		'matplotlib ' + matplotlib.__version__, 'Biopython ' + Bio.__version__, 'NumPy ' + np.__version__]
-	save(f, 'Biopython ' + Bio.__version__, {k: dc[k] for k in DC if k in dc})
+	notes = [str(clamped) + ' negative branch length' + ('s' if clamped > 1 else '') + ' drawn as 0'] if clamped else []
+	notes.append(str(len(tips)) + ' tips: ' + ', '.join(t + (' (shown as ' + labels[t] + ')' if t in labels else '') for t in tips))
+	notes.append('the tree as drawn, in newick: ' + ''.join(newick.split()))
+	save(f, a.t, ['Biopython ' + Bio.__version__, 'NumPy ' + np.__version__], notes)
 
 def draw_table():
 	with open(a.table) as fh:
@@ -205,7 +181,7 @@ def draw_table():
 	ax.set_xticks([])
 	ax.set_yticks([])
 	ax.set_title(t['title'])
-	save(f)
+	save(f, t['title'])
 
 if a.table:
 	draw_table()

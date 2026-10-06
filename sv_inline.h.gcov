@@ -1,0 +1,1218 @@
+        -:    0:Source:/home/con/perl5/perlbrew/perls/perl-5.44.0/lib/5.44.0/x86_64-linux/CORE/sv_inline.h
+        -:    0:Graph:./Basic.gcno
+        -:    0:Data:./Basic.gcda
+        -:    0:Runs:6
+        -:    1:/*    sv_inline.h
+        -:    2: *
+        -:    3: *    Copyright (C) 2022 by Larry Wall and others
+        -:    4: *
+        -:    5: *    You may distribute under the terms of either the GNU General Public
+        -:    6: *    License or the Artistic License, as specified in the README file.
+        -:    7: *
+        -:    8: */
+        -:    9:
+        -:   10:/* This file contains the newSV_type and newSV_type_mortal functions, as well as
+        -:   11: * the various struct and macro definitions they require. In the main, these
+        -:   12: * definitions were moved from sv.c, where many of them continue to also be used.
+        -:   13: * (In Perl_more_bodies, Perl_sv_upgrade and Perl_sv_clear, for example.) Code
+        -:   14: * comments associated with definitions and functions were also copied across
+        -:   15: * verbatim.
+        -:   16: *
+        -:   17: * The rationale for having these as inline functions, rather than in sv.c, is
+        -:   18: * that the target type is very often known at compile time, and therefore
+        -:   19: * optimum code can be emitted by the compiler, rather than having all calls
+        -:   20: * traverse the many branches of Perl_sv_upgrade at runtime.
+        -:   21: */
+        -:   22:
+        -:   23:/* This definition came from perl.h*/
+        -:   24:
+        -:   25:/* The old value was hard coded at 1008. (4096-16) seems to be a bit faster,
+        -:   26:   at least on FreeBSD.  YMMV, so experiment.  */
+        -:   27:#ifndef PERL_ARENA_SIZE
+        -:   28:#define PERL_ARENA_SIZE 4080
+        -:   29:#endif
+        -:   30:
+        -:   31:/* All other pre-existing definitions and functions that were moved into this
+        -:   32: * file originally came from sv.c. */
+        -:   33:
+        -:   34:#ifdef PERL_POISON
+        -:   35:#  define SvARENA_CHAIN(sv)     ((sv)->sv_u.svu_rv)
+        -:   36:#  define SvARENA_CHAIN_SET(sv,val)     (sv)->sv_u.svu_rv = MUTABLE_SV((val))
+        -:   37:/* Whilst I'd love to do this, it seems that things like to check on
+        -:   38:   unreferenced scalars
+        -:   39:#  define POISON_SV_HEAD(sv)    PoisonNew(sv, 1, struct STRUCT_SV)
+        -:   40:*/
+        -:   41:#  define POISON_SV_HEAD(sv)    PoisonNew(&SvANY(sv), 1, void *), \
+        -:   42:                                PoisonNew(&SvREFCNT(sv), 1, U32)
+        -:   43:#else
+        -:   44:#  define SvARENA_CHAIN(sv)     SvANY(sv)
+        -:   45:#  define SvARENA_CHAIN_SET(sv,val)     SvANY(sv) = (void *)(val)
+        -:   46:#  define POISON_SV_HEAD(sv)
+        -:   47:#endif
+        -:   48:
+        -:   49:#ifdef PERL_MEM_LOG
+        -:   50:#  define MEM_LOG_NEW_SV(sv, file, line, func)  \
+        -:   51:            Perl_mem_log_new_sv(sv, file, line, func)
+        -:   52:#  define MEM_LOG_DEL_SV(sv, file, line, func)  \
+        -:   53:            Perl_mem_log_del_sv(sv, file, line, func)
+        -:   54:#else
+        -:   55:#  define MEM_LOG_NEW_SV(sv, file, line, func)  NOOP
+        -:   56:#  define MEM_LOG_DEL_SV(sv, file, line, func)  NOOP
+        -:   57:#endif
+        -:   58:
+        -:   59:#define uproot_SV(p) \
+        -:   60:    STMT_START {                                        \
+        -:   61:        (p) = PL_sv_root;                               \
+        -:   62:        PL_sv_root = MUTABLE_SV(SvARENA_CHAIN(p));              \
+        -:   63:        ++PL_sv_count;                                  \
+        -:   64:    } STMT_END
+        -:   65:
+        -:   66:/* new_SV(): return a new, empty SV head */
+        -:   67:PERL_STATIC_INLINE SV*
+function Perl_new_sv called 57 returned 100% blocks executed 80%
+       57:   68:Perl_new_sv(pTHX_ const char *file, int line, const char *func)
+        -:   69:{
+        -:   70:    PERL_ARGS_ASSERT_NEW_SV;
+        -:   71:
+        -:   72:    SV* sv;
+        -:   73:#if !defined(DEBUG_LEAKING_SCALARS) || \
+        -:   74:     (!defined(DEBUGGING) && !defined(PERL_MEM_LOG))
+        -:   75:    PERL_UNUSED_ARG(file);
+        -:   76:    PERL_UNUSED_ARG(line);
+        -:   77:    PERL_UNUSED_ARG(func);
+        -:   78:#endif
+        -:   79:
+       57:   80:    if (PL_sv_root)
+       57:   80-block  0
+branch  0 taken 57 (fallthrough)
+branch  1 taken 0
+       57:   81:        uproot_SV(sv);
+       57:   81-block  0
+        -:   82:    else
+    #####:   83:        sv = Perl_more_sv(aTHX);
+    %%%%%:   83-block  0
+call    0 never executed
+       57:   84:    SvANY(sv) = 0;
+       57:   85:    SvREFCNT(sv) = 1;
+       57:   86:    SvFLAGS(sv) = 0;
+        -:   87:#ifdef DEBUG_LEAKING_SCALARS
+        -:   88:    sv->sv_debug_optype = PL_op ? PL_op->op_type : 0;
+        -:   89:    sv->sv_debug_line = (U16) (PL_parser && PL_parser->copline != NOLINE
+        -:   90:                ? PL_parser->copline
+        -:   91:                :  PL_curcop
+        -:   92:                    ? CopLINE(PL_curcop)
+        -:   93:                    : 0
+        -:   94:            );
+        -:   95:    sv->sv_debug_inpad = 0;
+        -:   96:    sv->sv_debug_parent = NULL;
+        -:   97:    sv->sv_debug_file = PL_curcop ? savesharedpv(CopFILE(PL_curcop)): NULL;
+        -:   98:
+        -:   99:    sv->sv_debug_serial = PL_sv_serial++;
+        -:  100:
+        -:  101:    MEM_LOG_NEW_SV(sv, file, line, func);
+        -:  102:    DEBUG_m(PerlIO_printf(Perl_debug_log, "0x%" UVxf ": (%05ld) new_SV (from %s:%d [%s])\n",
+        -:  103:            PTR2UV(sv), (long)sv->sv_debug_serial, file, line, func));
+        -:  104:#endif
+       57:  105:    return sv;
+       57:  105-block  0
+        -:  106:}
+        -:  107:#  define new_SV(p) (p)=Perl_new_sv(aTHX_ __FILE__, __LINE__, FUNCTION__)
+        -:  108:
+        -:  109:typedef struct xpvhv_with_aux XPVHV_WITH_AUX;
+        -:  110:
+        -:  111:struct body_details {
+        -:  112:    U8 body_size;      /* Size to allocate  */
+        -:  113:    U8 copy;           /* Size of structure to copy (may be shorter)  */
+        -:  114:    U8 offset;         /* Size of unalloced ghost fields to first alloced field*/
+        -:  115:    PERL_BITFIELD8 type : 5;        /* We have space for a sanity check. */
+        -:  116:    PERL_BITFIELD8 cant_upgrade : 1;/* Cannot upgrade this type */
+        -:  117:    PERL_BITFIELD8 zero_nv : 1;     /* zero the NV when upgrading from this */
+        -:  118:    PERL_BITFIELD8 arena : 1;       /* Allocated from an arena */
+        -:  119:    U32 arena_size;                 /* Size of arena to allocate */
+        -:  120:};
+        -:  121:
+        -:  122:#define ALIGNED_TYPE_NAME(name) name##_aligned
+        -:  123:#define ALIGNED_TYPE(name)             \
+        -:  124:    typedef union {    \
+        -:  125:        name align_me;                         \
+        -:  126:        NV nv;                         \
+        -:  127:        IV iv;                         \
+        -:  128:    } ALIGNED_TYPE_NAME(name)
+        -:  129:
+        -:  130:ALIGNED_TYPE(regexp);
+        -:  131:ALIGNED_TYPE(XPVGV);
+        -:  132:ALIGNED_TYPE(XPVLV);
+        -:  133:ALIGNED_TYPE(XPVAV);
+        -:  134:ALIGNED_TYPE(XPVHV);
+        -:  135:ALIGNED_TYPE(XPVHV_WITH_AUX);
+        -:  136:ALIGNED_TYPE(XPVCV);
+        -:  137:ALIGNED_TYPE(XPVFM);
+        -:  138:ALIGNED_TYPE(XPVIO);
+        -:  139:ALIGNED_TYPE(XPVOBJ);
+        -:  140:
+        -:  141:#define HADNV FALSE
+        -:  142:#define NONV TRUE
+        -:  143:
+        -:  144:
+        -:  145:#ifdef PURIFY
+        -:  146:/* With -DPURFIY we allocate everything directly, and don't use arenas.
+        -:  147:   This seems a rather elegant way to simplify some of the code below.  */
+        -:  148:#define HASARENA FALSE
+        -:  149:#else
+        -:  150:#define HASARENA TRUE
+        -:  151:#endif
+        -:  152:#define NOARENA FALSE
+        -:  153:
+        -:  154:/* Size the arenas to exactly fit a given number of bodies.  A count
+        -:  155:   of 0 fits the max number bodies into a PERL_ARENA_SIZE.block,
+        -:  156:   simplifying the default.  If count > 0, the arena is sized to fit
+        -:  157:   only that many bodies, allowing arenas to be used for large, rare
+        -:  158:   bodies (XPVFM, XPVIO) without undue waste.  The arena size is
+        -:  159:   limited by PERL_ARENA_SIZE, so we can safely oversize the
+        -:  160:   declarations.
+        -:  161: */
+        -:  162:#define FIT_ARENA0(body_size)                          \
+        -:  163:    ((size_t)(PERL_ARENA_SIZE / body_size) * body_size)
+        -:  164:#define FIT_ARENAn(count,body_size)                    \
+        -:  165:    ( count * body_size <= PERL_ARENA_SIZE)            \
+        -:  166:    ? count * body_size                                        \
+        -:  167:    : FIT_ARENA0 (body_size)
+        -:  168:#define FIT_ARENA(count,body_size)                     \
+        -:  169:   (U32)(count                                                 \
+        -:  170:    ? FIT_ARENAn (count, body_size)                    \
+        -:  171:    : FIT_ARENA0 (body_size))
+        -:  172:
+        -:  173:/* Calculate the length to copy. Specifically work out the length less any
+        -:  174:   final padding the compiler needed to add.  See the comment in sv_upgrade
+        -:  175:   for why copying the padding proved to be a bug.  */
+        -:  176:
+        -:  177:#define copy_length(type, last_member) \
+        -:  178:        STRUCT_OFFSET(type, last_member) \
+        -:  179:        + sizeof (((type*)SvANY((const SV *)0))->last_member)
+        -:  180:
+        -:  181:static const struct body_details fake_hv_with_aux =
+        -:  182:    /* The SVt_IV arena is used for (larger) PVHV bodies.  */
+        -:  183:    { sizeof(ALIGNED_TYPE_NAME(XPVHV_WITH_AUX)),
+        -:  184:      copy_length(XPVHV, xhv_max),
+        -:  185:      0,
+        -:  186:      SVt_PVHV, TRUE, NONV, HASARENA,
+        -:  187:      FIT_ARENA(0, sizeof(ALIGNED_TYPE_NAME(XPVHV_WITH_AUX))) };
+        -:  188:
+        -:  189:static const struct body_details bodies_by_type[] = {
+        -:  190:    /* HEs use this offset for their arena.  */
+        -:  191:    { 0, 0, 0, SVt_NULL, FALSE, NONV, NOARENA, 0 },
+        -:  192:
+        -:  193:    /* IVs are in the head, so the allocation size is 0.  */
+        -:  194:    { 0,
+        -:  195:      sizeof(IV), /* This is used to copy out the IV body.  */
+        -:  196:      STRUCT_OFFSET(XPVIV, xiv_iv), SVt_IV, FALSE, NONV,
+        -:  197:      NOARENA /* IVS don't need an arena  */, 0
+        -:  198:    },
+        -:  199:
+        -:  200:#if NVSIZE <= IVSIZE
+        -:  201:    { 0, sizeof(NV),
+        -:  202:      STRUCT_OFFSET(XPVNV, xnv_u),
+        -:  203:      SVt_NV, FALSE, HADNV, NOARENA, 0 },
+        -:  204:#else
+        -:  205:    { sizeof(NV), sizeof(NV),
+        -:  206:      STRUCT_OFFSET(XPVNV, xnv_u),
+        -:  207:      SVt_NV, FALSE, HADNV, HASARENA, FIT_ARENA(0, sizeof(NV)) },
+        -:  208:#endif
+        -:  209:
+        -:  210:    { sizeof(XPV) - STRUCT_OFFSET(XPV, xpv_cur),
+        -:  211:      copy_length(XPV, xpv_len) - STRUCT_OFFSET(XPV, xpv_cur),
+        -:  212:      + STRUCT_OFFSET(XPV, xpv_cur),
+        -:  213:      SVt_PV, FALSE, NONV, HASARENA,
+        -:  214:      FIT_ARENA(0, sizeof(XPV) - STRUCT_OFFSET(XPV, xpv_cur)) },
+        -:  215:
+        -:  216:    { sizeof(XINVLIST) - STRUCT_OFFSET(XPV, xpv_cur),
+        -:  217:      copy_length(XINVLIST, is_offset) - STRUCT_OFFSET(XPV, xpv_cur),
+        -:  218:      + STRUCT_OFFSET(XPV, xpv_cur),
+        -:  219:      SVt_INVLIST, TRUE, NONV, HASARENA,
+        -:  220:      FIT_ARENA(0, sizeof(XINVLIST) - STRUCT_OFFSET(XPV, xpv_cur)) },
+        -:  221:
+        -:  222:    { sizeof(XPVIV) - STRUCT_OFFSET(XPV, xpv_cur),
+        -:  223:      copy_length(XPVIV, xiv_u) - STRUCT_OFFSET(XPV, xpv_cur),
+        -:  224:      + STRUCT_OFFSET(XPV, xpv_cur),
+        -:  225:      SVt_PVIV, FALSE, NONV, HASARENA,
+        -:  226:      FIT_ARENA(0, sizeof(XPVIV) - STRUCT_OFFSET(XPV, xpv_cur)) },
+        -:  227:
+        -:  228:#if NVSIZE > 8 && PTRSIZE < 8 && MEM_ALIGNBYTES > 8
+        -:  229:    /* NV may need strict 16 byte alignment.
+        -:  230:
+        -:  231:       On 64-bit systems the NV ends up aligned despite the hack
+        -:  232:       avoiding allocation of xmg_stash and xmg_u, so only do this
+        -:  233:       for 32-bit systems.
+        -:  234:    */
+        -:  235:    { sizeof(XPVNV),
+        -:  236:      sizeof(XPVNV),
+        -:  237:      0,
+        -:  238:      SVt_PVNV, FALSE, HADNV, HASARENA,
+        -:  239:      FIT_ARENA(0, sizeof(XPVNV)) },
+        -:  240:#else
+        -:  241:    { sizeof(XPVNV) - STRUCT_OFFSET(XPV, xpv_cur),
+        -:  242:      copy_length(XPVNV, xnv_u) - STRUCT_OFFSET(XPV, xpv_cur),
+        -:  243:      + STRUCT_OFFSET(XPV, xpv_cur),
+        -:  244:      SVt_PVNV, FALSE, HADNV, HASARENA,
+        -:  245:      FIT_ARENA(0, sizeof(XPVNV) - STRUCT_OFFSET(XPV, xpv_cur)) },
+        -:  246:#endif
+        -:  247:    { sizeof(XPVMG), copy_length(XPVMG, xnv_u), 0, SVt_PVMG, FALSE, HADNV,
+        -:  248:      HASARENA, FIT_ARENA(0, sizeof(XPVMG)) },
+        -:  249:
+        -:  250:    { sizeof(ALIGNED_TYPE_NAME(regexp)),
+        -:  251:      sizeof(regexp),
+        -:  252:      0,
+        -:  253:      SVt_REGEXP, TRUE, NONV, HASARENA,
+        -:  254:      FIT_ARENA(0, sizeof(ALIGNED_TYPE_NAME(regexp)))
+        -:  255:    },
+        -:  256:
+        -:  257:    { sizeof(ALIGNED_TYPE_NAME(XPVGV)), sizeof(XPVGV), 0, SVt_PVGV, TRUE, HADNV,
+        -:  258:      HASARENA, FIT_ARENA(0, sizeof(ALIGNED_TYPE_NAME(XPVGV))) },
+        -:  259:
+        -:  260:    { sizeof(ALIGNED_TYPE_NAME(XPVLV)), sizeof(XPVLV), 0, SVt_PVLV, TRUE, HADNV,
+        -:  261:      HASARENA, FIT_ARENA(0, sizeof(ALIGNED_TYPE_NAME(XPVLV))) },
+        -:  262:
+        -:  263:    { sizeof(ALIGNED_TYPE_NAME(XPVAV)),
+        -:  264:      copy_length(XPVAV, xav_alloc),
+        -:  265:      0,
+        -:  266:      SVt_PVAV, TRUE, NONV, HASARENA,
+        -:  267:      FIT_ARENA(0, sizeof(ALIGNED_TYPE_NAME(XPVAV))) },
+        -:  268:
+        -:  269:    { sizeof(ALIGNED_TYPE_NAME(XPVHV)),
+        -:  270:      copy_length(XPVHV, xhv_max),
+        -:  271:      0,
+        -:  272:      SVt_PVHV, TRUE, NONV, HASARENA,
+        -:  273:      FIT_ARENA(0, sizeof(ALIGNED_TYPE_NAME(XPVHV))) },
+        -:  274:
+        -:  275:    { sizeof(ALIGNED_TYPE_NAME(XPVCV)),
+        -:  276:      sizeof(XPVCV),
+        -:  277:      0,
+        -:  278:      SVt_PVCV, TRUE, NONV, HASARENA,
+        -:  279:      FIT_ARENA(0, sizeof(ALIGNED_TYPE_NAME(XPVCV))) },
+        -:  280:
+        -:  281:    { sizeof(ALIGNED_TYPE_NAME(XPVFM)),
+        -:  282:      sizeof(XPVFM),
+        -:  283:      0,
+        -:  284:      SVt_PVFM, TRUE, NONV, NOARENA,
+        -:  285:      FIT_ARENA(20, sizeof(ALIGNED_TYPE_NAME(XPVFM))) },
+        -:  286:
+        -:  287:    { sizeof(ALIGNED_TYPE_NAME(XPVIO)),
+        -:  288:      sizeof(XPVIO),
+        -:  289:      0,
+        -:  290:      SVt_PVIO, TRUE, NONV, HASARENA,
+        -:  291:      FIT_ARENA(24, sizeof(ALIGNED_TYPE_NAME(XPVIO))) },
+        -:  292:
+        -:  293:    { sizeof(ALIGNED_TYPE_NAME(XPVOBJ)),
+        -:  294:      copy_length(XPVOBJ, xobject_fields),
+        -:  295:      0,
+        -:  296:      SVt_PVOBJ, TRUE, NONV, HASARENA,
+        -:  297:      FIT_ARENA(0, sizeof(ALIGNED_TYPE_NAME(XPVOBJ))) },
+        -:  298:};
+        -:  299:
+        -:  300:#define new_body_allocated(sv_type)            \
+        -:  301:    (void *)((char *)S_new_body(aTHX_ sv_type) \
+        -:  302:             - bodies_by_type[sv_type].offset)
+        -:  303:
+        -:  304:#ifdef PURIFY
+        -:  305:#if !(NVSIZE <= IVSIZE)
+        -:  306:#  define new_XNV()    safemalloc(sizeof(XPVNV))
+        -:  307:#endif
+        -:  308:#define new_XPV()    safemalloc(sizeof(XPV))
+        -:  309:#define new_XPVIV()    safemalloc(sizeof(XPVIV))
+        -:  310:#define new_XPVNV()    safemalloc(sizeof(XPVNV))
+        -:  311:#define new_XPVMG()    safemalloc(sizeof(XPVMG))
+        -:  312:
+        -:  313:#define del_body_by_type(p, type)       safefree(p)
+        -:  314:
+        -:  315:#else /* !PURIFY */
+        -:  316:
+        -:  317:#if !(NVSIZE <= IVSIZE)
+        -:  318:#  define new_XNV()    new_body_allocated(SVt_NV)
+        -:  319:#endif
+        -:  320:#define new_XPV()    new_body_allocated(SVt_PV)
+        -:  321:#define new_XPVIV()    new_body_allocated(SVt_PVIV)
+        -:  322:#define new_XPVNV()    new_body_allocated(SVt_PVNV)
+        -:  323:#define new_XPVMG()    new_body_allocated(SVt_PVMG)
+        -:  324:
+        -:  325:#define del_body_by_type(p, type)                               \
+        -:  326:    del_body(p + bodies_by_type[(type)].offset,                 \
+        -:  327:             &PL_body_roots[(type)])
+        -:  328:
+        -:  329:#endif /* PURIFY */
+        -:  330:
+        -:  331:/* no arena for you! */
+        -:  332:
+        -:  333:#define new_NOARENA(details) \
+        -:  334:        safemalloc((details)->body_size + (details)->offset)
+        -:  335:#define new_NOARENAZ(details) \
+        -:  336:        safecalloc((details)->body_size + (details)->offset, 1)
+        -:  337:
+        -:  338:#ifndef PURIFY
+        -:  339:
+        -:  340:/* grab a new thing from the arena's free list, allocating more if necessary. */
+        -:  341:#define new_body_from_arena(xpv, root_index) \
+        -:  342:    STMT_START { \
+        -:  343:        void ** const r3wt = &PL_body_roots[root_index]; \
+        -:  344:        xpv = (PTR_TBL_ENT_t*) (*((void **)(r3wt))      \
+        -:  345:          ? *((void **)(r3wt)) : Perl_more_bodies(aTHX_ root_index)); \
+        -:  346:        *(r3wt) = *(void**)(xpv); \
+        -:  347:    } STMT_END
+        -:  348:
+        -:  349:PERL_STATIC_INLINE void *
+function S_new_body called 57 returned 100% blocks executed 80%
+       57:  350:S_new_body(pTHX_ const svtype sv_type)
+        -:  351:{
+        -:  352:    void *xpv;
+      57*:  353:    new_body_from_arena(xpv, sv_type);
+       57:  353-block  0
+branch  0 taken 57 (fallthrough)
+branch  1 taken 0
+       57:  353-block  1
+    %%%%%:  353-block  2
+call    2 never executed
+       57:  354:    return xpv;
+       57:  354-block  0
+        -:  355:}
+        -:  356:
+        -:  357:#endif
+        -:  358:
+        -:  359:static const struct body_details fake_rv =
+        -:  360:    { 0, 0, 0, SVt_IV, FALSE, NONV, NOARENA, 0 };
+        -:  361:
+        -:  362:/*
+        -:  363:=for apidoc newSV_type
+        -:  364:
+        -:  365:Creates a new SV, of the type specified.  The reference count for the new SV
+        -:  366:is set to 1.
+        -:  367:
+        -:  368:=cut
+        -:  369:*/
+        -:  370:
+        -:  371:PERL_STATIC_INLINE SV *
+function Perl_newSV_type called 57 returned 100% blocks executed 34%
+       57:  372:Perl_newSV_type(pTHX_ const svtype type)
+        -:  373:{
+        -:  374:    PERL_ARGS_ASSERT_NEWSV_TYPE;
+        -:  375:
+        -:  376:    SV *sv;
+        -:  377:    void*      new_body;
+        -:  378:    const struct body_details *type_details;
+        -:  379:
+       57:  380:    new_SV(sv);
+       57:  380-block  0
+call    0 returned 57
+        -:  381:
+       57:  382:    type_details = bodies_by_type + type;
+        -:  383:
+       57:  384:    SvFLAGS(sv) &= ~SVTYPEMASK;
+       57:  385:    SvFLAGS(sv) |= type;
+        -:  386:
+       57:  387:    switch (type) {
+branch  0 taken 0
+branch  1 taken 0
+branch  2 taken 0
+branch  3 taken 57
+branch  4 taken 0
+branch  5 taken 0
+branch  6 taken 0
+    #####:  388:    case SVt_NULL:
+    #####:  389:        break;
+    %%%%%:  389-block  0
+    #####:  390:    case SVt_IV:
+    #####:  391:        SET_SVANY_FOR_BODYLESS_IV(sv);
+    #####:  392:        SvIV_set(sv, 0);
+    #####:  393:        break;
+    %%%%%:  393-block  0
+    #####:  394:    case SVt_NV:
+        -:  395:#if NVSIZE <= IVSIZE
+    #####:  396:        SET_SVANY_FOR_BODYLESS_NV(sv);
+        -:  397:#else
+        -:  398:        SvANY(sv) = new_XNV();
+        -:  399:#endif
+    #####:  400:        SvNV_set(sv, 0);
+    #####:  401:        break;
+    %%%%%:  401-block  0
+       57:  402:    case SVt_PVHV:
+        -:  403:    case SVt_PVAV:
+        -:  404:    case SVt_PVOBJ:
+        -:  405:        assert(type_details->body_size);
+        -:  406:
+        -:  407:#ifndef PURIFY
+        -:  408:        assert(type_details->arena);
+        -:  409:        assert(type_details->arena_size);
+        -:  410:        /* This points to the start of the allocated area.  */
+       57:  411:        new_body = S_new_body(aTHX_ type);
+       57:  411-block  0
+call    0 returned 57
+        -:  412:        /* xpvav and xpvhv have no offset, so no need to adjust new_body */
+        -:  413:        assert(!(type_details->offset));
+        -:  414:#else
+        -:  415:        /* We always allocated the full length item with PURIFY. To do this
+        -:  416:           we fake things so that arena is false for all 16 types..  */
+        -:  417:        new_body = new_NOARENAZ(type_details);
+        -:  418:#endif
+       57:  419:        SvANY(sv) = new_body;
+        -:  420:
+       57:  421:        SvSTASH_set(sv, NULL);
+       57:  422:        SvMAGIC_set(sv, NULL);
+        -:  423:
+       57:  424:        switch(type) {
+branch  0 taken 0
+branch  1 taken 57
+branch  2 taken 0
+branch  3 taken 0
+    #####:  425:        case SVt_PVAV:
+    #####:  426:            AvFILLp(sv) = -1;
+    #####:  427:            AvMAX(sv) = -1;
+    #####:  428:            AvALLOC(sv) = NULL;
+        -:  429:
+    #####:  430:            AvREAL_only(sv);
+    #####:  431:            break;
+    %%%%%:  431-block  0
+       57:  432:        case SVt_PVHV:
+       57:  433:            HvTOTALKEYS(sv) = 0;
+        -:  434:            /* start with PERL_HASH_DEFAULT_HvMAX+1 buckets: */
+       57:  435:            HvMAX(sv) = PERL_HASH_DEFAULT_HvMAX;
+        -:  436:
+        -:  437:            assert(!SvOK(sv));
+      57*:  438:            SvOK_off(sv);
+       57:  438-block  0
+branch  0 taken 57 (fallthrough)
+branch  1 taken 0
+       57:  438-block  1
+branch  2 taken 0 (fallthrough)
+branch  3 taken 57
+    %%%%%:  438-block  2
+branch  4 never executed (fallthrough)
+branch  5 never executed
+       57:  438-block  3
+branch  6 taken 0 (fallthrough)
+branch  7 taken 57
+    %%%%%:  438-block  4
+call    8 never executed
+        -:  439:#ifndef NODEFAULT_SHAREKEYS
+       57:  440:            HvSHAREKEYS_on(sv);         /* key-sharing on by default */
+        -:  441:#endif
+        -:  442:            /* start with PERL_HASH_DEFAULT_HvMAX+1 buckets: */
+       57:  443:            HvMAX(sv) = PERL_HASH_DEFAULT_HvMAX;
+       57:  444:            break;
+       57:  444-block  0
+    #####:  445:        case SVt_PVOBJ:
+    #####:  446:            ObjectMAXFIELD(sv) = -1;
+    #####:  447:            ObjectFIELDS(sv) = NULL;
+    #####:  448:            break;
+    %%%%%:  448-block  0
+    #####:  449:        default:
+    #####:  450:            NOT_REACHED;
+    %%%%%:  450-block  0
+call    0 never executed
+        -:  451:        }
+        -:  452:
+       57:  453:        sv->sv_u.svu_array = NULL; /* or svu_hash  */
+       57:  454:        break;
+       57:  454-block  0
+        -:  455:
+    #####:  456:    case SVt_PVIV:
+        -:  457:    case SVt_PVIO:
+        -:  458:    case SVt_PVGV:
+        -:  459:    case SVt_PVCV:
+        -:  460:    case SVt_PVLV:
+        -:  461:    case SVt_INVLIST:
+        -:  462:    case SVt_REGEXP:
+        -:  463:    case SVt_PVMG:
+        -:  464:    case SVt_PVNV:
+        -:  465:    case SVt_PV:
+        -:  466:        /* For a type known at compile time, it should be possible for the
+        -:  467:         * compiler to deduce the value of (type_details->arena), resolve
+        -:  468:         * that branch below, and inline the relevant values from
+        -:  469:         * bodies_by_type. Except, at least for gcc, it seems not to do that.
+        -:  470:         * We help it out here with two deviations from sv_upgrade:
+        -:  471:         * (1) Minor rearrangement here, so that PVFM - the only type at this
+        -:  472:         *     point not to be allocated from an array appears last, not PV.
+        -:  473:         * (2) The ASSUME() statement here for everything that isn't PVFM.
+        -:  474:         * Obviously this all only holds as long as it's a true reflection of
+        -:  475:         * the bodies_by_type lookup table. */
+        -:  476:#ifndef PURIFY
+    #####:  477:         ASSUME(type_details->arena);
+    %%%%%:  477-block  0
+branch  0 never executed (fallthrough)
+branch  1 never executed
+    %%%%%:  477-block  1
+call    2 never executed
+        -:  478:#endif
+        -:  479:         /* FALLTHROUGH */
+        -:  480:    case SVt_PVFM:
+        -:  481:
+        -:  482:        assert(type_details->body_size);
+        -:  483:        /* We always allocated the full length item with PURIFY. To do this
+        -:  484:           we fake things so that arena is false for all 16 types..  */
+        -:  485:#ifndef PURIFY
+    #####:  486:        if(type_details->arena) {
+    %%%%%:  486-block  0
+branch  0 never executed (fallthrough)
+branch  1 never executed
+        -:  487:            /* This points to the start of the allocated area.  */
+    #####:  488:            new_body = S_new_body(aTHX_ type);
+    %%%%%:  488-block  0
+call    0 never executed
+    #####:  489:            Zero(new_body, type_details->body_size, char);
+    #####:  490:            new_body = ((char *)new_body) - type_details->offset;
+        -:  491:        } else
+        -:  492:#endif
+        -:  493:        {
+    #####:  494:            new_body = new_NOARENAZ(type_details);
+    %%%%%:  494-block  0
+call    0 never executed
+        -:  495:        }
+    #####:  496:        SvANY(sv) = new_body;
+        -:  497:
+    #####:  498:        if (UNLIKELY(type == SVt_PVIO)) {
+    %%%%%:  498-block  0
+branch  0 never executed (fallthrough)
+branch  1 never executed
+    #####:  499:            IO * const io = MUTABLE_IO(sv);
+    #####:  500:            GV *iogv = gv_fetchpvs("IO::File::", GV_ADD, SVt_PVHV);
+    %%%%%:  500-block  0
+call    0 never executed
+        -:  501:
+    #####:  502:            SvOBJECT_on(io);
+        -:  503:            /* Clear the stashcache because a new IO could overrule a package
+        -:  504:               name */
+        -:  505:            DEBUG_o(deb("sv_upgrade clearing PL_stashcache\n"));
+    #####:  506:            hv_clear(PL_stashcache);
+call    0 never executed
+        -:  507:
+    #####:  508:            SvSTASH_set(io, MUTABLE_HV(SvREFCNT_inc(GvHV(iogv))));
+call    0 never executed
+    #####:  509:            IoPAGE_LEN(sv) = 60;
+        -:  510:        }
+        -:  511:
+    #####:  512:        sv->sv_u.svu_rv = NULL;
+    #####:  513:        break;
+    %%%%%:  513-block  0
+    #####:  514:    default:
+    #####:  515:        Perl_croak(aTHX_ "panic: sv_upgrade to unknown type %lu",
+    %%%%%:  515-block  0
+call    0 never executed
+        -:  516:                   (unsigned long)type);
+        -:  517:    }
+        -:  518:
+       57:  519:    return sv;
+       57:  519-block  0
+        -:  520:}
+        -:  521:
+        -:  522:/*
+        -:  523:=for apidoc newSV_type_mortal
+        -:  524:
+        -:  525:Creates a new mortal SV, of the type specified.  The reference count for the
+        -:  526:new SV is set to 1.
+        -:  527:
+        -:  528:This is equivalent to
+        -:  529:    SV* sv = sv_2mortal(newSV_type(<some type>))
+        -:  530:and
+        -:  531:    SV* sv = sv_newmortal();
+        -:  532:    sv_upgrade(sv, <some_type>)
+        -:  533:but should be more efficient than both of them. (Unless sv_2mortal is inlined
+        -:  534:at some point in the future.)
+        -:  535:
+        -:  536:=cut
+        -:  537:*/
+        -:  538:
+        -:  539:PERL_STATIC_INLINE SV *
+        -:  540:Perl_newSV_type_mortal(pTHX_ const svtype type)
+        -:  541:{
+        -:  542:    PERL_ARGS_ASSERT_NEWSV_TYPE_MORTAL;
+        -:  543:
+        -:  544:    SV *sv = newSV_type(type);
+        -:  545:    SSize_t ix = ++PL_tmps_ix;
+        -:  546:    if (UNLIKELY(ix >= PL_tmps_max))
+        -:  547:        ix = Perl_tmps_grow_p(aTHX_ ix);
+        -:  548:    PL_tmps_stack[ix] = (sv);
+        -:  549:    SvTEMP_on(sv);
+        -:  550:    return sv;
+        -:  551:}
+        -:  552:
+        -:  553:/* The following functions started out in sv.h and then moved to inline.h. They
+        -:  554: * moved again into this file during the 5.37.x development cycle. */
+        -:  555:
+        -:  556:/*
+        -:  557:=for apidoc_section $SV
+        -:  558:=for apidoc SvPVXtrue
+        -:  559:
+        -:  560:Returns a boolean as to whether or not C<sv> contains a PV that is considered
+        -:  561:TRUE.  FALSE is returned if C<sv> doesn't contain a PV, or if the PV it does
+        -:  562:contain is zero length, or consists of just the single character '0'.  Every
+        -:  563:other PV value is considered TRUE.
+        -:  564:
+        -:  565:As of Perl v5.37.1, C<sv> is evaluated exactly once; in earlier releases, it
+        -:  566:could be evaluated more than once.
+        -:  567:
+        -:  568:=cut
+        -:  569:*/
+        -:  570:
+        -:  571:PERL_STATIC_INLINE bool
+        -:  572:Perl_SvPVXtrue(pTHX_ SV *sv)
+        -:  573:{
+        -:  574:    PERL_ARGS_ASSERT_SVPVXTRUE;
+        -:  575:
+        -:  576:    PERL_UNUSED_CONTEXT;
+        -:  577:
+        -:  578:    if (! (XPV *) SvANY(sv)) {
+        -:  579:        return false;
+        -:  580:    }
+        -:  581:
+        -:  582:    if ( ((XPV *) SvANY(sv))->xpv_cur > 1) { /* length > 1 */
+        -:  583:        return true;
+        -:  584:    }
+        -:  585:
+        -:  586:    if (( (XPV *) SvANY(sv))->xpv_cur == 0) {
+        -:  587:        return false;
+        -:  588:    }
+        -:  589:
+        -:  590:    return *sv->sv_u.svu_pv != '0';
+        -:  591:}
+        -:  592:
+        -:  593:/*
+        -:  594:=for apidoc SvGETMAGIC
+        -:  595:Invokes C<L</mg_get>> on an SV if it has 'get' magic.  For example, this
+        -:  596:will call C<FETCH> on a tied variable.  As of 5.37.1, this function is
+        -:  597:guaranteed to evaluate its argument exactly once.
+        -:  598:
+        -:  599:=cut
+        -:  600:*/
+        -:  601:
+        -:  602:PERL_STATIC_INLINE void
+function Perl_SvGETMAGIC called 63 returned 100% blocks executed 67%
+       63:  603:Perl_SvGETMAGIC(pTHX_ SV *sv)
+        -:  604:{
+        -:  605:    PERL_ARGS_ASSERT_SVGETMAGIC;
+        -:  606:
+       63:  607:    if (UNLIKELY(SvGMAGICAL(sv))) {
+       63:  607-block  0
+branch  0 taken 0 (fallthrough)
+branch  1 taken 63
+    #####:  608:        mg_get(sv);
+    %%%%%:  608-block  0
+call    0 never executed
+        -:  609:    }
+       63:  610:}
+        -:  611:
+        -:  612:PERL_STATIC_INLINE bool
+        -:  613:Perl_SvTRUE(pTHX_ SV *sv)
+        -:  614:{
+        -:  615:    PERL_ARGS_ASSERT_SVTRUE;
+        -:  616:
+        -:  617:    if (UNLIKELY(sv == NULL))
+        -:  618:        return FALSE;
+        -:  619:    SvGETMAGIC(sv);
+        -:  620:    return SvTRUE_nomg_NN(sv);
+        -:  621:}
+        -:  622:
+        -:  623:PERL_STATIC_INLINE bool
+        -:  624:Perl_SvTRUE_nomg(pTHX_ SV *sv)
+        -:  625:{
+        -:  626:    PERL_ARGS_ASSERT_SVTRUE_NOMG;
+        -:  627:
+        -:  628:    if (UNLIKELY(sv == NULL))
+        -:  629:        return FALSE;
+        -:  630:    return SvTRUE_nomg_NN(sv);
+        -:  631:}
+        -:  632:
+        -:  633:PERL_STATIC_INLINE bool
+        -:  634:Perl_SvTRUE_NN(pTHX_ SV *sv)
+        -:  635:{
+        -:  636:    PERL_ARGS_ASSERT_SVTRUE_NN;
+        -:  637:
+        -:  638:    SvGETMAGIC(sv);
+        -:  639:    return SvTRUE_nomg_NN(sv);
+        -:  640:}
+        -:  641:
+        -:  642:PERL_STATIC_INLINE bool
+        -:  643:Perl_SvTRUE_common(pTHX_ SV * sv, const bool sv_2bool_is_fallback)
+        -:  644:{
+        -:  645:    PERL_ARGS_ASSERT_SVTRUE_COMMON;
+        -:  646:
+        -:  647:    if (UNLIKELY(SvIMMORTAL_INTERP(sv)))
+        -:  648:        return SvIMMORTAL_TRUE(sv);
+        -:  649:
+        -:  650:    if (! SvOK(sv))
+        -:  651:        return FALSE;
+        -:  652:
+        -:  653:    if (SvPOK(sv))
+        -:  654:        return SvPVXtrue(sv);
+        -:  655:
+        -:  656:    if (SvIOK(sv))
+        -:  657:        return SvIVX(sv) != 0; /* casts to bool */
+        -:  658:
+        -:  659:    if (SvROK(sv) && !(SvOBJECT(SvRV(sv)) && HvAMAGIC(SvSTASH(SvRV(sv)))))
+        -:  660:        return TRUE;
+        -:  661:
+        -:  662:    if (sv_2bool_is_fallback)
+        -:  663:        return sv_2bool_nomg(sv);
+        -:  664:
+        -:  665:    return isGV_with_GP(sv);
+        -:  666:}
+        -:  667:
+        -:  668:PERL_STATIC_INLINE SV *
+function Perl_SvREFCNT_inc called 0 returned 0% blocks executed 0%
+    #####:  669:Perl_SvREFCNT_inc(SV *sv)
+        -:  670:{
+        -:  671:    PERL_ARGS_ASSERT_SVREFCNT_INC;
+        -:  672:
+    #####:  673:    if (LIKELY(sv != NULL))
+    %%%%%:  673-block  0
+branch  0 never executed (fallthrough)
+branch  1 never executed
+    #####:  674:        SvREFCNT(sv)++;
+    %%%%%:  674-block  0
+    #####:  675:    return sv;
+    %%%%%:  675-block  0
+        -:  676:}
+        -:  677:
+        -:  678:PERL_STATIC_INLINE SV *
+        -:  679:Perl_SvREFCNT_inc_NN(SV *sv)
+        -:  680:{
+        -:  681:    PERL_ARGS_ASSERT_SVREFCNT_INC_NN;
+        -:  682:
+        -:  683:    SvREFCNT(sv)++;
+        -:  684:    return sv;
+        -:  685:}
+        -:  686:
+        -:  687:PERL_STATIC_INLINE void
+        -:  688:Perl_SvREFCNT_inc_void(SV *sv)
+        -:  689:{
+        -:  690:    PERL_ARGS_ASSERT_SVREFCNT_INC_VOID;
+        -:  691:
+        -:  692:    if (LIKELY(sv != NULL))
+        -:  693:        SvREFCNT(sv)++;
+        -:  694:}
+        -:  695:
+        -:  696:PERL_STATIC_INLINE void
+        -:  697:Perl_SvREFCNT_dec(pTHX_ SV *sv)
+        -:  698:{
+        -:  699:    PERL_ARGS_ASSERT_SVREFCNT_DEC;
+        -:  700:
+        -:  701:    if (LIKELY(sv != NULL)) {
+        -:  702:        U32 rc = SvREFCNT(sv);
+        -:  703:        if (LIKELY(rc > 1))
+        -:  704:            SvREFCNT(sv) = rc - 1;
+        -:  705:        else
+        -:  706:            Perl_sv_free2(aTHX_ sv, rc);
+        -:  707:    }
+        -:  708:}
+        -:  709:
+        -:  710:PERL_STATIC_INLINE SV *
+        -:  711:Perl_SvREFCNT_dec_ret_NULL(pTHX_ SV *sv)
+        -:  712:{
+        -:  713:    PERL_ARGS_ASSERT_SVREFCNT_DEC_RET_NULL;
+        -:  714:    Perl_SvREFCNT_dec(aTHX_ sv);
+        -:  715:    return NULL;
+        -:  716:}
+        -:  717:
+        -:  718:
+        -:  719:PERL_STATIC_INLINE void
+        -:  720:Perl_SvREFCNT_dec_NN(pTHX_ SV *sv)
+        -:  721:{
+        -:  722:    PERL_ARGS_ASSERT_SVREFCNT_DEC_NN;
+        -:  723:
+        -:  724:    U32 rc = SvREFCNT(sv);
+        -:  725:
+        -:  726:    if (LIKELY(rc > 1))
+        -:  727:        SvREFCNT(sv) = rc - 1;
+        -:  728:    else
+        -:  729:        Perl_sv_free2(aTHX_ sv, rc);
+        -:  730:}
+        -:  731:
+        -:  732:/*
+        -:  733:=for apidoc SvAMAGIC_on
+        -:  734:
+        -:  735:Indicate that C<sv> has overloading (active magic) enabled.
+        -:  736:
+        -:  737:=cut
+        -:  738:*/
+        -:  739:
+        -:  740:PERL_STATIC_INLINE void
+        -:  741:Perl_SvAMAGIC_on(SV *sv)
+        -:  742:{
+        -:  743:    PERL_ARGS_ASSERT_SVAMAGIC_ON;
+        -:  744:    assert(SvROK(sv));
+        -:  745:
+        -:  746:    if (SvOBJECT(SvRV(sv))) HvAMAGIC_on(SvSTASH(SvRV(sv)));
+        -:  747:}
+        -:  748:
+        -:  749:/*
+        -:  750:=for apidoc SvAMAGIC_off
+        -:  751:
+        -:  752:Indicate that C<sv> has overloading (active magic) disabled.
+        -:  753:
+        -:  754:=cut
+        -:  755:*/
+        -:  756:
+        -:  757:PERL_STATIC_INLINE void
+        -:  758:Perl_SvAMAGIC_off(SV *sv)
+        -:  759:{
+        -:  760:    PERL_ARGS_ASSERT_SVAMAGIC_OFF;
+        -:  761:
+        -:  762:    if (SvROK(sv) && SvOBJECT(SvRV(sv)))
+        -:  763:        HvAMAGIC_off(SvSTASH(SvRV(sv)));
+        -:  764:}
+        -:  765:
+        -:  766:PERL_STATIC_INLINE U32
+        -:  767:Perl_SvPADSTALE_on(SV *sv)
+        -:  768:{
+        -:  769:    assert(!(SvFLAGS(sv) & SVs_PADTMP));
+        -:  770:    return SvFLAGS(sv) |= SVs_PADSTALE;
+        -:  771:}
+        -:  772:PERL_STATIC_INLINE U32
+        -:  773:Perl_SvPADSTALE_off(SV *sv)
+        -:  774:{
+        -:  775:    assert(!(SvFLAGS(sv) & SVs_PADTMP));
+        -:  776:    return SvFLAGS(sv) &= ~SVs_PADSTALE;
+        -:  777:}
+        -:  778:
+        -:  779:/*
+        -:  780:=for apidoc_section $SV
+        -:  781:=for apidoc         SvIV
+        -:  782:=for apidoc_item    SvIV_nomg
+        -:  783:=for apidoc_item m||SvIVx
+        -:  784:
+        -:  785:These each coerce the given SV to IV and return it.  The returned value in many
+        -:  786:circumstances will get stored in C<sv>'s IV slot, but not in all cases.  (Use
+        -:  787:C<L</sv_setiv>> to make sure it does).
+        -:  788:
+        -:  789:As of 5.37.1, all are guaranteed to evaluate C<sv> only once.
+        -:  790:
+        -:  791:C<SvIVx> is now identical to C<SvIV>, but prior to 5.37.1, it was the only form
+        -:  792:guaranteed to evaluate C<sv> only once.
+        -:  793:
+        -:  794:C<SvIV_nomg> is the same as C<SvIV>, but does not perform 'get' magic.
+        -:  795:
+        -:  796:=for apidoc         SvNV
+        -:  797:=for apidoc_item    SvNV_nomg
+        -:  798:=for apidoc_item m||SvNVx
+        -:  799:
+        -:  800:These each coerce the given SV to NV and return it.  The returned value in many
+        -:  801:circumstances will get stored in C<sv>'s NV slot, but not in all cases.  (Use
+        -:  802:C<L</sv_setnv>> to make sure it does).
+        -:  803:
+        -:  804:As of 5.37.1, all are guaranteed to evaluate C<sv> only once.
+        -:  805:
+        -:  806:C<SvNVx> is now identical to C<SvNV>, but prior to 5.37.1, it was the only form
+        -:  807:guaranteed to evaluate C<sv> only once.
+        -:  808:
+        -:  809:C<SvNV_nomg> is the same as C<SvNV>, but does not perform 'get' magic.
+        -:  810:
+        -:  811:=for apidoc         SvUV
+        -:  812:=for apidoc_item    SvUV_nomg
+        -:  813:=for apidoc_item m||SvUVx
+        -:  814:
+        -:  815:These each coerce the given SV to UV and return it.  The returned value in many
+        -:  816:circumstances will get stored in C<sv>'s UV slot, but not in all cases.  (Use
+        -:  817:C<L</sv_setuv>> to make sure it does).
+        -:  818:
+        -:  819:As of 5.37.1, all are guaranteed to evaluate C<sv> only once.
+        -:  820:
+        -:  821:C<SvUVx> is now identical to C<SvUV>, but prior to 5.37.1, it was the only form
+        -:  822:guaranteed to evaluate C<sv> only once.
+        -:  823:
+        -:  824:=cut
+        -:  825:*/
+        -:  826:
+        -:  827:PERL_STATIC_INLINE IV
+        -:  828:Perl_SvIV(pTHX_ SV *sv)
+        -:  829:{
+        -:  830:    PERL_ARGS_ASSERT_SVIV;
+        -:  831:
+        -:  832:    if (SvIOK_nog(sv))
+        -:  833:        return SvIVX(sv);
+        -:  834:    return sv_2iv(sv);
+        -:  835:}
+        -:  836:
+        -:  837:PERL_STATIC_INLINE UV
+function Perl_SvUV called 29 returned 100% blocks executed 75%
+       29:  838:Perl_SvUV(pTHX_ SV *sv)
+        -:  839:{
+        -:  840:    PERL_ARGS_ASSERT_SVUV;
+        -:  841:
+       29:  842:    if (SvUOK_nog(sv))
+       29:  842-block  0
+branch  0 taken 0 (fallthrough)
+branch  1 taken 29
+    #####:  843:        return SvUVX(sv);
+    %%%%%:  843-block  0
+       29:  844:    return sv_2uv(sv);
+       29:  844-block  0
+call    0 returned 29
+        -:  845:}
+        -:  846:
+        -:  847:PERL_STATIC_INLINE NV
+        -:  848:Perl_SvNV(pTHX_ SV *sv)
+        -:  849:{
+        -:  850:    PERL_ARGS_ASSERT_SVNV;
+        -:  851:
+        -:  852:    if (SvNOK_nog(sv))
+        -:  853:        return SvNVX(sv);
+        -:  854:    return sv_2nv(sv);
+        -:  855:}
+        -:  856:
+        -:  857:PERL_STATIC_INLINE IV
+        -:  858:Perl_SvIV_nomg(pTHX_ SV *sv)
+        -:  859:{
+        -:  860:    PERL_ARGS_ASSERT_SVIV_NOMG;
+        -:  861:
+        -:  862:    if (SvIOK(sv))
+        -:  863:        return SvIVX(sv);
+        -:  864:    return sv_2iv_flags(sv, 0);
+        -:  865:}
+        -:  866:
+        -:  867:PERL_STATIC_INLINE UV
+        -:  868:Perl_SvUV_nomg(pTHX_ SV *sv)
+        -:  869:{
+        -:  870:    PERL_ARGS_ASSERT_SVUV_NOMG;
+        -:  871:
+        -:  872:    if (SvUOK(sv))
+        -:  873:        return SvUVX(sv);
+        -:  874:    return sv_2uv_flags(sv, 0);
+        -:  875:}
+        -:  876:
+        -:  877:PERL_STATIC_INLINE NV
+        -:  878:Perl_SvNV_nomg(pTHX_ SV *sv)
+        -:  879:{
+        -:  880:    PERL_ARGS_ASSERT_SVNV_NOMG;
+        -:  881:
+        -:  882:    if (SvNOK(sv))
+        -:  883:        return SvNVX(sv);
+        -:  884:    return sv_2nv_flags(sv, 0);
+        -:  885:}
+        -:  886:
+        -:  887:#if defined(PERL_CORE) || defined (PERL_EXT)
+        -:  888:PERL_STATIC_INLINE STRLEN
+        -:  889:S_sv_or_pv_pos_u2b(pTHX_ SV *sv, const char *pv, STRLEN pos, STRLEN *lenp)
+        -:  890:{
+        -:  891:    PERL_ARGS_ASSERT_SV_OR_PV_POS_U2B;
+        -:  892:    if (SvGAMAGIC(sv)) {
+        -:  893:        U8 *hopped = utf8_hop((U8 *)pv, pos);
+        -:  894:        if (lenp) *lenp = (STRLEN)(utf8_hop(hopped, *lenp) - hopped);
+        -:  895:        return (STRLEN)(hopped - (U8 *)pv);
+        -:  896:    }
+        -:  897:    return sv_pos_u2b_flags(sv,pos,lenp,SV_CONST_RETURN);
+        -:  898:}
+        -:  899:#endif
+        -:  900:
+        -:  901:PERL_STATIC_INLINE char *
+        -:  902:Perl_sv_pvutf8n_force_wrapper(pTHX_ SV * const sv, STRLEN * const lp, const U32 dummy)
+        -:  903:{
+        -:  904:    PERL_ARGS_ASSERT_SV_PVUTF8N_FORCE_WRAPPER;
+        -:  905:
+        -:  906:    /* This is just so can be passed to Perl_SvPV_helper() as a function
+        -:  907:     * pointer with the same signature as all the other such pointers, and
+        -:  908:     * having hence an unused parameter */
+        -:  909:    PERL_UNUSED_ARG(dummy);
+        -:  910:
+        -:  911:    return sv_pvutf8n_force(sv, lp);
+        -:  912:}
+        -:  913:
+        -:  914:PERL_STATIC_INLINE char *
+        -:  915:Perl_sv_pvbyten_force_wrapper(pTHX_ SV * const sv, STRLEN * const lp, const U32 dummy)
+        -:  916:{
+        -:  917:    PERL_ARGS_ASSERT_SV_PVBYTEN_FORCE_WRAPPER;
+        -:  918:
+        -:  919:    /* This is just so can be passed to Perl_SvPV_helper() as a function
+        -:  920:     * pointer with the same signature as all the other such pointers, and
+        -:  921:     * having hence an unused parameter */
+        -:  922:    PERL_UNUSED_ARG(dummy);
+        -:  923:
+        -:  924:    return sv_pvbyten_force(sv, lp);
+        -:  925:}
+        -:  926:
+        -:  927:PERL_STATIC_INLINE char *
+        -:  928:Perl_SvPV_helper(pTHX_
+        -:  929:                 SV * const sv,
+        -:  930:                 STRLEN * const lp,
+        -:  931:                 const U32 flags,
+        -:  932:                 const PL_SvPVtype type,
+        -:  933:                 char * (*non_trivial)(pTHX_ SV *, STRLEN * const, const U32),
+        -:  934:                 const bool or_null,
+        -:  935:                 const U32 return_flags
+        -:  936:                )
+        -:  937:{
+        -:  938:    PERL_ARGS_ASSERT_SVPV_HELPER;
+        -:  939:
+        -:  940:    /* 'type' should be known at compile time, so this is reduced to a single
+        -:  941:     * conditional at runtime */
+        -:  942:    if (   (type == SvPVbyte_type_      && SvPOK_byte_nog(sv))
+        -:  943:        || (type == SvPVforce_type_     && SvPOK_pure_nogthink(sv))
+        -:  944:        || (type == SvPVutf8_type_      && SvPOK_utf8_nog(sv))
+      220:  945:        || (type == SvPVnormal_type_    && SvPOK_nog(sv))
+       57:  945-block  0
+branch  0 taken 57 (fallthrough)
+branch  1 taken 0
+       81:  945-block  1
+branch  2 taken 81 (fallthrough)
+branch  3 taken 0
+       80:  945-block  2
+branch  4 taken 80 (fallthrough)
+branch  5 taken 0
+        2:  945-block  3
+branch  6 taken 2 (fallthrough)
+branch  7 taken 0
+        -:  946:        || (type == SvPVutf8_pure_type_ && SvPOK_utf8_pure_nogthink(sv))
+        -:  947:        || (type == SvPVbyte_pure_type_ && SvPOK_byte_pure_nogthink(sv))
+        -:  948:   ) {
+        -:  949:        if (lp) {
+      161:  950:            *lp = SvCUR(sv);
+        -:  951:        }
+        -:  952:
+        -:  953:        /* Similarly 'return_flags is known at compile time, so this becomes
+        -:  954:         * branchless */
+      220:  955:        if (return_flags & SV_MUTABLE_RETURN) {
+       57:  955-block  0
+branch  0 taken 0 (fallthrough)
+branch  1 taken 57
+       81:  955-block  1
+branch  2 taken 0 (fallthrough)
+branch  3 taken 81
+       80:  955-block  2
+branch  4 taken 0 (fallthrough)
+branch  5 taken 80
+        2:  955-block  3
+branch  6 taken 0 (fallthrough)
+branch  7 taken 2
+    #####:  956:            return SvPVX_mutable(sv);
+    %%%%%:  956-block  0
+    %%%%%:  956-block  1
+    %%%%%:  956-block  2
+    %%%%%:  956-block  3
+        -:  957:        }
+      220:  958:        else if(return_flags & SV_CONST_RETURN) {
+       57:  958-block  0
+branch  0 taken 0 (fallthrough)
+branch  1 taken 57
+       81:  958-block  1
+branch  2 taken 81 (fallthrough)
+branch  3 taken 0
+       80:  958-block  2
+branch  4 taken 80 (fallthrough)
+branch  5 taken 0
+        2:  958-block  3
+branch  6 taken 0 (fallthrough)
+branch  7 taken 2
+     161*:  959:            return (char *) SvPVX_const(sv);
+    %%%%%:  959-block  0
+       81:  959-block  1
+       80:  959-block  2
+    %%%%%:  959-block  3
+        -:  960:        }
+        -:  961:        else {
+      59*:  962:            return SvPVX(sv);
+       57:  962-block  0
+    %%%%%:  962-block  1
+    %%%%%:  962-block  2
+        2:  962-block  3
+        -:  963:        }
+        -:  964:    }
+        -:  965:
+        -:  966:    if (or_null) {  /* This is also known at compile time */
+        -:  967:        if (flags & SV_GMAGIC) {    /* As is this */
+        -:  968:            SvGETMAGIC(sv);
+        -:  969:        }
+        -:  970:
+        -:  971:        if (! SvOK(sv)) {
+        -:  972:            if (lp) {   /* As is this */
+        -:  973:                *lp = 0;
+        -:  974:            }
+        -:  975:
+        -:  976:            return NULL;
+        -:  977:        }
+        -:  978:    }
+        -:  979:
+        -:  980:    /* Can't trivially handle this, call the function */
+    #####:  981:    return non_trivial(aTHX_ sv, lp, (flags|return_flags));
+    %%%%%:  981-block  0
+call    0 never executed
+    %%%%%:  981-block  1
+call    1 never executed
+    %%%%%:  981-block  2
+call    2 never executed
+    %%%%%:  981-block  3
+call    3 never executed
+        -:  982:}
+        -:  983:
+        -:  984:/*
+        -:  985:=for apidoc newRV_noinc
+        -:  986:
+        -:  987:Creates an RV wrapper for an SV.  The reference count for the original
+        -:  988:SV is B<not> incremented.
+        -:  989:
+        -:  990:=cut
+        -:  991:*/
+        -:  992:
+        -:  993:PERL_STATIC_INLINE SV *
+        -:  994:Perl_newRV_noinc(pTHX_ SV *const tmpRef)
+        -:  995:{
+        -:  996:    PERL_ARGS_ASSERT_NEWRV_NOINC;
+        -:  997:
+        -:  998:    SV *sv = newSV_type(SVt_IV);
+        -:  999:
+        -: 1000:    SvTEMP_off(tmpRef);
+        -: 1001:
+        -: 1002:    /* inlined, simplified sv_setrv_noinc(sv, tmpRef); */
+        -: 1003:    SvRV_set(sv, tmpRef);
+        -: 1004:    SvROK_on(sv);
+        -: 1005:
+        -: 1006:    return sv;
+        -: 1007:}
+        -: 1008:
+        -: 1009:PERL_STATIC_INLINE char *
+        -: 1010:Perl_sv_setpv_freshbuf(pTHX_ SV *const sv)
+        -: 1011:{
+        -: 1012:    PERL_ARGS_ASSERT_SV_SETPV_FRESHBUF;
+        -: 1013:    assert(SvTYPE(sv) >= SVt_PV);
+        -: 1014:    assert(SvTYPE(sv) <= SVt_PVMG);
+        -: 1015:    assert(!SvTHINKFIRST(sv));
+        -: 1016:    assert(SvPVX(sv));
+        -: 1017:    SvCUR_set(sv, 0);
+        -: 1018:    *(SvEND(sv))= '\0';
+        -: 1019:    (void)SvPOK_only_UTF8(sv);  /* UTF-8 flag will be 0; This is used instead
+        -: 1020:                                   of 'SvPOK_only' because the other sv_setpv
+        -: 1021:                                   functions use it */
+        -: 1022:    SvTAINT(sv);
+        -: 1023:    return SvPVX(sv);
+        -: 1024:}
+        -: 1025:
+        -: 1026:/*
+        -: 1027:=for apidoc newSVsv
+        -: 1028:=for apidoc_item newSVsv_flags
+        -: 1029:=for apidoc_item newSVsv_nomg
+        -: 1030:
+        -: 1031:These create a new SV which is an exact duplicate of the original SV
+        -: 1032:(using C<newSVsv_flags_NN>.)
+        -: 1033:
+        -: 1034:They differ only in that C<newSVsv> performs 'get' magic; C<newSVsv_nomg> skips
+        -: 1035:any magic; and C<newSVsv_flags> allows you to explicitly set a C<flags>
+        -: 1036:parameter.
+        -: 1037:
+        -: 1038:=cut
+        -: 1039:*/
+        -: 1040:
+        -: 1041:PERL_STATIC_INLINE SV *
+function Perl_newSVsv_flags called 20 returned 100% blocks executed 75%
+       20: 1042:Perl_newSVsv_flags(pTHX_ SV *const old, I32 flags)
+        -: 1043:{
+        -: 1044:    PERL_ARGS_ASSERT_NEWSVSV_FLAGS;
+        -: 1045:
+       20: 1046:    if (!old)
+       20: 1046-block  0
+branch  0 taken 0 (fallthrough)
+branch  1 taken 20
+    #####: 1047:        return NULL;
+    %%%%%: 1047-block  0
+        -: 1048:
+       20: 1049:    return newSVsv_flags_NN(old, flags);
+       20: 1049-block  0
+call    0 returned 20
+        -: 1050:}
+        -: 1051:
+        -: 1052:/*
+        -: 1053: * ex: set ts=8 sts=4 sw=4 et:
+        -: 1054: */

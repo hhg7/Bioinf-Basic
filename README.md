@@ -54,16 +54,40 @@ lacks. To check for and apply updates:
 
 ## Provenance in the images
 
-Every PNG, SVG, PDF, PS or EPS image these functions draw carries its
-provenance as `Creator` metadata: the calling script (as the working
-directory plus the script's name, like Matplotlib::Simple), the function,
-this file and its version, the computer it ran on (hostname, operating system
-and perl version), and what drew it: `msa_plot.py` and the matplotlib
-version, and for a tree the Biopython version too. For example:
+Every PNG, SVG, PDF, PS or EPS image these functions draw carries its whole
+provenance on one line, as its `Creator` metadata and nothing else, just as
+Matplotlib::Simple writes it. The line names the calling script (as the
+working directory plus the script's name), the function, this file and its
+version, the Alien::Bioinf version, the user who ran it, the computer it ran
+on (hostname and operating system), the perl version and path, and what drew
+it: `msa_plot.py`, the Python version and path, the matplotlib version, and
+for a tree the Biopython and NumPy versions too. The line has no date; an SVG
+has the `<dc:date>` matplotlib writes beside it, taken from
+`SOURCE_DATE_EPOCH` where that is set. After a `;` come the image's title
+(or "untitled") and what it was made from and how, with the full path and
+SHA-256 of each file:
 
-    /home/me/work/run.pl called using "plot_msa" in /.../Bioinf/Basic.pm
-    version 0.01 on host myhost (linux, perl 5.44.0), drawn by /.../msa_plot.py
-    with matplotlib 3.10.0
+- `plot_msa`: the FASTA file and how many sequences it holds (or the number
+  of sequences in a hash ref), the ungapped copy of it that Clustal Omega
+  read, the alignment Clustal Omega wrote, the Clustal Omega version, the
+  exact command, and the `msa_file` and `tree_file` kept, if any.
+- `plot_phylo`: the same when it aligns, with the guide tree it drew;
+  otherwise the newick file it drew. Then how many negative branch lengths
+  were drawn as 0, if any; the tips, with the label each was shown as; and the
+  whole newick tree that was drawn.
+- `msa_quality_table`: the metric shown, and either the BLAST report it read
+  or the FASTA file, its ungapped copy, the report blastp wrote, the blastp
+  version, the exact command, and the `alignment_json` kept, if any.
+
+For example:
+
+    /home/me/work/run.pl called using "plot_phylo" in /.../Bioinf/Basic.pm
+    version 0.01 with Alien::Bioinf 0.01 by user me on host myhost (linux)
+    with Perl 5.44.0 (/usr/bin/perl), drawn by /.../msa_plot.py with
+    Python 3.14.2 (/.../venv/bin/python),
+    matplotlib 3.11.2, Biopython 1.87, NumPy 2.4.6; titled "DEG20010421";
+    from the newick file /home/me/work/t.newick (SHA-256 f0e8...); 4 tips:
+    S.cerevisiae, ...; the tree as drawn, in newick: (S.cerevisiae:0.389085,...);
 
 An SVG holds it in `<dc:creator>`; `exiftool` or `identify -verbose` shows it
 in a PNG or PDF.
@@ -156,32 +180,6 @@ hash ref of the files made or used: `output_file`, and `tree_file` and
 
 With `fasta` of fewer than two sequences it warns and returns an empty hash
 ref.
-
-Besides the `Creator` every image carries, a tree records where it came from
-in the image's own metadata, so the file can be traced and checked without
-the script that made it. An SVG holds all of this as Dublin Core in its
-`<metadata>`, and a PNG as text chunks:
-
-- Title, Date: the title (default "Phylogenetic tree"), and when it was
-  drawn, to the second and with the UTC offset. Where `SOURCE_DATE_EPOCH` is
-  set, matplotlib's date from it is kept instead, so a reproducible build
-  stays reproducible.
-- Source: the input, with the full path and SHA-256 of each file: the FASTA
-  file (or the number of sequences in a hash ref), the ungapped copy of it
-  that Clustal Omega read, and the alignment Clustal Omega wrote; or the
-  newick file drawn.
-- Description: how the tree was made: the Clustal Omega version and the exact
-  command line; how many negative branch lengths were drawn as 0; the tips,
-  with the label each was shown as; and the whole newick tree that was drawn.
-- Identifier, Relation: the SHA-256 of the newick file drawn, and the
-  `msa_file` and `tree_file` kept with the image, if any.
-- Contributor: each piece of software that took part, with its version and,
-  where it runs as a program, its path: Clustal Omega, Bioinf::Basic,
-  Alien::Bioinf, perl, Python, matplotlib, Biopython and NumPy.
-- Keywords: "phylogenetic tree", "newick" and the tip names.
-
-A PDF keeps the Title, the Description (as its Subject) and the Keywords; PS
-and EPS keep only the `Creator`, and other formats nothing.
 
 ## msa_quality_table(%args)
 

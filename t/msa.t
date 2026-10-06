@@ -24,9 +24,16 @@ my $seqs = fasta2hash($fa);
 tr/-//d foreach values %{ $seqs };
 sub png { open my $fh, '<:raw', $_[0] or return ''; read $fh, my $b, 8; $b }
 sub slurp { open my $fh, '<:raw', $_[0] or return ''; local $/; <$fh> }
-# the Creator each image's metadata carries: an SVG's <dc:title>, a PNG's tEXt chunk
-sub creator { my ($sub, $by) = @_; qr/\Q$FindBin::RealScript\E called using "$sub" in .+Basic\.pm version \Q$Bioinf::Basic::VERSION\E on host \Q${\ Sys::Hostname::hostname()}\E \(\Q$^O\E, perl [\d.]+\), drawn by $by/ }
-my $by_py = qr/.+msa_plot\.py with matplotlib [\d.]+/;
+# the Creator each image's metadata carries, its whole provenance on one line:
+# an SVG's <dc:title> in its <dc:creator>, a PNG's tEXt chunk
+sub creator { my ($sub, $by) = @_; qr/\Q$FindBin::RealScript\E called using "$sub" in .+Basic\.pm version \Q$Bioinf::Basic::VERSION\E with Alien::Bioinf [\d.]+ by user \S.* on host \Q${\ Sys::Hostname::hostname()}\E \(\Q$^O\E\) with Perl [\d.]+ \(\Q$^X\E\), drawn by $by/ }
+my $by_py = qr/.+msa_plot\.py with Python [\d.]+\S* \(.+?\), matplotlib [\d.]+/;
+my $sha = qr/\(SHA-256 [0-9a-f]{64}\)/;
+# what _align_provenance says of an alignment of $fa, by a run of clustalo
+# that matched $cmd
+sub aligned { my ($cmd) = @_; qr/; from the FASTA file \Q$fa\E $sha of 4 sequences, written with its gaps stripped to [^;]+ $sha, which Clustal Omega [\d.]+ from Alien::Bioinf [\d.]+ aligned into [^;]+ $sha, run as: [^;]*clustalo --in $cmd/ }
+# an SVG's metadata, which should hold nothing but the date, format, type and Creator
+sub svg_dc { my ($svg) = @_; my ($md) = $svg =~ m{<metadata>(.*?)</metadata>}s; [sort $md =~ /<dc:(\w+)/g] }
 
 # ---- plot_msa and plot_phylo -----------------------------------------------
 
@@ -43,7 +50,11 @@ is_deeply [sort keys %{ $aln }], [sort keys %{ $seqs }], 'the alignment has ever
 is scalar(keys %{ { map { length $_ => 1 } values %{ $aln } } }), 1, 'all of one length';
 is_deeply { map { (my $s = $aln->{$_}) =~ tr/-//d; $_ => uc $s } keys %{ $aln } }, $seqs, 'and gapped copies of the input';
 ok -s $out{'msa.svg'} && do { open my $fh, '<', $out{'msa.svg'}; local $/; <$fh> =~ /<svg/ }, 'an SVG alignment image';
-like slurp($out{'msa.svg'}), creator('plot_msa', $by_py), 'whose Creator names this script, the sub, the versions, the host and matplotlib';
+my $msa_svg = slurp($out{'msa.svg'});
+like $msa_svg, creator('plot_msa', $by_py . qr/; titled "DEG20010421"/ . aligned(qr/.*--guidetree-out=\Q$out{'t.newick'}\E/)
+	. qr/; kept with it: msa_file \Q$out{'aln.fa'}\E, tree_file \Q$out{'t.newick'}\E<\/dc:title>/),
+	'whose Creator names this script, the sub, the versions, the user, the host, Python, matplotlib, the title, the alignment and the files kept';
+is_deeply svg_dc($msa_svg), [qw(creator date format title type)], 'and that is all its metadata, as from Matplotlib::Simple';
 open my $nw, '<', $out{'t.newick'} or die $!;
 like do { local $/; <$nw> }, qr/S\.cerevisiae:[\d.]+/, 'the guide tree is newick with the sequence names';
 close $nw;
@@ -53,9 +64,10 @@ $r = plot_phylo('tree_file' => $out{'t.newick'}, 'output_file' => $out{'tree.png
 is_deeply $r, { 'output_file' => $out{'tree.png'}, 'tree_file' => $out{'t.newick'} }, 'plot_phylo draws the tree plot_msa kept';
 is png($out{'tree.png'}), "\x89PNG\r\n\x1a\n", 'a PNG tree image';
 my $tree_png = slurp($out{'tree.png'});
-like $tree_png, creator('plot_phylo', $by_py . qr/ and Biopython [\d.]+/), 'and its Creator, which names Biopython too';
-like $tree_png, qr/Source\0the newick file \Q$out{'t.newick'}\E \(SHA-256 [0-9a-f]{64}\)/, 'its Source is the newick file and its digest';
-like $tree_png, qr/Description\0Drawn from an existing newick file; no alignment was made\./, 'its Description says nothing was aligned';
+like $tree_png, creator('plot_phylo', $by_py . qr/, Biopython [\d.]+, NumPy [\d.]+; titled "DEG20010421"; from the newick file \Q$out{'t.newick'}\E $sha/
+	. qr/; 4 tips: [^;]*S\.cerevisiae \(shown as \$\\it\{S\. cerevisiae\}\$\)[^;]*; the tree as drawn, in newick: \(\S*S\.cerevisiae:[\d.]+\S*\);/),
+	'and its Creator, which names Biopython and NumPy, the title, the newick file with its digest, the tips with their labels and the newick';
+unlike $tree_png, qr/(?:Source|Description|Title)\0/, 'and no other text chunks of provenance';
 
 $r = plot_msa(fasta => $seqs, filename => catfile($dir, 'h.png'), order => ['S.cerevisiae', 'C.neoformans.JEC21']);
 is_deeply [sort keys %{ $r }], ['filename', 'msa_file'], 'plot_msa, a hash in: the image and a temporary alignment';
@@ -78,19 +90,12 @@ is png($r->{'output_file'}), "\x89PNG\r\n\x1a\n", 'a PNG tree image from the seq
 	is $r->{'output_file'}, 'phylo.svg', 'reports phylo.svg';
 	my $svg = slurp(catfile($dir, 'phylo.svg'));
 	like $svg, qr/<svg/, 'and writes it';
-	like $svg, qr{<dc:title>DEG20010421</dc:title>}, 'whose Title is the title';
-	like $svg, qr{<dc:date>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[-+]\d\d:\d\d</dc:date>}, 'whose Date is to the second, with its UTC offset';
-	my $fa_sha = Digest::SHA->new(256)->addfile($fa, 'b')->hexdigest;
-	like $svg, qr{<dc:source>the FASTA file \Q$fa\E \(SHA-256 $fa_sha\), written with its gaps stripped to .+ \(SHA-256 [0-9a-f]{64}\), which Clustal Omega aligned into .+ \(SHA-256 [0-9a-f]{64}\)</dc:source>},
-		'whose Source names the FASTA, the ungapped copy and the alignment, each with its digest';
-	like $svg, qr{<dc:description>The guide tree Clustal Omega [\d.]+ wrote while aligning 4 sequences, run as: .+clustalo --in .*--guidetree-out=\Q$keep\E},
-		'whose Description is the clustalo command';
-	like $svg, qr{The tree as drawn, in newick: \(.*S\.cerevisiae:[\d.]+.*\);</dc:description>}, 'and the newick drawn';
 	my $nw_sha = Digest::SHA->new(256)->addfile($keep, 'b')->hexdigest;
-	like $svg, qr{<dc:identifier>sha256:$nw_sha of the newick file drawn</dc:identifier>}, 'whose Identifier is the digest of that newick';
-	like $svg, qr{<dc:relation>kept with it: tree_file \Q$keep\E</dc:relation>}, 'whose Relation is the tree kept';
-	like $svg, qr{<dc:title>$_ [\d.]+}, "whose Contributors include $_" foreach 'Clustal Omega', 'Bioinf::Basic', 'Alien::Bioinf', 'perl', 'Python', 'matplotlib', 'Biopython', 'NumPy';
-	like $svg, qr{<rdf:li>S\.cerevisiae</rdf:li>}, 'and whose Keywords are the tips';
+	like $svg, creator('plot_phylo', $by_py . qr/, Biopython [\d.]+, NumPy [\d.]+; titled "DEG20010421"/ . aligned(qr/.*--guidetree-out=\Q$keep\E/)
+		. qr/; drawing the guide tree it wrote, \Q$keep\E \(SHA-256 $nw_sha\); kept with it: tree_file \Q$keep\E; 4 tips: [^;]+; the tree as drawn, in newick: \(\S+\);<\/dc:title>/),
+		'whose Creator names the FASTA, the ungapped copy, the alignment and the tree, each with its digest, the clustalo command, the tree kept, the tips and the newick';
+	is_deeply svg_dc($svg), [qw(creator date format title type)], 'and that is all its metadata';
+	unlike $svg, qr{<dc:title>DEG20010421</dc:title>}, 'with no Title beside the Creator';
 }
 
 foreach my $f ([\&plot_msa, 'filename'], [\&plot_phylo, 'output_file']) {
@@ -147,7 +152,8 @@ is msa_quality_table('alignment_json' => $json, 'unaligned_fa' => $unaligned, fi
 	'blastp is run when "alignment_json" does not exist yet, on "unaligned_fa", the old name for "fasta"';
 ok -s $json, 'and its report kept';
 is png($img), "\x89PNG\r\n\x1a\n", 'a PNG table';
-like slurp($img), creator('msa_quality_table', $by_py), 'and its Creator';
+like slurp($img), creator('msa_quality_table', $by_py . qr/; untitled; showing each pair's "bit_score"; from the FASTA file \Q$unaligned\E $sha of \d+ sequences, written with its gaps stripped to [^;]+ $sha, which blastp [\d.]+ from Alien::Bioinf [\d.]+ compared all against all into \Q${\ File::Spec->rel2abs($json)}\E $sha, run as: [^;]*blastp[^;]*; kept with it: alignment_json \Q${\ File::Spec->rel2abs($json)}\E/),
+	'and its Creator, with the FASTA, the blastp command and the report kept';
 unlink $img;
 msa_quality_table('alignment_json' => $json, filename => $img, normalize => 1, order => [sort keys %{ $seqs }]);
 is png($img), "\x89PNG\r\n\x1a\n", 'the existing report is read';

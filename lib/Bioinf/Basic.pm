@@ -52,14 +52,33 @@ sub _args {
 	$args;
 }
 
-# The "Creator" written into an image's metadata, after the one
-# Matplotlib::Simple writes:
-# which script, run where, called which sub of which version of this module,
-# on which computer (its hostname, OS and perl).
+# The start of the "Creator" written into an image's metadata, after the one
+# Matplotlib::Simple 0.319 writes: which script, run where, called which sub of
+# which version of this module (and of Alien::Bioinf, whose tools and Python
+# draw every image), by whom, on which computer (its hostname and OS), with
+# which perl and where it is. Like Matplotlib::Simple's, the Creator is the image's
+# whole provenance, on one line, and the only metadata written: msa_plot.py
+# appends the Python, matplotlib and Biopython versions as it runs, since only
+# it knows them, and then each clause it is given with "--p" (what the image
+# was made from, with digests, and the commands that made it). Matplotlib::Simple has to py_str() its
+# Creator, which it pastes into a Python literal; this one reaches Python as a
+# JSON string through _python's --argfile, so backslashes and quotes in a path
+# need no escaping here.
 sub _creator {
 	my ($sub) = @_;
-	getcwd() . "/$RealScript called using \"$sub\" in " . __FILE__ . " version $VERSION on host " . hostname()
-		. " ($^O, perl " . sprintf('%vd', $^V) . ')';
+	_alien($sub);
+	getcwd() . "/$RealScript called using \"$sub\" in " . __FILE__ . " version $VERSION with Alien::Bioinf $Alien::Bioinf::VERSION"
+		. ' by user ' . _user() . ' on host ' . hostname() . " ($^O) with Perl " . sprintf('%vd', $^V) . " ($^X)";
+}
+
+# The name of the user running this. getpwuid is unimplemented on MSWin32,
+# where it dies, and getlogin is undef without a controlling terminal (under
+# cron, or a batch scheduler), so the environment is the last resort.
+sub _user {
+	my $user = eval { (getpwuid $<)[0] };
+	$user = getlogin() unless defined $user && length $user;
+	$user = $ENV{USERNAME} // $ENV{USER} unless defined $user && length $user;
+	defined $user && length $user ? $user : 'unknown';
 }
 
 sub _json_file {
@@ -349,7 +368,7 @@ sub plot_msa {
 		croak "$sub: needs \"query\" to place \"active_site_aa\"" unless defined $args->{query};
 		_residue_number($sub, "active site $_", $sites->{$_}) foreach sort keys %{ $sites };
 	}
-	my ($r, undef, $names) = _align($args, $sub, 0) or return {};
+	my ($r, undef, $names, $cmd) = _align($args, $sub, 0) or return {};
 	my $aln = fasta2hash($r->{'msa_file'});
 	my @order = @{ $args->{order} // $names };
 	my @unknown = grep { !defined $aln->{$_} } @order;
@@ -380,6 +399,7 @@ sub plot_msa {
 	my %shown = map { ($labels->{$_} // $_) => $aln->{$_} } @order;
 	my $fa = hash2fasta_file(\%shown, _tmp('.fa'), [map { $labels->{$_} // $_ } @order], 0);
 	_python($sub, '--f', $fa, '--o', $args->{filename}, '--c', _creator($sub), '--quiet',
+		'--p', _json_text([_align_provenance($args, $sub, $cmd, $names, $r->{'msa_file'}), _kept($args, qw(msa_file tree_file))]),
 		(defined $args->{title} ? ('--t', $args->{title}) : ()),
 		(defined $args->{xlabel} ? ('--x', $args->{xlabel}) : ()),
 		(defined $args->{ylabel} ? ('--y', $args->{ylabel}) : ()), @segments);
@@ -396,43 +416,42 @@ sub _file_id {
 	File::Spec->rel2abs($file) . ' (SHA-256 ' . Digest::SHA->new(256)->addfile($file, 'b')->hexdigest . ')';
 }
 
-# Everything plot_phylo knows about where its tree came from, as the Dublin
-# Core fields msa_plot.py writes into the image beside the Creator: what was
-# read (Source), how the tree was made (Description), the files kept with it
-# (Relation), and the Perl-side software that took part (Contributor). $cmd,
-# $names and $msa are what _align returned, and undef when nothing was aligned.
-# msa_plot.py adds the date, the newick it drew and its digest, the tip names,
-# and its own Python, matplotlib, Biopython and NumPy.
-sub _phylo_provenance {
-	my ($args, $tree, $cmd, $names, $msa) = @_;
+# "fasta" as an image's Creator names it: a file by its path and digest, a hash
+# ref by its size, since its contents were never on disk until
+# _ungapped_fasta wrote them.
+sub _fasta_id {
+	my ($fasta, $n) = @_;
+	ref $fasta ? "a hash ref of $n sequences" : 'the FASTA file ' . _file_id($fasta) . " of $n sequences";
+}
+
+# The files named in @keys of $args that were written and kept beside an
+# image, as a clause of its Creator, or nothing when none was.
+sub _kept {
+	my ($args, @keys) = @_;
 	require File::Spec;
-	my $v = _alien('plot_phylo')->versions;
-	my %p = (Title => $args->{title} // 'Phylogenetic tree');
-	my @contrib = ("Bioinf::Basic $VERSION (" . __FILE__ . ')', "Alien::Bioinf $Alien::Bioinf::VERSION",
-		"perl " . sprintf('%vd', $^V) . " ($^X)");
-	if (defined $cmd) {
-		my $fasta = $args->{fasta};
-		# $cmd->[2] is clustalo's "--in", the ungapped copy _ungapped_fasta wrote
-		$p{Source} = (ref $fasta ? 'a hash ref of ' . scalar(@{ $names }) . ' sequences' : 'the FASTA file ' . _file_id($fasta))
-			. ', written with its gaps stripped to ' . _file_id($cmd->[2]) . ', which Clustal Omega aligned into '
-			. _file_id($msa);
-		$p{Description} = "The guide tree Clustal Omega $v->{clustalo} wrote while aligning "
-			. scalar(@{ $names }) . ' sequences, run as: ' . join(' ', map { /[^\w\/.,:=+-]/ ? "'$_'" : $_ } @{ $cmd }) . '.';
-		unshift @contrib, "Clustal Omega $v->{clustalo} ($cmd->[0])";
-		my @kept = map { defined $args->{$_} ? "$_ " . File::Spec->rel2abs($args->{$_}) : () } qw(msa_file tree_file);
-		$p{Relation} = 'kept with it: ' . join('; ', @kept) if @kept;
-	} else {
-		$p{Source} = 'the newick file ' . _file_id($tree);
-		$p{Description} = 'Drawn from an existing newick file; no alignment was made.';
-	}
-	$p{Contributor} = \@contrib;
-	\%p;
+	my @kept = map { defined $args->{$_} && !ref $args->{$_} ? "$_ " . File::Spec->rel2abs($args->{$_}) : () } @keys;
+	@kept ? 'kept with it: ' . join(', ', @kept) : ();
+}
+
+# A command as it could be pasted into a shell, for an image's Creator.
+sub _cmd_text { join ' ', map { /[^\w\/.,:=+-]/ ? "'$_'" : $_ } @_ }
+
+# How _align made an alignment, as one clause of an image's Creator: what
+# Clustal Omega read, which version ran, what it wrote and the command. $cmd,
+# $names and $msa are what _align returned.
+sub _align_provenance {
+	my ($args, $sub, $cmd, $names, $msa) = @_;
+	my $alien = _alien($sub);
+	# $cmd->[2] is clustalo's "--in", the ungapped copy _ungapped_fasta wrote
+	'from ' . _fasta_id($args->{fasta}, scalar @{ $names }) . ', written with its gaps stripped to ' . _file_id($cmd->[2])
+		. ', which Clustal Omega ' . $alien->versions->{clustalo} . " from Alien::Bioinf $Alien::Bioinf::VERSION aligned into "
+		. _file_id($msa) . ', run as: ' . _cmd_text(@{ $cmd });
 }
 
 sub plot_phylo {
 	my $sub = 'plot_phylo';
 	my $args = _args(\@_, $sub, [], [qw(clustal_args fasta labels msa_file output_file threads title tree_file)]);
-	$args->{'output_file'} //= 'phylo.svg';
+	$args->{output_file} //= 'phylo.svg';
 	my ($r, $tree, $names, $cmd);
 	if (defined $args->{fasta}) {
 		($r, $tree, $names, $cmd) = _align($args, $sub, 1) or return {};
@@ -445,11 +464,15 @@ sub plot_phylo {
 		$r = { 'tree_file' => $tree };
 	}
 	my $labels = $args->{labels} // {};
-	_python($sub, '--tree', $tree, '--o', $args->{'output_file'}, '--c', _creator($sub),
-		'--meta', _json_text(_phylo_provenance($args, $tree, $cmd, $names, $r->{'msa_file'})),
+	my @prov = defined $cmd
+		? (_align_provenance($args, $sub, $cmd, $names, $r->{'msa_file'}), 'drawing the guide tree it wrote, ' . _file_id($tree),
+			_kept($args, qw(msa_file tree_file)))
+		: ('from the newick file ' . _file_id($tree));
+	_python($sub, '--tree', $tree, '--o', $args->{'output_file'}, '--c', _creator($sub), '--quiet', '--p', _json_text(\@prov),
 		(defined $args->{title} ? ('--t', $args->{title}) : ()),
 		(%{ $labels } ? ('--l', _json_text($labels)) : ()));
 	$r->{'output_file'} = $args->{'output_file'};
+	_wrote($args->{output_file}, 43); # yellow
 	$r;
 }
 
@@ -468,18 +491,26 @@ sub msa_quality_table {
 	# named -- made by running blastp on "fasta", and kept in "alignment_json"
 	# for next time if that is named.
 	my $aj = $args->{'alignment_json'};
-	my $blast;
+	my ($blast, $prov);
 	if (ref $aj eq 'HASH') {
 		$blast = $aj;
+		$prov = 'from a BLAST report given as a hash ref';
 	} elsif (defined $aj && -f $aj) {
 		$blast = _json_file($aj);
+		$prov = 'from the BLAST report ' . _file_id($aj);
 	} else {
 		croak "$sub: needs \"fasta\" to align, or an existing \"alignment_json\"" . (defined $aj ? " ($aj doesn't exist yet)" : '')
 			unless defined $fasta;
-		my ($in) = _ungapped_fasta($fasta);
+		my ($in, $names) = _ungapped_fasta($fasta);
 		$aj //= _tmp('.json');
-		_run(_alien($sub)->blast('blastp'), '-query', $in, '-subject', $in, '-out', $aj, '-outfmt', 15);
+		my $alien = _alien($sub);
+		my @cmd = ($alien->blast('blastp'), '-query', $in, '-subject', $in, '-out', $aj, '-outfmt', 15);
+		_run(@cmd);
 		$blast = _json_file($aj);
+		$prov = 'from ' . _fasta_id($fasta, scalar @{ $names }) . ', written with its gaps stripped to ' . _file_id($in)
+			. ', which blastp ' . $alien->versions->{blast} . " from Alien::Bioinf $Alien::Bioinf::VERSION compared all against all into "
+			. _file_id($aj) . ', run as: ' . _cmd_text(@cmd);
+		$prov = join '; ', $prov, _kept($args, 'alignment_json');
 	}
 	my (%data, $max);
 	foreach my $query (@{ $blast->{BlastOutput2} }) {
@@ -543,7 +574,7 @@ sub msa_quality_table {
 		title => $args->{title} // '', cblabel => $args->{cb_label},
 	});
 	close $fh or croak "$sub: can't write $table: $!";
-	_python($sub, '--table', $table, '--o', $args->{filename}, '--c', _creator($sub));
+	_python($sub, '--table', $table, '--o', $args->{filename}, '--c', _creator($sub), '--p', _json_text(["showing each pair's \"$metric\"", $prov]));
 	$args->{filename};
 }
 
@@ -722,16 +753,46 @@ lacks. To check for and apply updates:
 
 =head2 Provenance in the images
 
-Every PNG, SVG, PDF, PS or EPS image these functions draw carries its
-provenance as C<Creator> metadata: the calling script (as the working
-directory plus the script's name, like Matplotlib::Simple), the function,
-this file and its version, the computer it ran on (hostname, operating system
-and perl version), and what drew it: C<msa_plot.py> and the matplotlib
-version, and for a tree the Biopython version too. For example:
+Every PNG, SVG, PDF, PS or EPS image these functions draw carries its whole
+provenance on one line, as its C<Creator> metadata and nothing else, just as
+Matplotlib::Simple writes it. The line names the calling script (as the
+working directory plus the script's name), the function, this file and its
+version, the Alien::Bioinf version, the user who ran it, the computer it ran
+on (hostname and operating system), the perl version and path, and what drew
+it: C<msa_plot.py>, the Python version and path, the matplotlib version, and
+for a tree the Biopython and NumPy versions too. The line has no date; an SVG
+has the C<< E<lt>dc:dateE<gt> >> matplotlib writes beside it, taken from
+C<SOURCE_DATE_EPOCH> where that is set. After a C<;> come the image's title
+(or "untitled") and what it was made from and how, with the full path and
+SHA-256 of each file:
 
- /home/me/work/run.pl called using "plot_msa" in /.../Bioinf/Basic.pm
- version 0.01 on host myhost (linux, perl 5.44.0), drawn by /.../msa_plot.py
- with matplotlib 3.10.0
+=over
+
+=item * C<plot_msa>: the FASTA file and how many sequences it holds (or the number
+of sequences in a hash ref), the ungapped copy of it that Clustal Omega
+read, the alignment Clustal Omega wrote, the Clustal Omega version, the
+exact command, and the C<msa_file> and C<tree_file> kept, if any.
+
+=item * C<plot_phylo>: the same when it aligns, with the guide tree it drew;
+otherwise the newick file it drew. Then how many negative branch lengths
+were drawn as 0, if any; the tips, with the label each was shown as; and the
+whole newick tree that was drawn.
+
+=item * C<msa_quality_table>: the metric shown, and either the BLAST report it read
+or the FASTA file, its ungapped copy, the report blastp wrote, the blastp
+version, the exact command, and the C<alignment_json> kept, if any.
+
+=back
+
+For example:
+
+ /home/me/work/run.pl called using "plot_phylo" in /.../Bioinf/Basic.pm
+ version 0.01 with Alien::Bioinf 0.01 by user me on host myhost (linux)
+ with Perl 5.44.0 (/usr/bin/perl), drawn by /.../msa_plot.py with
+ Python 3.14.2 (/.../venv/bin/python),
+ matplotlib 3.11.2, Biopython 1.87, NumPy 2.4.6; titled "DEG20010421";
+ from the newick file /home/me/work/t.newick (SHA-256 f0e8...); 4 tips:
+ S.cerevisiae, ...; the tree as drawn, in newick: (S.cerevisiae:0.389085,...);
 
 An SVG holds it in C<< E<lt>dc:creatorE<gt> >>; C<exiftool> or C<identify -verbose> shows it
 in a PNG or PDF.
@@ -839,41 +900,6 @@ C<plot_msa>; and the plot title.
 
 With C<fasta> of fewer than two sequences it warns and returns an empty hash
 ref.
-
-Besides the C<Creator> every image carries, a tree records where it came from
-in the image's own metadata, so the file can be traced and checked without
-the script that made it. An SVG holds all of this as Dublin Core in its
-C<< E<lt>metadataE<gt> >>, and a PNG as text chunks:
-
-=over
-
-=item * Title, Date: the title (default "Phylogenetic tree"), and when it was
-drawn, to the second and with the UTC offset. Where C<SOURCE_DATE_EPOCH> is
-set, matplotlib's date from it is kept instead, so a reproducible build
-stays reproducible.
-
-=item * Source: the input, with the full path and SHA-256 of each file: the FASTA
-file (or the number of sequences in a hash ref), the ungapped copy of it
-that Clustal Omega read, and the alignment Clustal Omega wrote; or the
-newick file drawn.
-
-=item * Description: how the tree was made: the Clustal Omega version and the exact
-command line; how many negative branch lengths were drawn as 0; the tips,
-with the label each was shown as; and the whole newick tree that was drawn.
-
-=item * Identifier, Relation: the SHA-256 of the newick file drawn, and the
-C<msa_file> and C<tree_file> kept with the image, if any.
-
-=item * Contributor: each piece of software that took part, with its version and,
-where it runs as a program, its path: Clustal Omega, Bioinf::Basic,
-Alien::Bioinf, perl, Python, matplotlib, Biopython and NumPy.
-
-=item * Keywords: "phylogenetic tree", "newick" and the tip names.
-
-=back
-
-A PDF keeps the Title, the Description (as its Subject) and the Keywords; PS
-and EPS keep only the C<Creator>, and other formats nothing.
 
 =head2 msa_quality_table(%args)
 

@@ -38,3 +38,13 @@ Revision history for Bioinf-Basic
    alignment_json, unaligned_fa, logscale_add, show_numbers,
    color_residues, row_width and table_text_size. The dotted names now die
    as unknown arguments.
+
+ - Every image's provenance is now one line of Creator metadata, and the
+   only metadata written, as from Matplotlib::Simple: it also names the user
+   who ran the script and the Python version, and ends with the inputs, each
+   with its SHA-256, and the clustalo or blastp command that made them.
+   What plot_phylo wrote as a separate Title, Source, Description,
+   Identifier, Relation, Contributor and Keywords is now all in that line,
+   and plot_msa and msa_quality_table record their title, inputs, commands
+   and kept files in the same way. Its own Date, to the second with the UTC
+   offset, is gone, leaving the date matplotlib writes into an SVG.
