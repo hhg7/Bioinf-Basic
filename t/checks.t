@@ -39,9 +39,48 @@ is system($^X, @inc, '-e', 'BEGIN { $0 = q{/no/such/script.pl} } require Bioinf:
 # Alien::Bioinf hidden from require, as on a machine that could not install it
 my $hide = 'BEGIN { unshift @INC, sub { die qq{hidden\n} if $_[1] eq q{Alien/Bioinf.pm}; return } }';
 my $err = catfile($dir, 'err.txt');
-system($^X, @inc, '-e', "$hide use Bioinf::Basic q{plot_msa}; open STDERR, q{>}, q{$err}; plot_msa(fasta => { a => q{MK}, b => q{MV} }, filename => q{x.png})");
+# $err is passed in @ARGV, not pasted into the code, which a Windows path's
+# backslashes or a '}' in it would break
+system($^X, @inc, '-e', "$hide use Bioinf::Basic q{plot_msa}; open STDERR, q{>}, \$ARGV[0]; plot_msa(fasta => { a => q{MK}, b => q{MV} }, filename => q{x.png})", $err);
 like slurp($err), qr/^_alien: plot_msa needs Alien::Bioinf, for Clustal Omega, BLAST\+ and the plotting Python, and it can't be loaded: hidden/,
 	'without Alien::Bioinf a plotting function says what it needs';
+
+# ---- _run -------------------------------------------------------------------
+
+# Up to 2026-10-07 _run read only the exit code, the high byte of $?, so a
+# program killed by a signal was reported as "exit 0".
+dies_like sub { Bioinf::Basic::_run($^X, '-e', 'exit 3') }, qr/^_run: .+ failed: exit 3 at /, 'a non-zero exit is reported';
+SKIP: {
+	skip 'MSWin32 has no POSIX signals', 1 if $^O eq 'MSWin32';
+	# set to DEFAULT in the child, which may have inherited TERM ignored
+	dies_like sub { Bioinf::Basic::_run($^X, '-e', '$SIG{TERM} = q{DEFAULT}; kill q{TERM}, $$; sleep 5') },
+		qr/^_run: .+ failed: killed by signal 15/, 'a death by signal is reported as one, not as "exit 0"';
+}
+
+# ---- undef file names -------------------------------------------------------
+
+# Up to 2026-10-07 the message interpolated the undef, which warned
+# "uninitialized value" -- fatally, under a caller's FATAL warnings, which then
+# hid the message itself.
+foreach my $case (
+	[fasta2hash             => sub { fasta2hash(undef) },             qr/^_open_fasta: undef isn't a readable file/],
+	[get_best_alignment_hit => sub { get_best_alignment_hit(undef) }, qr/^get_best_alignment_hit: undef isn't a readable file/],
+) {
+	my ($name, $code, $re) = @{ $case };
+	my @w;
+	local $SIG{__WARN__} = sub { push @w, $_[0] };
+	dies_like $code, $re, "$name(undef) dies naming the undef";
+	is "@w", '', 'and with no warning';
+}
+
+# ---- hash2fasta_file --------------------------------------------------------
+
+# Up to 2026-10-07 the width went straight to the XS as a UV: -1 wrapped round
+# to one line per sequence, and 'x' warned with no function name.
+foreach my $w (-1, 1.5, 'x') {
+	dies_like sub { hash2fasta_file({ a => 'MK' }, catfile($dir, 'w.fa'), undef, $w) },
+		qr/^hash2fasta_file: 4th argument must be a whole number, 0 or more, or undef, not "\Q$w\E"/, "width $w dies";
+}
 
 # ---- get_best_alignment_hit -------------------------------------------------
 

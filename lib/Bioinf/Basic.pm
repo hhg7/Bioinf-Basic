@@ -67,7 +67,8 @@ sub _args {
 sub _creator {
 	my ($sub) = @_;
 	_alien($sub);
-	getcwd() . "/$RealScript called using \"$sub\" in " . __FILE__ . " version $VERSION with Alien::Bioinf $Alien::Bioinf::VERSION"
+	require File::Spec;
+	File::Spec->catfile(getcwd(), $RealScript) . " called using \"$sub\" in " . __FILE__ . " version $VERSION with Alien::Bioinf $Alien::Bioinf::VERSION"
 		. ' by user ' . _user() . ' on host ' . hostname() . " ($^O) with Perl " . sprintf('%vd', $^V) . " ($^X)";
 }
 
@@ -89,9 +90,14 @@ sub _json_file {
 	JSON::MaybeXS::decode_json(<$fh>);
 }
 
+# @cmd run with list-form system, which needs no shell. $? is -1 when the
+# program never started; otherwise its low 7 bits are the signal that killed
+# it, and must be read before the shift, which leaves only the exit code.
 sub _run {
 	my @cmd = @_;
-	system(@cmd) == 0 or croak "_run: \"@cmd\" failed: " . ($? == -1 ? $! : 'exit ' . ($? >> 8));
+	system(@cmd) == 0 and return;
+	my $why = $? == -1 ? "it didn't start: $!" : $? & 127 ? 'killed by signal ' . ($? & 127) : 'exit ' . ($? >> 8);
+	croak "_run: \"@cmd\" failed: $why";
 }
 
 # Alien::Bioinf, loaded for $sub, or a message saying that $sub needs it.
@@ -164,10 +170,13 @@ sub _fasta_ordered {
 
 sub _open_fasta {
 	my ($file) = @_;
-	croak "_open_fasta: \"$file\" doesn't exist or isn't a readable file" unless defined $file && -f $file && -r _;
+	croak "_open_fasta: undef isn't a readable file" unless defined $file;
+	croak "_open_fasta: \"$file\" doesn't exist or isn't a readable file" unless -f $file && -r _;
 	my $fh;
 	if ($file =~ /\.gz\z/) {
-		open $fh, '-|', 'gzip', '-dc', $file or croak "_open_fasta: can't run gzip on $file: $!";
+		# in an eval, since a perl without list-form piped open (MSWin32 before
+		# 5.22) dies in open itself, with no function name in the message
+		eval { open $fh, '-|', 'gzip', '-dc', $file } or croak "_open_fasta: can't run gzip on $file: " . ($@ || $!);
 	} else {
 		open $fh, '<:raw', $file or croak "_open_fasta: can't read $file: $!";
 	}
@@ -228,6 +237,8 @@ sub hash2fasta_file {
 	croak "hash2fasta_file: 1st argument must be a hash ref" unless ref $hash eq 'HASH';
 	croak "hash2fasta_file: 2nd argument must be a file name" unless defined $filename && ref $filename eq '';
 	croak "hash2fasta_file: 3rd argument must be an array ref or undef" if defined $order && ref $order ne 'ARRAY';
+	# checked here because the XS takes it as a UV, where -1 would wrap round
+	croak "hash2fasta_file: 4th argument must be a whole number, 0 or more, or undef, not \"$width\"" if defined $width && $width !~ /\A[0-9]+\z/;
 	open my $fh, '>:raw', $filename or croak "hash2fasta_file: can't write $filename: $!";
 	_write_fasta($fh, $hash, $order // [sort keys %{ $hash }], $width // 80);
 	close $fh or croak "hash2fasta_file: can't write $filename: $!";
@@ -247,7 +258,8 @@ sub get_best_alignment_hit {
 	# share a title (one protein deposited under two accessions): in
 	# identify.target/potato/new/f.sambunicum.json 76 hits carry 44 distinct
 	# titles, and a hash kept 44.
-	croak "get_best_alignment_hit: \"$json_file\" doesn't exist or isn't a readable file" unless defined $json_file && -f $json_file && -r _;
+	croak "get_best_alignment_hit: undef isn't a readable file" unless defined $json_file;
+	croak "get_best_alignment_hit: \"$json_file\" doesn't exist or isn't a readable file" unless -f $json_file && -r _;
 	# Which way is better for each numeric hsp field: -1 = smaller, 1 = larger.
 	# The other hsp keys (hseq, qseq, midline, num, *_from/*_to) are content
 	# or position, not quality.

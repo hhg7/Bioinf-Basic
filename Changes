@@ -29,6 +29,15 @@ Revision history for Bioinf-Basic
    label; and clustal_view_residues escapes every LaTeX special character in
    a protein name.
 
+ - Also fixed before release: a program that clustalo, blastp or Python
+   runs is reported as killed by its signal, where it was reported as
+   "exit 0"; fasta2hash and get_best_alignment_hit given an undef file name
+   say so, rather than warning "uninitialized value" as well, which under a
+   caller's FATAL warnings hid the message; hash2fasta_file dies on a width
+   that is not a whole number, where -1 wrapped round to one line per
+   sequence; and reading a .gz on a perl without list-form piped open (MSWin32
+   before 5.22) dies with the function's name.
+
  - fasta2hash with a key no longer keeps every other defline it passes, to
    warn about their repeats: finding the last of 400,000 records went from
    87 MB and 0.25 s to 8 MB and 0.06 s.
