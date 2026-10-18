@@ -9,8 +9,11 @@ proteome or genome actually needs rather than whatever the last buffer growth
 left. On the file described at FASTA_BLOCK below, bioinf.pm read it in 3.83 s
 with a peak RSS of 1,098 MB, and this in 0.80 s and 967 MB, 900 MB of which is
 the sequences themselves; writing it back took 44.44 s and takes 0.97 s, and
-the two files are byte-identical. The perl side (lib/Bioinf/Basic.pm) opens and
-closes the files.
+the two files are byte-identical. Dropping the whitespace in sequences, which
+began on 2026-10-17, costs about 15%: a made-up file of the same shape (938 MB,
+400,000 records of 2,280 residues in 60-column lines, in the page cache) took
+0.85 s to read before and 0.98 s after, best of five timed inside perl. The
+perl side (lib/Bioinf/Basic.pm) opens and closes the files.
 
 Every croak() and warn() here starts with C99's __func__, so a message names
 the C function that raised it (read_fasta or write_fasta) and stays right if
@@ -20,6 +23,7 @@ one is renamed.*/
 #include "perl.h"
 #include "XSUB.h"
 #include <string.h>
+#include <stdint.h>
 /*`restrict` is spelled bare, which is C99 syntax.
 
 It is carried only by read_fasta()'s block buffer, which this file allocates
@@ -61,11 +65,69 @@ DEFINE=-DFASTA_BLOCK=<bytes> to try another.*/
 #define FASTA_BLOCK 65536
 #endif
 
-/*Drop a trailing '\r' left by a CRLF file. It is chopped when the line ends
-rather than when it is read, because a block can end between the '\r' and
-its '\n'.*/
-static void chop_cr(SV *sv) {
-	if (SvCUR(sv) && SvPVX(sv)[SvCUR(sv) - 1] == '\r') SvCUR_set(sv, SvCUR(sv) - 1);
+/*Whether c is whitespace as Python has it, which is what Biopython strips: ' '
+or one of '\t' (9), '\v' (11), '\f' (12) and '\r' (13), which is the range
+9..13 less the '\n' (10) that ends every line, and so is never tested. perl's
+isSPACE() is not used, since that took in '\v' only from 5.18.*/
+#define FASTA_SPACE(c) ((c) == ' ' || (unsigned char)((c) - '\t') < 5)
+
+/*Whether p..e holds any FASTA_SPACE() byte, 8 bytes at a time.
+
+With a byte-at-a-time loop, the 938 MB file described at the top of this file
+took 1.46 s to read rather than 0.85 s (best of five each, 2026-10-17): gcc
+-O2 does not vectorise a loop of unknown length. This takes 8 bytes at once: a space is
+a zero byte of w ^ 0x2020...20, found by Alan Mycroft's haszero(), and a byte
+in 9..13 is found by hasbetween(w, 8, 14), both from Sean Eron Anderson's "Bit
+Twiddling Hacks" (graphics.stanford.edu/~seander/bithacks.html, sections
+ZeroInWord and HasBetweenInWord). Both are exact, and work byte by byte with no
+carry between bytes, so the byte order does not matter.*/
+static bool any_space(const char *p, const char *e) {
+	const uint64_t ones = UINT64_C(0x0101010101010101), low7 = ones * 0x7f, high = ones * 0x80;
+	for (; e - p >= 8; p += 8) {
+		uint64_t w;
+		memcpy(&w, p, 8); // not a cast to uint64_t *, since SPARC and some ARM fault on an unaligned load
+		const uint64_t sp = w ^ (ones * ' ');
+		if ((sp - ones) & ~sp & high) return TRUE;
+		if ((ones * (127 + 14) - (w & low7)) & ~w & ((w & low7) + ones * (127 - 8)) & high) return TRUE;
+	}
+	for (; p < e; p++) {
+		if (FASTA_SPACE(*p)) return TRUE;
+	}
+	return FALSE;
+}
+
+/*Drop the whitespace at the end of a defline, the '\r' of a CRLF file
+included, as Biopython does. It is chopped when the line ends rather than as it
+is read, because a block can end inside it.*/
+static void chop_space(SV *sv) {
+	STRLEN n = SvCUR(sv);
+	while (n && FASTA_SPACE(SvPVX(sv)[n - 1])) n--;
+	SvCUR_set(sv, n);
+}
+
+/*Append the residues in p..e to seq, leaving out the whitespace. Biopython
+drops the spaces in a sequence line and the whitespace at its end; a tab inside
+a line is dropped here too. A line with none, which is nearly every line, is
+appended whole; otherwise each run between whitespace is one sv_catpvn().*/
+static void cat_residues(pTHX_ SV *seq, const char *p, const char *e) {
+	if (!any_space(p, e)) {
+		sv_catpvn(seq, p, (STRLEN)(e - p));
+		return;
+	}
+	while (p < e) {
+		const char *run = p;
+		while (p < e && !FASTA_SPACE(*p)) p++;
+		if (p > run) sv_catpvn(seq, run, (STRLEN)(p - run));
+		while (p < e && FASTA_SPACE(*p)) p++;
+	}
+}
+
+/*Whether p..e holds nothing but whitespace.*/
+static bool all_space(const char *p, const char *e) {
+	for (; p < e; p++) {
+		if (!FASTA_SPACE(*p)) return FALSE;
+	}
+	return TRUE;
 }
 
 /*Every record of fh as a hash of defline => sequence, or with key given only
@@ -111,18 +173,15 @@ static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 			const char *nl = (const char*)memchr(p, '\n', (size_t)(end - p));
 			const char *e = nl ? nl : end;
 			if (in_hdr) sv_catpvn(hdr, p, (STRLEN)(e - p));
-			else if (seq) sv_catpvn(seq, p, (STRLEN)(e - p));
-			else if (!have_def && e > p && !(e - p == 1 && *p == '\r'))
+			else if (seq) cat_residues(aTHX_ seq, p, e);
+			else if (!have_def && !all_space(p, e))
 				croak("%s: %s line %" UVuf " is sequence, but no defline (\">...\") has come before it", __func__, name, line);
 			if (!nl) break;
 			p = nl + 1;
 			bol = TRUE;
-			if (!in_hdr) {
-				if (seq) chop_cr(seq);
-				continue;
-			}
+			if (!in_hdr) continue;
 			in_hdr = FALSE;
-			chop_cr(hdr);
+			chop_space(hdr);
 			if (!SvCUR(hdr)) croak("%s: %s line %" UVuf " is a defline with no name", __func__, name, line);
 			if (seq) SvPV_shrink_to_cur(seq);
 			bool is_key = key && sv_eq(hdr, key);
@@ -148,18 +207,36 @@ static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 	return he ? SvREFCNT_inc_simple_NN(HeVAL(he)) : newSV(0); // not a copy: out is mortal, so this becomes the only reference
 }
 
+/*The bytes of sv for a FASTA file, as print to a :raw handle writes them: a
+string perl holds as UTF-8 is written as the characters it holds, so that how
+perl happened to store it cannot change the file. Up to 2026-10-17 it was
+written as its UTF-8, and "caf\xe9" came out as one byte or two. scratch holds
+that downgraded copy. A character above 255 has no byte, and gets NULL, for
+the caller to die naming the string; print would write UTF-8 and warn.*/
+static const char *fasta_bytes(pTHX_ SV *sv, SV *scratch, STRLEN *len) {
+	if (SvUTF8(sv)) {
+		sv_setsv(scratch, sv);
+		if (!sv_utf8_downgrade(scratch, TRUE)) return NULL;
+		sv = scratch;
+	}
+	return SvPV_const(sv, *len);
+}
+
 /*Each key of h named in order, as ">key" and then its sequence broken into
 lines of width characters; width 0 puts each sequence on one line.*/
 static void write_fasta(pTHX_ PerlIO *fh, HV *h, AV *order, STRLEN width) {
+	SV *kbuf = sv_newmortal(), *sbuf = sv_newmortal(); // fasta_bytes()'s scratch copies, of the key and of its sequence
 	for (SSize_t i = 0; i <= av_len(order); i++) {
 		SV **k = av_fetch(order, i, 0);
 		if (!k || !SvOK(*k)) croak("%s: element %" IVdf " of the order is undefined", __func__, (IV)i);
 		HE *he = hv_fetch_ent(h, *k, 0, 0);
 		STRLEN kl, sl;
 		// kp and sp not restrict: a defline and its sequence may share one COW buffer
-		const char *kp = SvPV_const(*k, kl);
+		const char *kp = fasta_bytes(aTHX_ *k, kbuf, &kl);
+		if (!kp) croak("%s: \"%s\" has a character above 255, so it has to be encoded (with Encode::encode('UTF-8', ...), say) before it is written", __func__, SvPV_nolen(*k));
 		if (!he || !SvOK(HeVAL(he))) croak("%s: \"%s\" has no sequence in the hash", __func__, kp);
-		const char *sp = SvPV_const(HeVAL(he), sl);
+		const char *sp = fasta_bytes(aTHX_ HeVAL(he), sbuf, &sl);
+		if (!sp) croak("%s: the sequence of \"%s\" has a character above 255, so it has to be encoded before it is written", __func__, kp);
 		PerlIO_putc(fh, '>');
 		PerlIO_write(fh, kp, kl);
 		PerlIO_putc(fh, '\n');

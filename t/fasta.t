@@ -9,7 +9,9 @@ use IO::Compress::Gzip ();
 use Bioinf::Basic qw(fasta2hash hash2fasta_file);
 # The expected values are what bioinf.pm's pure-perl fasta2hash and
 # hash2fasta_file returned for the same input (checked 2026-09-29), except
-# where a case says the XS deliberately differs.
+# where a case says the XS deliberately differs. Those for whitespace are what
+# Biopython 1.87's SeqIO.parse(file, 'fasta') read from the same file (checked
+# 2026-10-17): its record.description and str(record.seq).
 
 my $dir = tempdir(CLEANUP => 1);
 sub spew {
@@ -52,6 +54,28 @@ is scalar @w, 1, 'with one warning there too';
 @w = warnings_of(sub { is fasta2hash(spew('dupo.fa', ">x\nA\n>x\nG\n>y\nC\n"), 'y'), 'C', 'a record after a repeated one' });
 is scalar @w, 0, 'with no warning about the repeat, which was not asked for';
 
+# Up to 2026-10-17 a sequence kept its spaces and tabs, and a defline its
+# trailing whitespace, so this was { 'x ' => "AC GT AC\t", y => 'MK' }.
+my $ws = spew('ws.fa', ">x \nAC GT \nAC\t\n>y\nMK\n");
+is_deeply fasta2hash($ws), { x => 'ACGTAC', y => 'MK' }, 'whitespace is dropped from sequences and from the end of deflines, rather than kept';
+is fasta2hash($ws, 'x'), 'ACGTAC', 'so a defline with a trailing space is found by its name';
+# Differs from Biopython, which keeps a tab inside a line and the spaces at the
+# start of a defline's name
+is fasta2hash(spew('tab.fa', ">x\nAC\tGT\n"), 'x'), 'ACGT', 'a tab inside a line is dropped too';
+is_deeply fasta2hash(spew('lead-ws.fa', " \t\r\n>x\nA\n")), { x => 'A' }, 'a line of whitespace before the first defline is allowed';
+# Every byte but "\n" at each place 1 to 19 of a 20-byte line, which Basic.xs
+# reads as two 8-byte words and a 4-byte tail: its 8-bytes-at-once test for
+# whitespace must drop " ", "\t", "\r", "\f" and "\x0b", as Python's
+# str.split() would, and keep every other byte.
+{
+	my (@records, %want);
+	foreach my $byte (grep { $_ != 10 } 0 .. 255) {
+		my @lines = map { my $l = 'A' x 20; substr($l, $_, 1, chr $byte); $l } 1 .. 19;
+		push @records, ">b$byte\n" . join("\n", @lines) . "\n";
+		($want{"b$byte"} = join '', @lines) =~ tr/ \t\r\f\x0b//d;
+	}
+	is_deeply fasta2hash(spew('bytes.fa', join '', @records)), \%want, 'each of the 255 bytes, at each place in a line, is dropped only if it is whitespace';
+}
 eval { fasta2hash(spew('bad.fa', "ACGT\n>x\nA\n")) };
 like $@, qr/line 1 is sequence, but no defline/, 'sequence before any defline dies';
 is_deeply fasta2hash(spew('lead.fa', "\n\r\n>x\nA\n")), { x => 'A' }, 'blank lines before the first defline are allowed';
@@ -69,6 +93,13 @@ my $long = 'A' x 65531;
 my $f = spew('long.fa', ">x\r\n$long\r\n>y\r\nMK\r\n");
 is fasta2hash($f, 'x'), $long, 'a CRLF split across a block boundary';
 is fasta2hash($f, 'y'), 'MK', 'and the record after it';
+# ">x\n" is 3 bytes, so the space after 65532 residues is the last byte of the
+# first block and the tab the first of the second; and the defline of 65533
+# letters puts its trailing space at the end of the first block.
+$f = spew('long-ws.fa', ">x\n" . ('A' x 65532) . " \tC\n>y\nMK\n");
+is fasta2hash($f, 'x'), ('A' x 65532) . 'C', 'whitespace split across a block boundary';
+$f = spew('long-def.fa', '>' . ('n' x 65533) . " \t\nMK\n");
+is_deeply fasta2hash($f), { ('n' x 65533) => 'MK' }, 'and at the end of a defline split across one';
 
 # The .gz files are made with IO::Compress::Gzip rather than a gzip command
 # line, which would need a shell. Reading one still runs the gzip program, so
@@ -119,6 +150,19 @@ is do { local $/; <$fh> }, ">b\nABCD\nEFGH\nIJ\n>a\nXYZ\n", 'given order and wid
 close $fh;
 hash2fasta_file(\%h, $out, ['b'], 0);
 is_deeply fasta2hash($out), { b => 'ABCDEFGHIJ' }, 'width 0 writes one line, and reads back';
+# Up to 2026-10-17 a string perl held as UTF-8 was written as its UTF-8 and any
+# other as its bytes, so "caf\x{e9}" came out as one byte or two depending on
+# how it was made, and one file could mix the two.
+my $up = "caf\x{e9}";
+utf8::upgrade($up);
+hash2fasta_file({ $up => $up }, $out, [$up], 0);
+open $fh, '<:raw', $out or die $!;
+is do { local $/; <$fh> }, ">caf\xe9\ncaf\xe9\n", 'a string perl holds as UTF-8 is written as its characters, as print would, not as its UTF-8';
+close $fh;
+eval { hash2fasta_file({ "\x{3b2}-tub" => 'K' }, $out) };
+like $@, qr/^write_fasta: ".+-tub" has a character above 255, so it has to be encoded/, 'a character above 255 in a defline dies';
+eval { hash2fasta_file({ b => "M\x{3b2}" }, $out) };
+like $@, qr/^write_fasta: the sequence of "b" has a character above 255/, 'and in a sequence';
 eval { hash2fasta_file(\%h, $out, ['zz']) };
 like $@, qr/"zz" has no sequence/, 'a key not in the hash dies';
 eval { hash2fasta_file(\%h, $out, [undef]) };
@@ -129,9 +173,11 @@ eval { hash2fasta_file(\%h, $out, 'b') };
 like $@, qr/array ref or undef/, 'a non-array order dies';
 
 SKIP: {
-	skip 'Test::LeakTrace is not installed', 3 unless eval { require Test::LeakTrace; 1 };
+	skip 'Test::LeakTrace is not installed', 5 unless eval { require Test::LeakTrace; 1 };
 	Test::LeakTrace::no_leaks_ok(sub { fasta2hash($plain) }, 'fasta2hash does not leak');
 	Test::LeakTrace::no_leaks_ok(sub { eval { fasta2hash($plain, 'four') } }, 'nor when it dies');
 	Test::LeakTrace::no_leaks_ok(sub { hash2fasta_file(\%h, $out, ['b', 'a']) }, 'hash2fasta_file does not leak');
+	Test::LeakTrace::no_leaks_ok(sub { hash2fasta_file({ $up => $up }, $out, [$up]) }, 'nor when it writes a string held as UTF-8');
+	Test::LeakTrace::no_leaks_ok(sub { eval { hash2fasta_file({ a => 'M', "\x{3b2}" => 'K' }, $out) } }, 'nor when it dies on a character above 255');
 }
 done_testing;

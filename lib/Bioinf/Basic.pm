@@ -19,19 +19,21 @@ require 5.010;
 use strict;
 use warnings;
 use Carp qw(croak carp);
-use Cwd 'getcwd';
+use File::Spec;
 use Sys::Hostname 'hostname';
 use Exporter 'import';
 use XSLoader;
 our $VERSION = '0.01';
-our @EXPORT_OK = qw(clustal_view_residues fasta2hash get_best_alignment_hit hash2fasta_file msa_quality_table plot_msa plot_phylo);
+our @EXPORT_OK = qw(clustal_view_residues fasta2hash get_best_alignment_hit hash2fasta_file msa_quality_table pgs_score plot_msa plot_phylo);
 our %EXPORT_TAGS = (all => \@EXPORT_OK);
 XSLoader::load('Bioinf::Basic', $VERSION);
-# The calling script's name, for _creator. It is looked up at load time, as
-# FindBin always does, but FindBin croaks when $0 is not a file on disk (after
-# $0 is assigned to, or under an embedder), and that must not stop this module
-# loading, so $0 itself stands in then.
-my $RealScript = eval { require FindBin; $FindBin::RealScript } // $0;
+# The calling script's full path, for _creator. It is looked up at load time,
+# as FindBin always does, but FindBin croaks when $0 is not a file on disk
+# (after $0 is assigned to, or under an embedder), and that must not stop this
+# module loading, so $0 made absolute stands in then. Up to 2026-10-17 this was
+# the script's file name alone, which _creator joined to the working directory,
+# so a script run from another directory was recorded at a path that wasn't it.
+my $Script = eval { require FindBin; File::Spec->catfile($FindBin::RealBin, $FindBin::RealScript) } // File::Spec->rel2abs($0);
 
 # ---- private helpers
 
@@ -52,6 +54,43 @@ sub _args {
 	$args;
 }
 
+# $v as a message names it: "a HASH ref", "an ARRAY ref", "undef", or the
+# string quoted.
+sub _what {
+	my ($v) = @_;
+	return 'undef' unless defined $v;
+	ref $v ?(ref($v) =~ /\A[AEIOU]/ ? 'an ' : 'a ') . ref($v) . ' ref' : "\"$v\"";
+}
+
+# Dies unless each of @keys of $args that was given is a $type ('ARRAY' or
+# 'HASH') ref, naming $sub, the public function whose arguments they are. Up to
+# 2026-10-17 a wrong one died with perl's own "Not an ARRAY reference", naming
+# no function, and often only once clustalo had run.
+sub _refs {
+	my ($sub, $args, $type, @keys) = @_;
+	foreach my $k (@keys) {
+		next if !defined $args->{$k} || ref $args->{$k} eq $type;
+		croak "$sub: \"$k\" must be " . ($type eq 'ARRAY' ? 'an array' : 'a hash') . ' ref, not ' . _what($args->{$k});
+	}
+}
+
+# $s as characters. A string perl holds as characters is taken as it is; one it
+# holds as bytes is taken to be UTF-8 if it decodes as such, which is how the
+# command line used to pass it to Python, and Latin-1 otherwise.
+sub _chars {
+	my $s = "$_[0]";
+	utf8::decode($s) unless utf8::is_utf8($s);
+	$s;
+}
+
+# $s, read as _chars reads it, as UTF-8 bytes, which is what msa_plot.py reads
+# a FASTA or newick file as.
+sub _utf8 {
+	my $s = _chars($_[0]);
+	utf8::encode($s);
+	$s;
+}
+
 # The start of the "Creator" written into an image's metadata, after the one
 # Matplotlib::Simple 0.319 writes: which script, run where, called which sub of
 # which version of this module (and of Alien::Bioinf, whose tools and Python
@@ -67,8 +106,7 @@ sub _args {
 sub _creator {
 	my ($sub) = @_;
 	_alien($sub);
-	require File::Spec;
-	File::Spec->catfile(getcwd(), $RealScript) . " called using \"$sub\" in " . __FILE__ . " version $VERSION with Alien::Bioinf $Alien::Bioinf::VERSION"
+	"$Script called using \"$sub\" in " . __FILE__ . " version $VERSION with Alien::Bioinf $Alien::Bioinf::VERSION"
 		. ' by user ' . _user() . ' on host ' . hostname() . " ($^O) with Perl " . sprintf('%vd', $^V) . " ($^X)";
 }
 
@@ -111,27 +149,32 @@ sub _alien {
 # share/msa_plot.py run with @args under Alien::Bioinf's Python, for $sub. The
 # arguments go in a JSON file rather than on the command line: perl's
 # system(LIST) on Windows does not escape a '"' inside an argument, and the
-# Creator and the JSON options are full of them. A string that perl holds as
-# bytes is taken to be UTF-8 if it decodes as such, which is how the command
-# line used to pass it on; encode_json alone would read such bytes as Latin-1.
+# Creator and the JSON options are full of them. Each argument is read as
+# _chars reads it; encode_json alone would read UTF-8 bytes as Latin-1. -I
+# keeps PYTHONPATH, PYTHONHOME and the user's own site-packages out, so that
+# nothing but Alien::Bioinf's venv is imported.
 sub _python {
 	my ($sub, @args) = @_;
 	require JSON::MaybeXS;
-	my @chars = map { my $s = "$_"; utf8::decode($s) unless utf8::is_utf8($s); $s } @args;
+	my @chars = map { _chars($_) } @args;
 	my $argfile = _tmp('.json');
 	open my $fh, '>:raw', $argfile or croak "_python: can't write $argfile: $!";
 	print {$fh} JSON::MaybeXS::encode_json(\@chars);
 	close $fh or croak "_python: can't write $argfile: $!";
-	_run(_alien($sub)->python, _script(), '--argfile', $argfile);
+	_run(_alien($sub)->python, '-I', _script(), '--argfile', $argfile);
 }
 
-# $data as JSON text: characters, not UTF-8 bytes, since it is one argument
-# that _python encodes along with the rest. encode_json here would read a byte
-# string's UTF-8 as Latin-1, so that _python's decoding came too late.
+# $data, whose strings the caller has made characters with _chars, as JSON
+# text: characters, not UTF-8 bytes, since it is one argument that _python
+# encodes along with the rest. It is held as UTF-8, so that _python takes it as
+# it is: decoding it whole, as up to 2026-10-17, turned a byte string inside it
+# to mojibake whenever another string in it held characters.
 sub _json_text {
 	my ($data) = @_;
 	require JSON::MaybeXS;
-	JSON::MaybeXS->new(utf8 => 0, canonical => 1)->encode($data);
+	my $text = JSON::MaybeXS->new(utf8 => 0, canonical => 1)->encode($data);
+	utf8::upgrade($text);
+	$text;
 }
 
 # "wrote $file" to STDOUT, as LikeR's write_table prints it: $file in black
@@ -271,7 +314,6 @@ sub get_best_alignment_hit {
 	foreach my $report (@{ $blast->{BlastOutput2} }) {
 		my @hits;
 		foreach my $hit (@{ $report->{report}{results}{search}{hits} }) {
-			croak "get_best_alignment_hit: a hit has more than 1 description" if @{ $hit->{description} } > 1;
 			my $best; # undef until an hsp is seen; a hit with no hsps has nothing to record
 			foreach my $hsp (@{ $hit->{hsps} }) {
 				croak "get_best_alignment_hit: an hsp of \"$hit->{description}[0]{title}\" in $json_file has no \"$sort_criterion\" to sort on"
@@ -290,8 +332,13 @@ sub get_best_alignment_hit {
 			# fields are not written into $blast. The hit's own "num" is not
 			# merged, as it would shadow the hsp's; its "len" is the subject's
 			# full length, so it arrives as "hit_len" beside the hsp's "align_len".
+			# A hit has one description for each identical sequence in a
+			# non-redundant database such as nr; it is named by the first, as
+			# BLAST lists it, and every one is in "descriptions". Up to
+			# 2026-10-17 a hit with more than one died.
 			push @hits, { %{ $best },
 				accession => $hit->{description}[0]{accession},
+				descriptions => [map { +{ %{ $_ } } } @{ $hit->{description} }],
 				hit_len   => $hit->{len},
 				id        => $hit->{description}[0]{id},
 				title     => $hit->{description}[0]{title},
@@ -313,6 +360,242 @@ sub get_best_alignment_hit {
 	\%alignments;
 }
 
+# ---- polygenic scores
+
+# The rows of $frame, given to $sub as $what, as an array ref of hash refs, in
+# whichever of Stats::LikeR's four shapes it comes: an array of hashes
+# (read_table's default), a hash of hashes (its default for a VCF), a hash of
+# arrays, or an array of arrays whose first row is the header. A row of an AoH or
+# HoH is the frame's own hash, and is only read; one of a HoA or AoA is made
+# here. With $labelled, also returns how a message names each row: "row 3",
+# counting data rows from 1, or 'row "key"' for a hash of hashes, whose rows are
+# then in key order so that the first bad one is always the same one.
+sub _frame_rows {
+	my ($sub, $what, $frame, $labelled) = @_;
+	my $shapes = 'an array of hashes or of arrays, or a hash of hashes or of arrays, as Stats::LikeR\'s read_table returns';
+	my (@rows, @labels);
+	if (ref $frame eq 'ARRAY') {
+		croak "$sub: \"$what\" has no rows" unless @{ $frame };
+		if (ref $frame->[0] eq 'HASH') {
+			@rows = @{ $frame };
+		} elsif (ref $frame->[0] eq 'ARRAY') {
+			my ($head, @data) = @{ $frame };
+			croak "$sub: \"$what\" has a header and no rows" unless @data;
+			foreach my $i (0 .. $#data) {
+				croak "$sub: row " . ($i + 1) . " of \"$what\" must be an array ref, as its header is, not " . _what($data[$i])
+					unless ref $data[$i] eq 'ARRAY';
+				my %row;
+				@row{ @{ $head } } = @{ $data[$i] };
+				push @rows, \%row;
+			}
+		} else {
+			croak "$sub: \"$what\" must be $shapes, not an array whose first row is " . _what($frame->[0]);
+		}
+		@labels = map { "row $_" } 1 .. @rows if $labelled;
+	} elsif (ref $frame eq 'HASH') {
+		my ($key, $first) = each %{ $frame };
+		keys %{ $frame }; # resets the iterator that each left part-way
+		croak "$sub: \"$what\" has no rows" unless defined $key;
+		if (ref $first eq 'HASH') {
+			if ($labelled) {
+				my @keys = sort keys %{ $frame };
+				@rows = @{ $frame }{@keys};
+				@labels = map { "row \"$_\"" } @keys;
+			} else {
+				@rows = values %{ $frame };
+			}
+		} elsif (ref $first eq 'ARRAY') {
+			my @cols = keys %{ $frame };
+			foreach my $c (@cols) {
+				croak "$sub: column \"$c\" of \"$what\" must be an array ref, as \"$key\" is, not " . _what($frame->{$c})
+					unless ref $frame->{$c} eq 'ARRAY';
+			}
+			foreach my $i (0 .. $#{ $first }) {
+				push @rows, { map { $_ => $frame->{$_}[$i] } @cols };
+			}
+			croak "$sub: \"$what\" has no rows" unless @rows;
+			@labels = map { "row $_" } 1 .. @rows if $labelled;
+		} else {
+			croak "$sub: \"$what\" must be $shapes, not a hash whose \"$key\" is " . _what($first);
+		}
+	} else {
+		croak "$sub: \"$what\" must be $shapes, not " . _what($frame);
+	}
+	foreach my $i (0 .. $#rows) {
+		croak "$sub: row " . ($i + 1) . " of \"$what\" must be a hash ref, not " . _what($rows[$i]) unless ref $rows[$i] eq 'HASH';
+	}
+	$labelled ? (\@rows, \@labels) : \@rows;
+}
+
+# A chromosome's name as a VCF and a scoring file are compared on: in upper
+# case, without UCSC's "chr" prefix (GRCh37's own names, and the PGS Catalog's,
+# have none), and with PLINK's numeric codes for the sex and mitochondrial
+# chromosomes, and UCSC's "M", named as Ensembl names them. PLINK's 25 (XY, the
+# pseudo-autosomal region) has no counterpart in a VCF, so it is left alone.
+my %Chrom_alias = (23 => 'X', 24 => 'Y', 26 => 'MT', M => 'MT');
+sub _chrom {
+	my $c = uc $_[0];
+	$c =~ s/\ACHR//;
+	$Chrom_alias{$c} // $c;
+}
+
+# A decimal number, as an effect_weight must be. Infinity and NaN, which
+# looks_like_number would take, are left out, as either would make every score
+# the same non-number.
+my $Number = qr/\A[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?\z/;
+
+# The allele numbers in the genotype $gt, such as (0, 1) for "0/1" or "1|0" and
+# (1) for a haploid "1", or () for a call that is missing in whole or in part
+# ("./.", "./1", "."), or a genotype that is undef because the sample's FORMAT
+# had no GT.
+sub _called {
+	my ($gt) = @_;
+	return () unless defined $gt;
+	my @alleles = split /[\/|]/, $gt, -1;
+	return () if !@alleles || grep { !/\A[0-9]+\z/ } @alleles;
+	@alleles;
+}
+
+sub pgs_score {
+	my $sub = 'pgs_score';
+	my $args = _args(\@_, $sub, [qw(vcf weights)], [qw(match)]);
+	my %r;
+	$r{match} = $args->{match} // 'position'; # 'position' = CHROM and POS against chr_name and chr_position; 'id' = ID against rsID
+	croak "$sub: \"match\" must be \"position\" or \"id\", not " . _what($r{match})
+		unless !ref $r{match} && ($r{match} eq 'position' || $r{match} eq 'id');
+
+	my ($weights, $labels) = _frame_rows($sub, 'weights', $args->{weights}, 1);
+	# read_table gives every row every column, so the first row's keys are the columns
+	my %have = map { $_ => 1 } keys %{ $weights->[0] };
+	# A harmonized (hmPOS) scoring file has its variants on the build its name
+	# gives in the hm_ columns, and on the author's build in chr_name,
+	# chr_position and rsID, so the hm_ columns are the ones read when present.
+	my @key_cols = $r{match} eq 'id' ? ($have{hm_rsID} ? 'hm_rsID' : 'rsID')
+		: $have{hm_pos} ? qw(hm_chr hm_pos) : qw(chr_name chr_position);
+	my @absent = grep { !$have{$_} } @key_cols, 'effect_allele', 'effect_weight';
+	croak "$sub: \"weights\" has no " . join(', ', map { "\"$_\"" } @absent) . ' column' . (@absent > 1 ? 's' : '')
+		. ', which a PGS Catalog scoring file read with read_table has' if @absent;
+	# Only an additive weight is a weight times the dosage. These columns of the
+	# PGS Catalog's format 2.0 mark a variant that is scored some other way, which
+	# this function would get wrong, so a variant marked so is refused.
+	my @flags = grep { $have{$_} } qw(is_haplotype is_diplotype is_interaction is_dominant is_recessive);
+	my @dosage_weights = grep { $have{$_} } qw(dosage_0_weight dosage_1_weight dosage_2_weight);
+	my @variant; # for each row of weights: [effect allele, other allele or undef, weight], the alleles in upper case
+	my %at;      # key (CHROM:POS or rsID) => the rows of weights at it
+	foreach my $i (0 .. $#{ $weights }) {
+		my $w = $weights->[$i];
+		foreach my $c (@flags) {
+			croak "$sub: $labels->[$i] of \"weights\" has $c \"$w->{$c}\", and only additive weights can be scored"
+				if defined $w->{$c} && $w->{$c} =~ /\A(?:true|1)\z/i;
+		}
+		foreach my $c (@dosage_weights) {
+			croak "$sub: $labels->[$i] of \"weights\" has a $c, and only additive weights can be scored"
+				if defined $w->{$c} && length $w->{$c};
+		}
+		my ($e, $o, $weight) = @{ $w }{qw(effect_allele other_allele effect_weight)};
+		croak "$sub: $labels->[$i] of \"weights\" has no effect_allele" unless defined $e && length $e;
+		croak "$sub: $labels->[$i] of \"weights\" has effect_weight " . _what($weight) . ', which isn\'t a number'
+			unless defined $weight && !ref $weight && $weight =~ $Number;
+		push @variant, [uc $e, defined $o && length $o ? uc $o : undef, 0 + $weight];
+		my $key;
+		if ($r{match} eq 'id') {
+			$key = $w->{ $key_cols[0] };
+		} else {
+			my ($chr, $pos) = @{ $w }{@key_cols};
+			# A harmonized file leaves hm_chr and hm_pos empty for a variant it
+			# could not place, and that variant is then not found, rather than an error.
+			if (defined $chr && length $chr && defined $pos && length $pos) {
+				croak "$sub: $labels->[$i] of \"weights\" has $key_cols[1] \"$pos\", which isn't a position"
+					unless $pos =~ /\A[1-9][0-9]*\z/;
+				$key = _chrom($chr) . ":$pos";
+			}
+		}
+		push @{ $at{$key} }, $i if defined $key && length $key;
+	}
+
+	my $vcf = _frame_rows($sub, 'vcf', $args->{vcf});
+	# read_table names each sample's genotype column "<sample>.GT" when it splits
+	# the sample columns by FORMAT, as it does by default for a VCF
+	my @samples = sort map { /\A(.+)\.GT\z/s ? $1 : () } keys %{ $vcf->[0] };
+	croak "$sub: \"vcf\" has no <sample>.GT column; read the VCF with read_table's default of explode => 1" unless @samples;
+	my @vcf_cols = ($r{match} eq 'id' ? 'ID' : qw(CHROM POS), 'REF', 'ALT');
+	@absent = grep { !exists $vcf->[0]{$_} } @vcf_cols;
+	croak "$sub: \"vcf\" has no " . join(', ', map { "\"$_\"" } @absent) . ' column' . (@absent > 1 ? 's' : '') if @absent;
+	my @found; # $found[$i]: row $i of weights is at a position (or ID) of the VCF
+	my @use;   # $use[$i]: [the record whose alleles agree with row $i, the effect allele's number in it, its CHROM:POS:REF:ALT]
+	foreach my $rec (@{ $vcf }) {
+		my @keys;
+		if ($r{match} eq 'id') {
+			@keys = grep { length && $_ ne '.' } split /;/, $rec->{ID} // '';
+		} elsif (defined $rec->{CHROM} && defined $rec->{POS}) {
+			@keys = (_chrom($rec->{CHROM}) . ":$rec->{POS}");
+		}
+		my @here = map { @{ $at{$_} // [] } } @keys;
+		next unless @here && defined $rec->{REF} && defined $rec->{ALT};
+		# An ALT of "." is a site with no alternate allele, which a VCF of every
+		# site writes where the sample matches the reference.
+		my @alleles = map { uc } $rec->{REF}, $rec->{ALT} eq '.' ? () : split /,/, $rec->{ALT};
+		my %number;
+		$number{ $alleles[$_] } //= $_ foreach 0 .. $#alleles;
+		my $id = join ':', map { $_ // '' } @{ $rec }{qw(CHROM POS REF ALT)};
+		foreach my $i (@here) {
+			$found[$i] = 1;
+			my ($e, $o) = @{ $variant[$i] };
+			# The alleles agree when both of the variant's are the record's, or,
+			# for a record with no ALT, when either is its REF.
+			next unless @alleles == 1
+				? $e eq $alleles[0] || (defined $o && $o eq $alleles[0])
+				: defined $number{$e} && (!defined $o || defined $number{$o});
+			# Of two records that agree, as a multi-allelic site split in two
+			# can give, the first in CHROM:POS:REF:ALT order is used, so that the
+			# order of a hash of hashes does not decide it.
+			next if $use[$i] && $use[$i][2] le $id;
+			$use[$i] = [$rec, $number{$e} // -1, $id]; # -1 = the effect allele isn't in a record with no ALT, so no copies
+		}
+	}
+
+	my %score = map { $_ => { alleles => 0, mismatched => 0, missing => 0, score => 0, variants => 0 } } @samples;
+	my ($agree, $disagree) = (0, 0);
+	foreach my $i (0 .. $#variant) {
+		unless ($use[$i]) {
+			$disagree++ if $found[$i];
+			foreach my $s (@samples) {
+				$score{$s}{missing}++;
+				$score{$s}{mismatched}++ if $found[$i];
+			}
+			next;
+		}
+		$agree++;
+		my ($rec, $effect) = @{ $use[$i] };
+		foreach my $s (@samples) {
+			my @called = _called($rec->{"$s.GT"});
+			unless (@called) {
+				$score{$s}{missing}++;
+				next;
+			}
+			$score{$s}{variants}++;
+			$score{$s}{alleles} += @called;
+			$score{$s}{score} += $variant[$i][2] * scalar grep { $_ == $effect } @called;
+		}
+	}
+	foreach my $s (values %score) {
+		$s->{average} = $s->{alleles} ? $s->{score} / $s->{alleles} : undef;
+	}
+	# On 2026-10-17, PGS000138 (whose header says genome_build=NR) against a
+	# GRCh37 genome had 12,015 of its 22,274 variants at their positions, and
+	# the alleles agreed at all 12,015; with every position moved on one base,
+	# as a stand-in for the wrong build, they agreed at 9 of the 58 found.
+	# Disagreement at more than half the variants found is the second case.
+	if (!$agree) {
+		carp "$sub: none of the " . scalar(@variant) . ' variants of "weights" was found in "vcf" with its alleles; check that the two'
+			. ($r{match} eq 'id' ? ' use the same rsIDs' : ' are on the same genome build and name chromosomes alike');
+	} elsif ($disagree > $agree) {
+		carp "$sub: the alleles disagree at $disagree of the " . ($agree + $disagree) . ' variants of "weights" found in "vcf"; check that'
+			. ' the two are on the same ' . ($r{match} eq 'id' ? 'strand' : 'genome build');
+	}
+	\%score;
+}
+
 # ---- alignment plots and tables
 
 # Dies unless $n, given to $sub as $what, is a 1-based residue number. Without
@@ -329,8 +612,13 @@ sub _residue_number {
 # aligned is aligned afresh. clustalo's --dealign does the same, but prints a
 # "FORCED DEBUG" warning about them first; blastp would take a gap for a residue.
 # Returns that file and the sequence names in input order (sorted for a hash).
+# With $numbered, each sequence is written under its number in that order, "s1",
+# "s2" and so on, rather than its name, for clustalo: it cuts a name at its
+# first space in the guide tree and writes "(),:" in one unquoted, which drew 4
+# sequences as 5 tips up to 2026-10-17. _unnumber_fasta and _unnumber_newick put
+# the names back.
 sub _ungapped_fasta {
-	my ($fasta) = @_;
+	my ($fasta, $numbered) = @_;
 	my ($seqs, @names);
 	if (ref $fasta eq 'HASH') {
 		$seqs = $fasta;
@@ -340,10 +628,55 @@ sub _ungapped_fasta {
 		($seqs, $order) = _fasta_ordered($fasta);
 		@names = @{ $order };
 	} else {
-		croak "_ungapped_fasta: \"fasta\" must be a FASTA file name or a hash ref of name => sequence, not a " . ref($fasta) . ' ref';
+		croak "_ungapped_fasta: \"fasta\" must be a FASTA file name or a hash ref of name => sequence, not " . _what($fasta);
 	}
-	my %ungapped = map { (my $s = $seqs->{$_}) =~ tr/-.//d; $_ => $s } @names;
-	(hash2fasta_file(\%ungapped, _tmp('.fa'), \@names), \@names);
+	my @written = $numbered ? map { "s$_" } 1 .. @names : @names;
+	my %ungapped;
+	@ungapped{@written} = map { (my $s = $seqs->{$_}) =~ tr/-.//d; $s } @names;
+	(hash2fasta_file(\%ungapped, _tmp('.fa'), \@written), \@names);
+}
+
+# The name that clustalo's "s<n>" in $file stands for, from @$names, the list
+# _ungapped_fasta numbered.
+sub _unnumber {
+	my ($id, $names, $file) = @_;
+	croak "_unnumber: clustalo wrote \"$id\" in $file, which isn't one of the s1 to s" . scalar(@{ $names }) . ' it was given'
+		unless $id =~ /\As([1-9][0-9]*)\z/ && $1 <= @{ $names };
+	$names->[$1 - 1];
+}
+
+# The alignment clustalo wrote to $file under _ungapped_fasta's numbers,
+# rewritten in place under the names in @$names, as UTF-8, in clustalo's order
+# and 60-column lines. Returns the aligned sequences as a hash ref keyed by
+# those names as perl was given them, which a name's UTF-8 may not equal.
+sub _unnumber_fasta {
+	my ($file, $names) = @_;
+	my ($numbered, $ids) = _fasta_ordered($file);
+	my (%aln, %utf8);
+	foreach my $id (@{ $ids }) {
+		my $name = _unnumber($id, $names, $file);
+		$aln{$name} = $utf8{ _utf8($name) } = $numbered->{$id};
+	}
+	hash2fasta_file(\%utf8, $file, [map { _utf8(_unnumber($_, $names, $file)) } @{ $ids }], 60);
+	\%aln;
+}
+
+# The guide tree clustalo wrote to $file under _ungapped_fasta's numbers,
+# rewritten in place under the names in @$names, as UTF-8. A name holding
+# whitespace or any of "()[]':;," is quoted as newick quotes one: in single
+# quotes, each of its own doubled.
+sub _unnumber_newick {
+	my ($file, $names) = @_;
+	open my $fh, '<:raw', $file or croak "_unnumber_newick: can't read $file: $!";
+	my $tree = do { local $/; <$fh> };
+	close $fh or croak "_unnumber_newick: can't read $file: $!";
+	$tree =~ s{(?<=[(,\s])(s[0-9]+)(?=\s*[:,);])}{
+		my $name = _utf8(_unnumber($1, $names, $file));
+		$name =~ /[\s()\[\]':;,]/ ? "'" . join("''", split /'/, $name, -1) . "'" : $name;
+	}ge;
+	open $fh, '>:raw', $file or croak "_unnumber_newick: can't write $file: $!";
+	print {$fh} $tree;
+	close $fh or croak "_unnumber_newick: can't write $file: $!";
 }
 
 # Aligns "fasta" with clustalo for $sub. The alignment goes to "msa_file" and
@@ -351,12 +684,14 @@ sub _ungapped_fasta {
 # otherwise; the tree is not asked for at all unless it is kept or $want_tree.
 # Returns the hash ref of files to report (the alignment always, the tree only
 # when it was named), the tree's file, the sequence names in input order
-# (sorted for a hash), and an array ref of the clustalo command as it was run,
-# with the ungapped FASTA it read as its "--in"; or nothing, after a warning,
-# for fewer than 2 sequences.
+# (sorted for a hash), an array ref of the clustalo command as it was run, with
+# the ungapped FASTA it read as its "--in", and the aligned sequences as a hash
+# ref keyed by those names; or nothing, after a warning, for fewer than 2
+# sequences. clustalo is given the sequences numbered, and the alignment and
+# tree it writes get their names back.
 sub _align {
 	my ($args, $sub, $want_tree) = @_;
-	my ($in, $names) = _ungapped_fasta($args->{fasta});
+	my ($in, $names) = _ungapped_fasta($args->{fasta}, 1);
 	if (@{ $names } < 2) {
 		carp "$sub: clustalo needs at least 2 sequences, and there " . (@{ $names } ? 'is only 1' : 'are none');
 		return;
@@ -367,29 +702,36 @@ sub _align {
 	my @cmd = (_alien($sub)->clustalo, '--in', $in, '--out', $r{'msa_file'}, '--outfmt=fa', '--force',
 		'--threads', $args->{threads} // 1, (defined $tree ? "--guidetree-out=$tree" : ()), @{ $args->{'clustal_args'} // [] });
 	_run(@cmd);
-	(\%r, $tree, $names, \@cmd);
+	my $aln = _unnumber_fasta($r{'msa_file'}, $names);
+	_unnumber_newick($tree, $names) if defined $tree;
+	(\%r, $tree, $names, \@cmd, $aln);
 }
 
 sub plot_msa {
 	my $sub = 'plot_msa';
 	my $args = _args(\@_, $sub, [qw(fasta filename)], [qw(active_site_aa clustal_args labels msa_file order query threads title
 		tree_file xlabel ylabel)]);
+	_refs($sub, $args, 'ARRAY', qw(clustal_args order));
+	_refs($sub, $args, 'HASH', 'labels');
 	my $sites = $args->{'active_site_aa'};
 	if (defined $sites) {
 		croak "$sub: \"active_site_aa\" must be a hash ref of label => residue number" unless ref $sites eq 'HASH';
 		croak "$sub: needs \"query\" to place \"active_site_aa\"" unless defined $args->{query};
 		_residue_number($sub, "active site $_", $sites->{$_}) foreach sort keys %{ $sites };
 	}
-	my ($r, undef, $names, $cmd) = _align($args, $sub, 0) or return {};
-	my $aln = fasta2hash($r->{'msa_file'});
+	my ($r, undef, $names, $cmd, $aln) = _align($args, $sub, 0) or return {};
 	my @order = @{ $args->{order} // $names };
 	my @unknown = grep { !defined $aln->{$_} } @order;
 	croak "$sub: \"order\" names sequences that aren't in the alignment: @unknown" if @unknown;
 	my $labels = $args->{labels} // {};
+	# Each name as msa_plot.py is to show it, in UTF-8, which is what it reads.
+	# Up to 2026-10-17 the name was written as perl held it, Latin-1 or UTF-8,
+	# and Python died on the Latin-1.
+	my %shown_as = map { $_ => _utf8($labels->{$_} // $_) } @order;
 	# Two sequences shown under one label would be one row of the image, fed
 	# two deflines.
 	my %by_label;
-	push @{ $by_label{ $labels->{$_} // $_ } }, $_ foreach @order;
+	push @{ $by_label{ $shown_as{$_} } }, $_ foreach @order;
 	foreach my $label (sort keys %by_label) {
 		croak "$sub: " . join(', ', map { "\"$_\"" } @{ $by_label{$label} }) . " would all be drawn as \"$label\""
 			if @{ $by_label{$label} } > 1;
@@ -406,12 +748,12 @@ sub plot_msa {
 			my $n = $sites->{$label};
 			$sites{$label} = $col[$n - 1] // croak "$sub: active site $label ($n) is past the end of \"$args->{query}\", which has " . scalar(@col) . ' residues';
 		}
-		@segments = ('--s', _json_text(\%sites));
+		@segments = ('--s', _json_text({ map { _chars($_) => 0 + $sites{$_} } keys %sites }));
 	}
-	my %shown = map { ($labels->{$_} // $_) => $aln->{$_} } @order;
-	my $fa = hash2fasta_file(\%shown, _tmp('.fa'), [map { $labels->{$_} // $_ } @order], 0);
+	my %shown = map { $shown_as{$_} => $aln->{$_} } @order;
+	my $fa = hash2fasta_file(\%shown, _tmp('.fa'), [@shown_as{@order}], 0);
 	_python($sub, '--f', $fa, '--o', $args->{filename}, '--c', _creator($sub), '--quiet',
-		'--p', _json_text([_align_provenance($args, $sub, $cmd, $names, $r->{'msa_file'}), _kept($args, qw(msa_file tree_file))]),
+		'--p', _json_text([map { _chars($_) } _align_provenance($args, $sub, $cmd, $names, $r->{'msa_file'}), _kept($args, qw(msa_file tree_file))]),
 		(defined $args->{title} ? ('--t', $args->{title}) : ()),
 		(defined $args->{xlabel} ? ('--x', $args->{xlabel}) : ()),
 		(defined $args->{ylabel} ? ('--y', $args->{ylabel}) : ()), @segments);
@@ -455,14 +797,17 @@ sub _align_provenance {
 	my ($args, $sub, $cmd, $names, $msa) = @_;
 	my $alien = _alien($sub);
 	# $cmd->[2] is clustalo's "--in", the ungapped copy _ungapped_fasta wrote
-	'from ' . _fasta_id($args->{fasta}, scalar @{ $names }) . ', written with its gaps stripped to ' . _file_id($cmd->[2])
-		. ', which Clustal Omega ' . $alien->versions->{clustalo} . " from Alien::Bioinf $Alien::Bioinf::VERSION aligned into "
-		. _file_id($msa) . ', run as: ' . _cmd_text(@{ $cmd });
+	'from ' . _fasta_id($args->{fasta}, scalar @{ $names }) . ', written with its gaps stripped and the sequences numbered s1 to s'
+		. scalar(@{ $names }) . ' to ' . _file_id($cmd->[2]) . ', which Clustal Omega ' . $alien->versions->{clustalo}
+		. " from Alien::Bioinf $Alien::Bioinf::VERSION aligned into " . _file_id($msa) . ' (with the names put back), run as: '
+		. _cmd_text(@{ $cmd });
 }
 
 sub plot_phylo {
 	my $sub = 'plot_phylo';
 	my $args = _args(\@_, $sub, [], [qw(clustal_args fasta labels msa_file output_file threads title tree_file)]);
+	_refs($sub, $args, 'ARRAY', 'clustal_args');
+	_refs($sub, $args, 'HASH', 'labels');
 	$args->{output_file} //= 'phylo.svg';
 	my ($r, $tree, $names, $cmd);
 	if (defined $args->{fasta}) {
@@ -480,9 +825,10 @@ sub plot_phylo {
 		? (_align_provenance($args, $sub, $cmd, $names, $r->{'msa_file'}), 'drawing the guide tree it wrote, ' . _file_id($tree),
 			_kept($args, qw(msa_file tree_file)))
 		: ('from the newick file ' . _file_id($tree));
-	_python($sub, '--tree', $tree, '--o', $args->{'output_file'}, '--c', _creator($sub), '--quiet', '--p', _json_text(\@prov),
+	# the tips are named in UTF-8 by _unnumber_newick, which msa_plot.py decodes
+	_python($sub, '--tree', $tree, '--o', $args->{'output_file'}, '--c', _creator($sub), '--quiet', '--p', _json_text([map { _chars($_) } @prov]),
 		(defined $args->{title} ? ('--t', $args->{title}) : ()),
-		(%{ $labels } ? ('--l', _json_text($labels)) : ()));
+		(%{ $labels } ? ('--l', _json_text({ map { _chars($_) => _chars($labels->{$_}) } keys %{ $labels } })) : ()));
 	$r->{'output_file'} = $args->{'output_file'};
 	_wrote($args->{output_file}, 43); # yellow
 	$r;
@@ -492,6 +838,7 @@ sub msa_quality_table {
 	my $sub = 'msa_quality_table';
 	my $args = _args(\@_, $sub, ['filename'], [qw(alignment_json cb_label cb_max cb_min cblogscale default_undefined fasta
 		logscale_add metric msa_file normalize order show_numbers title unaligned_fa)]);
+	_refs($sub, $args, 'ARRAY', 'order');
 	my %metric = map { $_ => 1 } qw(num bit_score score evalue identity positive align_len);
 	my $metric = $args->{metric} // 'score';
 	croak "$sub: \"$metric\" isn't one of the metrics: " . join(', ', sort keys %metric) unless $metric{$metric};
@@ -503,6 +850,7 @@ sub msa_quality_table {
 	# named -- made by running blastp on "fasta", and kept in "alignment_json"
 	# for next time if that is named.
 	my $aj = $args->{'alignment_json'};
+	croak "$sub: \"alignment_json\" must be a file name or a hash ref, not " . _what($aj) if ref $aj && ref $aj ne 'HASH';
 	my ($blast, $prov);
 	if (ref $aj eq 'HASH') {
 		$blast = $aj;
@@ -579,14 +927,17 @@ sub msa_quality_table {
 	require JSON::MaybeXS;
 	my $table = _tmp('.json');
 	open my $fh, '>:raw', $table or croak "$sub: can't write $table: $!";
+	# The strings go through _chars, since encode_json reads a byte string as
+	# Latin-1: up to 2026-10-17 a UTF-8 title "caf\xc3\xa9" was drawn as
+	# "caf\xc3\x83\xc2\xa9".
 	print {$fh} JSON::MaybeXS::encode_json({
-		cells => \@cells, cols => \@col_labels, rows => \@row_labels, vmin => $lo + 0, vmax => $hi + 0,
+		cells => \@cells, cols => [map { _chars($_) } @col_labels], rows => [map { _chars($_) } @row_labels], vmin => $lo + 0, vmax => $hi + 0,
 		log => $log ? JSON::MaybeXS::true() : JSON::MaybeXS::false(),
 		numbers => $args->{'show_numbers'} ? JSON::MaybeXS::true() : JSON::MaybeXS::false(),
-		title => $args->{title} // '', cblabel => $args->{cb_label},
+		title => _chars($args->{title} // ''), cblabel => (defined $args->{cb_label} ? _chars($args->{cb_label}) : undef),
 	});
 	close $fh or croak "$sub: can't write $table: $!";
-	_python($sub, '--table', $table, '--o', $args->{filename}, '--c', _creator($sub), '--p', _json_text(["showing each pair's \"$metric\"", $prov]));
+	_python($sub, '--table', $table, '--o', $args->{filename}, '--c', _creator($sub), '--p', _json_text([map { _chars($_) } "showing each pair's \"$metric\"", $prov]));
 	$args->{filename};
 }
 
@@ -610,8 +961,13 @@ sub clustal_view_residues {
 	# clustal_args: for clustalo, if msa_file has to be aligned.
 	my $args = _args(\@_, $sub, ['msa_file', 'output_tex_file'], [qw(caption clustal_args color_residues label
 		order row_width split table_text_size threads track)]);
+	_refs($sub, $args, 'ARRAY', qw(clustal_args order));
 	my $color = $args->{'color_residues'} // {};
 	croak "$sub: \"color_residues\" must be a hash ref" unless ref $color eq 'HASH';
+	foreach my $protein (sort keys %{ $color }) {
+		croak "$sub: \"color_residues\" must map $protein to a hash ref of residue number => colour, not " . _what($color->{$protein})
+			unless ref $color->{$protein} eq 'HASH';
+	}
 	# 0 would never end the loop over blocks, and divide by 0 in the tables
 	foreach my $k ('row_width', 'split') {
 		croak "$sub: \"$k\" must be a whole number, 1 or more, not \"$args->{$k}\"" if defined $args->{$k} && $args->{$k} !~ /\A[1-9][0-9]*\z/;
@@ -624,8 +980,7 @@ sub clustal_view_residues {
 		# Sequences of different lengths can't be an alignment, so align them,
 		# into a temporary file: "msa_file" is the input, and is never written.
 		my %clustal = map { $_ => $args->{$_} } grep { defined $args->{$_} } qw(clustal_args threads);
-		my ($r) = _align({ %clustal, fasta => $args->{'msa_file'} }, $sub, 0);
-		$data = fasta2hash($r->{'msa_file'});
+		(undef, undef, undef, undef, $data) = _align({ %clustal, fasta => $args->{'msa_file'} }, $sub, 0);
 		%len = map { length $_ => 1 } values %{ $data };
 	}
 	my $track = $args->{track};
@@ -728,17 +1083,25 @@ __END__
  );
  plot_phylo('tree_file' => 'orthologs.newick', 'output_file' => 'tree.svg', title => 'EF-3');
 
+ # a polygenic score for each sample of a VCF, from a PGS Catalog scoring file
+ use Stats::LikeR 'read_table';
+ my $scores = pgs_score(
+     vcf     => read_table('genome.vcf.gz'),
+     weights => read_table('PGS000138.txt.gz', sep => "\t"),
+ );
+
 =head1 DESCRIPTION
 
 FASTA I/O in XS, BLAST hit ranking, and multiple-sequence-alignment plots and
-LaTeX tables, taken from the maintainer's C<bioinf.pm>.
+LaTeX tables, taken from the maintainer's C<bioinf.pm>, and polygenic scores
+from a VCF and a PGS Catalog scoring file.
 
 Nothing is exported by default; ask for functions by name or with C<:all>.
 Every function dies (via C<Carp::croak>) on bad arguments, with a message that
 starts with the name of the function that raised it, as in
-C<fasta2hash: couldn't find "four" in x.fa>. C<plot_msa>, C<plot_phylo>,
-C<msa_quality_table> and C<clustal_view_residues> take C<< name =E<gt> value >> pairs,
-not a hash ref.
+C<fasta2hash: couldn't find "four" in x.fa>. C<pgs_score>, C<plot_msa>,
+C<plot_phylo>, C<msa_quality_table> and C<clustal_view_residues> take
+C<< name =E<gt> value >> pairs, not a hash ref.
 
 =head2 Alien::Bioinf
 
@@ -746,10 +1109,17 @@ Clustal Omega, BLAST+ and the Python that draws the plots come from
 C<Alien::Bioinf>, which installs them module-locally and never uses C<PATH>. It
 is recommended rather than required, because it can only be installed where
 NCBI builds BLAST+ (Linux and macOS on x86_64 and aarch64, and Windows on
-x86_64) and it needs the network. C<fasta2hash>, C<hash2fasta_file> and
-C<get_best_alignment_hit> work without it; C<plot_msa>, C<plot_phylo>,
-C<msa_quality_table>, and C<clustal_view_residues> given an unaligned file, die
-saying that they need it. From this repository, install it first:
+x86_64) and it needs the network. C<fasta2hash>, C<hash2fasta_file>,
+C<get_best_alignment_hit> and C<pgs_score> work without it; C<plot_msa>,
+C<plot_phylo>, C<msa_quality_table>, and C<clustal_view_residues> given an
+unaligned file, die saying that they need it. A CPAN client does not install a recommended module
+unless asked, so install it first:
+
+ cpanm Alien::Bioinf
+ cpanm Bioinf::Basic
+
+or, from a clone of L<the repository|https://github.com/hhg7/Bioinf-Basic>,
+where it is C<alien/Alien-Bioinf>:
 
  cpanm ./alien/Alien-Bioinf
  cpanm .
@@ -757,8 +1127,9 @@ saying that they need it. From this repository, install it first:
 That downloads nothing it can reuse: archives are cached (C<ALIEN_BIOINF_CACHE>,
 default C<~/.cache/alien-bioinf>), a clustalo or BLAST+ already on the machine at
 the newest version is copied instead (C<ALIEN_BIOINF_CLUSTALO>,
-C<ALIEN_BIOINF_BLAST>, or C<PATH>), and pip installs only what the base Python
-lacks. To check for and apply updates:
+C<ALIEN_BIOINF_BLAST>, or C<PATH>), and pip reuses the wheels in its own cache.
+The Python packages go into a venv of their own, which nothing installed into
+the base Python can break. To check for and apply updates:
 
  perl -MAlien::Bioinf -MData::Dumper -e 'print Dumper(Alien::Bioinf->check_updates)'
  perl -MAlien::Bioinf -e 'print "$_\n" for Alien::Bioinf->update'
@@ -767,8 +1138,8 @@ lacks. To check for and apply updates:
 
 Every PNG, SVG, PDF, PS or EPS image these functions draw carries its whole
 provenance on one line, as its C<Creator> metadata and nothing else, just as
-Matplotlib::Simple writes it. The line names the calling script (as the
-working directory plus the script's name), the function, this file and its
+Matplotlib::Simple writes it. The line names the calling script (its full
+path), the function, this file and its
 version, the Alien::Bioinf version, the user who ran it, the computer it ran
 on (hostname and operating system), the perl version and path, and what drew
 it: C<msa_plot.py>, the Python version and path, the matplotlib version, and
@@ -782,8 +1153,9 @@ SHA-256 of each file:
 
 =item * C<plot_msa>: the FASTA file and how many sequences it holds (or the number
 of sequences in a hash ref), the ungapped copy of it that Clustal Omega
-read, the alignment Clustal Omega wrote, the Clustal Omega version, the
-exact command, and the C<msa_file> and C<tree_file> kept, if any.
+read, with the sequences named C<s1>, C<s2> and so on, the alignment Clustal
+Omega wrote, with the names put back, the Clustal Omega version, the exact
+command, and the C<msa_file> and C<tree_file> kept, if any.
 
 =item * C<plot_phylo>: the same when it aligns, with the guide tree it drew;
 otherwise the newick file it drew. Then how many negative branch lengths
@@ -813,13 +1185,16 @@ in a PNG or PDF.
 
 =head2 fasta2hash($file, $key)
 
-Reads a FASTA file (gzip-compressed if its name ends in C<.gz>). Returns a hash
-ref of defline (without the C<< E<gt> >>) => sequence, or, with C<$key>, just the
-sequence of that defline, reading no further than the record after it. A
-defline that appears twice is warned about and its sequences concatenated;
-with C<$key>, only a repeat of C<$key> is looked for. Line endings may be C<\n>
-or C<\r\n>. A C<.gz> that gzip cannot read to its end, such as a truncated one,
-dies rather than returning the part that was read.
+Reads a FASTA file (gzip-compressed if its name ends in C<.gz>, which needs a
+C<gzip> program on C<PATH>). Returns a hash ref of defline (without the C<< E<gt> >>) =>
+sequence, or, with C<$key>, just the sequence of that defline, reading no
+further than the record after it. A defline that appears twice is warned about
+and its sequences concatenated; with C<$key>, only a repeat of C<$key> is looked
+for. Line endings may be C<\n> or C<\r\n>. Whitespace (space, tab, C<\r>, C<\f>
+and C<\x0b>) is dropped from sequences and from the end of deflines, as
+Biopython drops it, so a defline of C<x> and a space is found as C<x>. Deflines and sequences are bytes,
+just as they are in the file. A C<.gz> that gzip cannot read to its end, such as
+a truncated one, dies rather than returning the part that was read.
 
  my $h = fasta2hash('DEG20010421.fa');
 
@@ -827,17 +1202,172 @@ dies rather than returning the part that was read.
 
 Writes C<$hash> as FASTA: the keys in C<@$order> (default: sorted), sequences
 wrapped at C<$width> columns (default 80; 0 for one line each). Returns
-C<$filename>.
+C<$filename>. Keys and sequences are written as bytes, as C<print> to a C<:raw>
+handle writes them, so a string that perl holds as UTF-8 is written as the
+characters in it. A character above 255 has no single byte and dies; encode
+such a string first, as with C<Encode::encode('UTF-8', $name)>.
 
 =head2 get_best_alignment_hit($json_file, $sort_criterion)
 
 For a BLAST C<-outfmt 15> JSON report, a hash ref of query title => array ref
 of that query's hits, best first. Each hit is its best hsp plus C<accession>,
-C<hit_len>, C<id> and C<title>. C<$sort_criterion> is an hsp field (default
+C<hit_len>, C<id> and C<title>, and C<descriptions>, an array ref of every
+description BLAST gave the hit. A hit against a non-redundant database such as
+nr has one for each accession of the same sequence; C<accession>, C<id> and
+C<title> are those of the first, which is the one BLAST lists first. C<$sort_criterion> is an hsp field (default
 C<evalue>): C<align_len>, C<bit_score>, C<evalue>, C<gaps>, C<identity>,
 C<positive> or C<score>. Ties are broken on the bit score, then on BLAST's
 order. A report with two queries of one title dies, since only one of them
 could be returned.
+
+=head2 pgs_score(%args)
+
+Computes a polygenic score for every sample of a VCF from a scoring file of
+the L<PGS Catalog|https://www.pgscatalog.org/downloads/>: for each variant,
+the number of copies of the effect allele in the sample's genotype times
+C<effect_weight>, summed over the variants. Both arguments are data frames, as
+Stats::LikeR's C<read_table> returns them, so this module never reads either
+file itself and does not need Stats::LikeR:
+
+ use Stats::LikeR 'read_table';
+ use Bioinf::Basic 'pgs_score';
+
+ my $weights = read_table('PGS000138.txt.gz', sep => "\t");
+ my $vcf = read_table('genome.vcf.gz');
+ my $scores = pgs_score(vcf => $vcf, weights => $weights);
+ # { sample => { score => 1.674, average => 6.97e-05, variants => 12015,
+ #               alleles => 24030, missing => 10259, mismatched => 0 } }
+
+A scoring file needs C<< sep =E<gt> "\t" >>: C<read_table> takes a tab from the name of
+a C<.tsv> or C<.vcf>, but a C<.txt.gz> would be read as commas. Its C<#> header
+lines are skipped as comments.
+
+=over
+
+=item * C<vcf> (required): the VCF, in any of C<read_table>'s four shapes, as long as
+each sample's genotype is a column of its own named C<< E<lt>sampleE<gt>.GT >>.
+C<read_table> gives a C<.vcf>, C<.vcf.gz> or C<.vcf.bgz> those columns by
+default; a VCF read with C<< explode =E<gt> 0 >> has none, and dies. It needs
+C<CHROM>, C<POS>, C<REF> and C<ALT> (or C<ID>, C<REF> and C<ALT> with
+C<< match =E<gt> 'id' >>).
+
+=item * C<weights> (required): the scoring file, in any of the four shapes. It needs
+C<effect_allele> and C<effect_weight>, and either C<chr_name> and
+C<chr_position> or, with C<< match =E<gt> 'id' >>, C<rsID>. C<other_allele> is used
+when present. A harmonized file of the PGS Catalog (C<..._hmPOS_GRCh38.txt.gz>)
+is read by C<hm_chr> and C<hm_pos> (or C<hm_rsID>) instead, which are on the
+build its name gives. A variant marked TRUE in C<is_haplotype>,
+C<is_diplotype>, C<is_interaction>, C<is_dominant> or C<is_recessive>, or given
+a C<dosage_0_weight>, C<dosage_1_weight> or C<dosage_2_weight>, dies, since
+only additive weights are scored.
+
+=item * C<match>: C<position> (the default) finds each variant by chromosome and
+position; C<id> finds it by rsID, in a VCF whose C<ID> column holds them. An
+C<ID> of C<rs1;rs2> is found by either.
+
+=back
+
+Returns a hash ref keyed by sample, a hash of hashes that C<write_table> can
+write, with these fields for each sample:
+
+=over
+
+=item * C<score>: the sum of the weights times the dosages.
+
+=item * C<average>: C<score> divided by C<alleles>, or undef when C<alleles> is 0.
+
+=item * C<variants>: the variants of C<weights> that were scored for this sample.
+
+=item * C<alleles>: the alleles counted in their genotypes, 2 for each diploid call.
+
+=item * C<missing>: the variants that were not scored, because the VCF has no
+record of them whose alleles agree, or because the sample's genotype is
+missing (C<./.>, or partly missing, such as C<./1>). C<variants> and C<missing>
+add up to the number of rows of C<weights>.
+
+=item * C<mismatched>: of C<missing>, those at a position (or ID) the VCF has, whose
+alleles disagree with the record's there.
+
+=back
+
+These are the C<SCORE1_SUM>, C<SCORE1_AVG> and C<ALLELE_CT> that PLINK 2 writes
+with C<--score ... no-mean-imputation cols=+scoresums>. PLINK 2 by default
+fills a missing genotype in with the effect allele's frequency in the samples
+instead; C<pgs_score> leaves it out.
+
+How a variant is matched:
+
+=over
+
+=item * Chromosomes are compared without UCSC's C<chr> prefix and in any case, and
+PLINK's C<23>, C<24> and C<26> and UCSC's C<M> are taken as C<X>, C<Y> and C<MT>,
+so C<chr1> in a VCF finds C<1> in a scoring file.
+
+=item * A variant agrees with a record when its effect allele and its other allele
+(if it has one) are both among the record's C<REF> and C<ALT> alleles, in any
+case. A multi-allelic record counts the copies of whichever C<ALT> is the
+effect allele, so a C<1/2> genotype of C<G> to C<A,T> holds one C<T>. Where two
+records agree, as a multi-allelic site split in two can, the first in
+C<CHROM:POS:REF:ALT> order is used.
+
+=item * A record whose C<ALT> is C<.>, which a VCF of every site writes where the
+sample matches the reference, agrees with a variant either of whose alleles
+is its C<REF>; a C<0/0> there is two copies of the effect allele if it is the
+C<REF>, and none otherwise.
+
+=item * Alleles are not complemented, since a VCF and the PGS Catalog's files are
+both on the forward strand. A variant written on the other strand
+disagrees, and A/T and C/G variants, which read the same on either strand,
+are matched as they are written.
+
+=item * Only C<GT> is read: a dosage (C<DS>) or a genotype likelihood is not used, and
+a haploid call such as C<1> counts its one allele.
+
+=back
+
+The positions in the scoring file have to be on the same genome build as the
+VCF's, since a variant's position in GRCh37 (hg19) and in GRCh38 (hg38) differ;
+rsIDs do not, so C<< match =E<gt> 'id' >> needs no build. C<read_table> skips the
+C<#genome_build=> header line, and many files say C<NR> (not reported) there
+anyway, so C<pgs_score> cannot compare the builds. The alleles say what it
+cannot: it warns when none of the variants was found with alleles that agree,
+and when the alleles disagree at more than half of the variants found. On
+2026-10-17, PGS000138, whose header says C<genome_build=NR>, was scored against
+a GRCh37 genome: 12,015 of its 22,274 variants were found, and the alleles
+agreed at every one, so its positions are on GRCh37. With every position
+moved on one base, the alleles agreed at 9 of the 58 found.
+
+A VCF that lists only the variants a sample carries (as most single-sample
+VCFs from a sequencing service do: every genotype holds an C<ALT>) has no
+record where the sample matches the reference, so those variants are
+C<missing>, not scored as zero copies. That genome above was scored at 12,015
+of PGS000138's 22,274 variants, and an exome at 701. A score is comparable
+only with another scored on the same variants, so check C<variants> before
+comparing samples; a VCF called jointly over many samples, or one of every
+site, has far fewer missing. The reference blocks of a gVCF, which cover a
+range of positions with one record, are not expanded.
+
+A whole-genome VCF read into memory takes several GB. C<read_table>'s C<filter>
+can keep only the positions the score needs while the file is read; the genome
+above then took 9 s and under 1 GB:
+
+ my %pos = map { $_->{chr_position} => 1 } @{ $weights };
+ my $vcf = read_table('genome.vcf.gz', filter => { POS => sub { $pos{$_} } });
+
+The PGS Catalog's search pages export a table of scores with a link to each
+one's scoring file (C<depression.pgs_scores_data.csv>, for one). That table
+has no weights, so C<pgs_score> cannot use it, but it can say which files to
+download and score:
+
+ # $vcf read without a filter, since each score has variants of its own
+ my $catalog = read_table('depression.pgs_scores_data.csv');
+ foreach my $pgs (@{ $catalog }) {
+     my ($file) = $pgs->{'Scoring File (FTP Link)'} =~ m{([^/]+)\z};
+     next unless -f $file;
+     my $s = pgs_score(vcf => $vcf, weights => read_table($file, sep => "\t"));
+     printf "%s\t%s\t%g\t%d variants\n", $pgs->{'Polygenic Score ID & Name'}, $_, @{ $s->{$_} }{qw(score variants)}
+         foreach sort keys %{ $s };
+ }
 
 =head2 plot_msa(%args)
 
@@ -856,6 +1386,10 @@ name in black on yellow when STDOUT is a terminal.
 =item * C<fasta>, C<filename> (required): the sequences, as a FASTA file name or a
 hash ref of name => sequence (the function tells the two apart by whether it
 is a reference); and the image to draw, whose extension picks the format.
+A name may hold spaces and punctuation: Clustal Omega is given the sequences
+as C<s1>, C<s2> and so on, and the alignment and tree it writes get their
+names back, in UTF-8. In the tree, a name with whitespace or any of
+C<()[]':;,> in it is quoted as newick quotes one, as C<'it''s (x:1)'>.
 
 =item * C<msa_file>, C<tree_file>: where to keep clustalo's alignment (FASTA; a
 temporary file otherwise) and its guide tree (newick; not made otherwise).
@@ -968,7 +1502,8 @@ first aligned with Clustal Omega into a temporary file, and C<msa_file>
 itself is never written.
 
 =item * C<output_tex_file> (required): the LaTeX file to write, meant to be
-C<\input> into a document.
+C<\input> into a document whose preamble loads C<xcolor> (for the colours)
+and C<placeins> (for the C<\FloatBarrier> after each table).
 
 =item * C<color_residues>: C<< { protein =E<gt> { residue number =E<gt> colour } } >>, where
 residue numbers are 1-based and a colour is an xcolor name or

@@ -14,7 +14,7 @@ script Matplotlib::Simple 0.317's colored_table wrote for msa_quality_table
 before this took its place: a gist_rainbow-coloured matplotlib table over a
 hidden imshow that carries the colorbar, with empty cells grey.
 """
-import argparse, json, platform, sys
+import argparse, io, json, platform, sys
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -76,9 +76,12 @@ def save(fig, title, also=(), notes=()):
 	if not a.quiet:
 		print('wrote ' + a.o)
 
+# Bioinf::Basic writes every FASTA, newick and JSON file this reads in UTF-8, so
+# each is opened as UTF-8 rather than in the locale's encoding, which is cp1252
+# or the like on Windows.
 def read_fasta(path):
 	names, seqs = [], []
-	with open(path) as fh:
+	with open(path, encoding='utf-8') as fh:
 		for line in fh:
 			line = line.strip()
 			if line.startswith('>'):
@@ -106,7 +109,9 @@ def draw_alignment():
 	code = {c: i for i, c in enumerate(present)}
 	num = np.vectorize(code.get)(arr)
 	height, width = arr.shape
-	f = plt.figure(figsize=(12, 3))
+	# 3 inches, as CIAlign's figure was, held up to 8 sequences; past that, a
+	# quarter-inch per row keeps 10-point labels from running into each other
+	f = plt.figure(figsize=(12, max(3, 1 + 0.25 * height)))
 	ax = f.add_subplot(1, 1, 1)
 	ax.set_xlim(-0.5, width)
 	for side in ('right', 'top', 'left'):
@@ -136,9 +141,10 @@ def draw_tree():
 	except ImportError:
 		raise SystemExit('--tree needs Biopython, which Alien::Bioinf installs')
 	labels = json.loads(a.l) if a.l else {}
+	# a name that is not UTF-8 is drawn with U+FFFD in it, rather than failing
 	with open(a.tree, 'rb') as fh:
-		newick = fh.read().decode()
-	tree = Phylo.read(a.tree, 'newick')
+		newick = fh.read().decode('utf-8', 'replace')
+	tree = Phylo.read(io.StringIO(newick), 'newick')
 	# clustalo can write a slightly negative length; drawn as 0, as the
 	# ggtree script's ignore.negative.edge=TRUE did
 	clamped = 0
@@ -160,11 +166,13 @@ def draw_tree():
 	ax.set_title(a.t)
 	notes = [str(clamped) + ' negative branch length' + ('s' if clamped > 1 else '') + ' drawn as 0'] if clamped else []
 	notes.append(str(len(tips)) + ' tips: ' + ', '.join(t + (' (shown as ' + labels[t] + ')' if t in labels else '') for t in tips))
-	notes.append('the tree as drawn, in newick: ' + ''.join(newick.split()))
+	# the line breaks clustalo writes are dropped, but not the spaces inside a
+	# quoted name
+	notes.append('the tree as drawn, in newick: ' + ''.join(line.strip() for line in newick.splitlines()))
 	save(f, a.t, ['Biopython ' + Bio.__version__, 'NumPy ' + np.__version__], notes)
 
 def draw_table():
-	with open(a.table) as fh:
+	with open(a.table, encoding='utf-8') as fh:
 		t = json.load(fh)
 	d = np.array([[np.nan if v is None else v for v in row] for row in t['cells']], dtype=float)
 	cmap = matplotlib.colormaps['gist_rainbow'].copy()

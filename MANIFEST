@@ -13,7 +13,10 @@ t/checks.t
 t/data/DEG20010421.fa
 t/data/hits.json
 t/data/make_fixtures.pl
+t/data/pgs.vcf
+t/data/pgs_weights.txt
 t/data/query.fa
 t/data/subjects.fa
 t/fasta.t
 t/msa.t
+t/pgs.t

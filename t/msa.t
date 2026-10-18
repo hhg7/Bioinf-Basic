@@ -31,7 +31,7 @@ my $by_py = qr/.+msa_plot\.py with Python [\d.]+\S* \(.+?\), matplotlib [\d.]+/;
 my $sha = qr/\(SHA-256 [0-9a-f]{64}\)/;
 # what _align_provenance says of an alignment of $fa, by a run of clustalo
 # that matched $cmd
-sub aligned { my ($cmd) = @_; qr/; from the FASTA file \Q$fa\E $sha of 4 sequences, written with its gaps stripped to [^;]+ $sha, which Clustal Omega [\d.]+ from Alien::Bioinf [\d.]+ aligned into [^;]+ $sha, run as: [^;]*clustalo --in $cmd/ }
+sub aligned { my ($cmd) = @_; qr/; from the FASTA file \Q$fa\E $sha of 4 sequences, written with its gaps stripped and the sequences numbered s1 to s4 to [^;]+ $sha, which Clustal Omega [\d.]+ from Alien::Bioinf [\d.]+ aligned into [^;]+ $sha \(with the names put back\), run as: [^;]*clustalo --in $cmd/ }
 # an SVG's metadata, which should hold nothing but the date, format, type and Creator
 sub svg_dc { my ($svg) = @_; my ($md) = $svg =~ m{<metadata>(.*?)</metadata>}s; [sort $md =~ /<dc:(\w+)/g] }
 
@@ -98,6 +98,33 @@ is png($r->{'output_file'}), "\x89PNG\r\n\x1a\n", 'a PNG tree image from the seq
 	unlike $svg, qr{<dc:title>DEG20010421</dc:title>}, 'with no Title beside the Creator';
 }
 
+# Up to 2026-10-17 the names went to clustalo as they were: it cut each at its
+# first space in the guide tree and wrote "(),:" unquoted, so these 4
+# sequences were drawn as the 5 tips "four, Candida, Candida, three, y".
+{
+	my @k = sort keys %{ $seqs };
+	my %odd = ('Candida albicans' => $seqs->{ $k[0] }, 'Candida auris' => $seqs->{ $k[1] }, 'three,y' => $seqs->{ $k[2] },
+		"it's (x:1)" => $seqs->{ $k[3] });
+	my ($nwk, $odd_aln, $svg) = map { catfile($dir, $_) } qw(odd.newick odd.aln.fa odd.svg);
+	plot_msa(fasta => \%odd, filename => catfile($dir, 'odd.png'), 'msa_file' => $odd_aln, 'tree_file' => $nwk);
+	my $kept = fasta2hash($odd_aln);
+	is_deeply [sort keys %{ $kept }], [sort keys %odd], 'the alignment kept has the names as they were given, spaces and all';
+	is_deeply { map { (my $s = $kept->{$_}) =~ tr/-//d; $_ => uc $s } keys %{ $kept } }, { map { $_ => uc $odd{$_} } keys %odd },
+		'each under its own name';
+	like slurp($nwk), qr/\A(?=.*^'Candida albicans':)(?=.*^'Candida auris':)(?=.*^'three,y':)(?=.*^'it''s \(x:1\)':)/ms,
+		'and the tree has them quoted as newick quotes them';
+	plot_phylo('tree_file' => $nwk, 'output_file' => $svg, labels => { 'Candida auris' => 'C. auris' });
+	my $apos = qr/(?:'|&apos;|&#39;)/;
+	like slurp($svg), qr/; 4 tips: (?=[^;]*Candida albicans)(?=[^;]*Candida auris \(shown as C\. auris\))(?=[^;]*three,y)(?=[^;]*it${apos}s \(x:1\))/,
+		'which are drawn as 4 tips, not 5, under those names and that label';
+}
+
+# Up to 2026-10-17 a label was written into the FASTA that msa_plot.py reads
+# as Latin-1 or as UTF-8 by how perl happened to hold it, and Python, which
+# reads UTF-8, died on the Latin-1 "caf\xe9".
+ok eval { plot_msa(fasta => $seqs, filename => catfile($dir, 'u.png'), labels => { 'S.cerevisiae' => "caf\x{e9}", 'C.neoformans.JEC21' => "\x{3b2}-tub" }); 1 },
+	'labels with an e-acute and a beta are drawn, rather than Python dying' or diag $@;
+
 foreach my $f ([\&plot_msa, 'filename'], [\&plot_phylo, 'output_file']) {
 	my @w;
 	local $SIG{__WARN__} = sub { push @w, $_[0] };
@@ -160,6 +187,13 @@ is png($img), "\x89PNG\r\n\x1a\n", 'the existing report is read';
 unlink $img;
 msa_quality_table('alignment_json' => $json, filename => $img, normalize => 1, cblogscale => 1);
 is png($img), "\x89PNG\r\n\x1a\n", 'normalize and cblogscale together: a log scale from the smallest value above 0 to 1';
+# Up to 2026-10-17 the title went to Python through encode_json, which read its
+# UTF-8 as Latin-1, so "caf\xc3\xa9" was drawn as "caf\xc3\x83\xc2\xa9".
+{
+	my $svg = catfile($dir, 'q.svg');
+	msa_quality_table('alignment_json' => $json, filename => $svg, title => "caf\xc3\xa9");
+	like slurp($svg), qr/; titled "caf\xc3\xa9";/, 'a UTF-8 title reaches the image as itself, rather than encoded twice';
+}
 foreach my $bad (
 	[{ filename => $img }, qr/needs "fasta" to align, or an existing "alignment_json"/],
 	[{ filename => $img, fasta => $fa, 'unaligned_fa' => $fa }, qr/both "fasta" and "unaligned_fa"/],

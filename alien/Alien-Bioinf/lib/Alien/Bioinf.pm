@@ -18,15 +18,25 @@ package Alien::Bioinf;
 #              clustalo's configure asks for, fetched from SourceForge.
 #   Python     Alien::CPython3 supplies the interpreter; a venv on top of it
 #              gets numpy, matplotlib, adjustText and biopython -- what
-#              share/msa_plot.py and Matplotlib::Simple import -- from PyPI.
+#              share/msa_plot.py and Matplotlib::Simple import -- and their
+#              dependencies (scipy, for adjustText) from PyPI.
 #              The newest release for check_updates() is the highest
 #              "Python 3.x.y" in
 #              https://www.python.org/api/v2/downloads/release/.
 #
 # Nothing is downloaded twice. Every archive is kept in cache_dir() and reused
 # from there; a clustalo or BLAST already on this machine at the wanted version
-# is copied instead of fetched (see _local_copy); and the venv is made with
-# --system-site-packages, so pip installs only what the base Python lacks.
+# is copied instead of fetched (see _local_copy); and pip reuses the wheels in
+# its own cache.
+#
+# The venv does not see the base interpreter's packages. Up to 0.01 it was made
+# with --system-site-packages, so pip skipped whatever the base Python already
+# had, and the venv then broke whenever that changed: on 2026-10-13 a numpy
+# 1.26.4 installed into this machine's base Python left its scipy 1.18.1, which
+# needs numpy 2, unable to import, and adjustText with it.
+#
+# ALIEN_INSTALL_NETWORK=0, the Alien::Build setting, stops every download, pip's
+# included (see _http and _pip_index).
 use strict;
 use warnings;
 use parent 'Alien::Base';
@@ -39,6 +49,8 @@ use File::Basename qw(basename dirname);
 our $VERSION = '0.01';
 
 my @PY_PACKAGES = qw(numpy matplotlib adjustText biopython);
+# the name each of @PY_PACKAGES is imported by, where that is not its PyPI name
+my %PY_IMPORT = (biopython => 'Bio');
 my @TOOLS = qw(clustalo blast python python-packages);
 my $BLAST_URL = 'https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/LATEST/';
 my $CLUSTAL_URL = 'https://www.clustal.org/omega/';
@@ -143,7 +155,8 @@ sub update {
 	foreach my $tool (sort keys %{ $todo }) {
 		if ($tool eq 'python-packages') {
 			next unless %{ $todo->{$tool} };
-			_run($c->python, qw(-m pip install --upgrade --disable-pip-version-check), sort keys %{ $todo->{$tool} });
+			_run($c->python, qw(-m pip install --upgrade --disable-pip-version-check), _pip_index(), sort keys %{ $todo->{$tool} });
+			_drop_scripts(catdir($root, 'venv'));
 			push @done, $tool;
 			next;
 		}
@@ -186,11 +199,12 @@ sub install {
 		$c->_save($root, clustalo => $l->{version});
 	} elsif ($tool eq 'python') {
 		my $venv = catdir($root, 'venv');
-		_run(_base_python(), '-m', 'venv', '--system-site-packages', $venv);
+		_run(_base_python(), '-m', 'venv', $venv);
 		_tidy_venv($venv) unless $WIN;
 		my $py = $c->python($root);
-		_run($py, qw(-m pip install --disable-pip-version-check), @PY_PACKAGES);
-		_run($py, '-c', 'import ' . join(',', @PY_PACKAGES));
+		_run($py, qw(-m pip install --disable-pip-version-check), _pip_index(), @PY_PACKAGES);
+		_drop_scripts($venv);
+		_run($py, '-I', '-c', _py_imports());
 		$c->_save($root, python => _line($py, '-c', 'import platform; print(platform.python_version())'));
 	} else {
 		croak "install() knows blast, clustalo and python, not \"$tool\"";
@@ -214,6 +228,32 @@ sub _tidy_venv {
 	my $base = _line(_base_python(), '-c', 'import sys; print(sys.executable)');
 	symlink($base, catfile($bin, 'python')) or croak "symlink $base: $!";
 }
+
+# Every file in the venv's bin/ (Scripts\ on Windows) but the interpreter: pip,
+# activate and the console scripts of the packages. The venv is built in the
+# staging directory and copied into place, so each of them names the staging
+# copy, which is gone once the build is cleaned; python -m pip is what this
+# module runs.
+sub _drop_scripts {
+	my ($venv) = @_;
+	my $bin = catdir($venv, $WIN ? 'Scripts' : 'bin');
+	opendir my $dh, $bin or croak "$bin: $!";
+	foreach my $f (readdir $dh) {
+		my $p = catfile($bin, $f);
+		next if !-f $p || ($WIN ? $f =~ /\Apythonw?\.exe\z/i : $f eq 'python');
+		unlink $p or croak "can't delete $p: $!";
+	}
+	closedir $dh;
+}
+
+# Python code that imports every one of @PY_PACKAGES, which install() runs to
+# check the venv. Up to 0.01 it imported each by its PyPI name, and
+# "import biopython" fails: Biopython is imported as Bio.
+sub _py_imports { 'import ' . join(',', map { $PY_IMPORT{$_} // $_ } @PY_PACKAGES) }
+
+# --no-index when ALIEN_INSTALL_NETWORK forbids downloads, so that pip installs
+# only from what is already here, or fails saying what it can't find.
+sub _pip_index { _network_ok() ? () : '--no-index' }
 
 # The interpreter itself, not a pyenv shim or the like: a venv made through a
 # shim records the shim, which picks a Python by the working directory.
@@ -402,7 +442,13 @@ sub cache_dir {
 
 sub _tmpdir { require File::Temp; File::Temp::tempdir(CLEANUP => 1) }
 
+# False when ALIEN_INSTALL_NETWORK is set to a false value, which is how
+# Alien::Build is told not to download anything.
+sub _network_ok { !defined $ENV{ALIEN_INSTALL_NETWORK} || $ENV{ALIEN_INSTALL_NETWORK} ? 1 : 0 }
+
 sub _http {
+	croak 'ALIEN_INSTALL_NETWORK is ' . ($ENV{ALIEN_INSTALL_NETWORK} eq '' ? 'empty' : $ENV{ALIEN_INSTALL_NETWORK}) . ', so nothing may be downloaded'
+		unless _network_ok();
 	require HTTP::Tiny;
 	HTTP::Tiny->new(agent => "Alien-Bioinf/$VERSION ", timeout => 120, verify_SSL => 1);
 }
@@ -494,8 +540,10 @@ and updates. Before downloading clustalo or BLAST, the installer looks for a
 copy already on the machine at the version it wants and copies that instead:
 C<ALIEN_BIOINF_CLUSTALO> may name a clustalo binary and C<ALIEN_BIOINF_BLAST>
 the C<bin> directory of an unpacked BLAST+, and otherwise C<PATH> is searched.
-The venv sees the base interpreter's packages, so pip fetches only what that
-lacks.
+pip reuses the wheels in its own cache. The venv does not see the base
+interpreter's packages, so a change to those cannot break it.
+
+Setting C<ALIEN_INSTALL_NETWORK> to 0 stops every download, pip's included.
 
 =head1 METHODS
 

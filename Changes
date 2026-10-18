@@ -7,7 +7,7 @@ Revision history for Bioinf-Basic
  - fasta2hash, hash2fasta_file, get_best_alignment_hit, msa_quality_table
    and clustal_view_residues, taken from the maintainer's bioinf.pm.
    fasta2hash and hash2fasta_file are now XS: on a 928 MB FASTA, reading
-   went from 3.83 s to 0.80 s and writing from 44.44 s to 0.97 s.
+   went from 3.83 s to under 1 s and writing from 44.44 s to 0.97 s.
 
  - bioinf.pm's msa_phylo_plot is split in two. plot_msa aligns sequences
    with Clustal Omega and draws the alignment; plot_phylo draws the guide
@@ -19,41 +19,28 @@ Revision history for Bioinf-Basic
    installs only where NCBI builds BLAST+; the functions that need it say so
    when it is missing, and t/msa.t is skipped without it.
 
- - Fixed before release: a truncated .gz now dies rather than being read
-   in part; residue numbers below 1 in active.site.aa and color.residues die
-   rather than counting from the last residue; row.width or split of 0 dies
-   rather than looping forever; msa_quality_table's normalize no longer
-   divides by 0 when every e-value is 0, and divides by the largest value
-   plus logscale.add; get_best_alignment_hit dies on two queries of one
-   title rather than dropping one; plot_msa dies on two sequences given one
-   label; and clustal_view_residues escapes every LaTeX special character in
-   a protein name.
+ - fasta2hash drops whitespace from sequences and from the end of
+   deflines, as Biopython does, and reads CRLF files; with a key, it stops
+   at the record after that one. hash2fasta_file writes keys and
+   sequences as bytes, and dies on a character above 255.
 
- - Also fixed before release: a program that clustalo, blastp or Python
-   runs is reported as killed by its signal, where it was reported as
-   "exit 0"; fasta2hash and get_best_alignment_hit given an undef file name
-   say so, rather than warning "uninitialized value" as well, which under a
-   caller's FATAL warnings hid the message; hash2fasta_file dies on a width
-   that is not a whole number, where -1 wrapped round to one line per
-   sequence; and reading a .gz on a perl without list-form piped open (MSWin32
-   before 5.22) dies with the function's name.
+ - get_best_alignment_hit returns each query's hits as an array, best
+   first, so two hits of one title are both kept, and gives every
+   description of a hit in "descriptions", so a search of nr, which lists
+   one sequence under several accessions, can be read.
 
- - fasta2hash with a key no longer keeps every other defline it passes, to
-   warn about their repeats: finding the last of 400,000 records went from
-   87 MB and 0.25 s to 8 MB and 0.06 s.
+ - Sequence names may hold spaces and punctuation. Clustal Omega is given
+   the sequences numbered, and the alignment and the guide tree get their
+   names back, quoted in the tree as newick quotes them.
 
- - Arguments are named with underscores rather than dots: msa_file,
-   tree_file, output_file, output_tex_file, clustal_args, active_site_aa,
-   alignment_json, unaligned_fa, logscale_add, show_numbers,
-   color_residues, row_width and table_text_size. The dotted names now die
-   as unknown arguments.
+ - Every image's provenance is one line of Creator metadata, and the only
+   metadata written, as from Matplotlib::Simple: the script, the user, the
+   host, the perl, Python and library versions, and the inputs, each with
+   its SHA-256, with the clustalo or blastp command that made them.
 
- - Every image's provenance is now one line of Creator metadata, and the
-   only metadata written, as from Matplotlib::Simple: it also names the user
-   who ran the script and the Python version, and ends with the inputs, each
-   with its SHA-256, and the clustalo or blastp command that made them.
-   What plot_phylo wrote as a separate Title, Source, Description,
-   Identifier, Relation, Contributor and Keywords is now all in that line,
-   and plot_msa and msa_quality_table record their title, inputs, commands
-   and kept files in the same way. Its own Date, to the second with the UTC
-   offset, is gone, leaving the date matplotlib writes into an SVG.
+ - pgs_score computes a polygenic score for each sample of a VCF from a
+   PGS Catalog scoring file, both given as the data frames Stats::LikeR's
+   read_table returns, matching variants by position or by rsID. It gives
+   PLINK 2's sums (--score with no-mean-imputation), says how many
+   variants were scored, missing, or found with alleles that disagree,
+   and warns when the disagreement suggests two genome builds.
