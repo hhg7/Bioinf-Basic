@@ -64,3 +64,16 @@ Revision history for Cn-Bioinf
    context. A site that one person's own VCF lacks is taken as hom-REF, so
    it warns when one file has far more sites alone than the other, as an
    exome against a genome does. Two exomes took 1.6 s.
+ - relatedness tells how every two people are related, from every sample
+   of one VCF or the one sample of each of several: each pair's
+   KING-robust kinship and IBS0, IBS1 and IBS2 counts, as parent takes
+   them, a relationship (parent-child, full siblings, duplicate, second-
+   or third-degree, unrelated), and a category named from the sexes it
+   tells from X in the same reading (father-son, mother-daughter,
+   brother-sister, brothers, sisters). Which of a parent and child is the
+   parent is said where a third person shows it. It returns a hash of
+   hashes, $r->{a}{b} being the same hash as $r->{b}{a}, and a pair that
+   parent would die on is left undecided, with the reason, rather than
+   stopping the rest. XS counts every pair 64 sites at a time: the 17
+   people of the CEPH 1463 pedigree took 0.27 s, and agreed with it on
+   every sex and on 134 of 136 pairs, and three exomes took 2.5 s.

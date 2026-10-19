@@ -30,4 +30,5 @@ t/fasta.t
 t/msa.t
 t/parent.t
 t/pgs.t
+t/relatedness.t
 t/sex.t

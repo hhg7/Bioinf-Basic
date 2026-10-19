@@ -24,7 +24,7 @@ use Sys::Hostname 'hostname';
 use Exporter 'import';
 use XSLoader;
 our $VERSION = '0.01';
-our @EXPORT_OK = qw(clustal_view_residues fasta2hash get_best_alignment_hit hash2fasta_file msa_quality_table parent pgs_score plot_msa plot_phylo sex_check);
+our @EXPORT_OK = qw(clustal_view_residues fasta2hash get_best_alignment_hit hash2fasta_file msa_quality_table parent pgs_score plot_msa plot_phylo relatedness sex_check);
 our %EXPORT_TAGS = (all => \@EXPORT_OK);
 XSLoader::load('Cn::Bioinf', $VERSION);
 # The calling script's full path, for _creator. It is looked up at load time,
@@ -853,34 +853,44 @@ sub pgs_score {
 # the lines, and the read loop alone in 1 MiB blocks 5.7 s.
 my $Vcf_block = 1 << 16;
 
+# Dies unless the VCF $file, given to $sub as its option $key, is a readable
+# file with a VCF's name. Returns how it is compressed: 'gz', 'bz2', or '' for
+# not at all. Its messages are prefixed with $sub, whose argument the file is.
+sub _vcf_check {
+	my ($sub, $key, $file) = @_;
+	croak "$sub: \"$key\" must be a file name, not " . _what($file) if ref $file || !defined $file;
+	croak "$sub: \"$key\" file \"$file\" doesn't exist or isn't readable" unless -f $file && -r _;
+	return 'gz' if $file =~ /\.vcf\.b?gz\z/i;
+	return 'bz2' if $file =~ /\.vcf\.bz2\z/i;
+	return '' if $file =~ /\.vcf\z/i;
+	croak "$sub: \"$key\" file $file must end in .vcf, .vcf.gz, .vcf.bgz or .vcf.bz2";
+}
+
 # The VCF $file, given to $sub as its option $key, opened: returns a sub that
 # gives the next block of it and then undef, and a sub that closes it. Its
 # messages are prefixed with $sub, whose argument the file is.
 sub _vcf_open {
 	my ($sub, $key, $file) = @_;
-	croak "$sub: \"$key\" must be a file name, not " . _what($file) if ref $file;
-	croak "$sub: \"$key\" file \"$file\" doesn't exist or isn't readable" unless -f $file && -r _;
+	my $packed = _vcf_check($sub, $key, $file);
 	my ($fh, $error); # $error: what says why a read failed
 	# Transparent => 0, or IO::Uncompress would pass a file that isn't compressed
 	# through as it is, and the error would be that it isn't a VCF. For a file too
 	# short to hold a header, new() gives undef and leaves the error empty in
 	# IO::Uncompress::Gunzip 2.223 (perl 5.44.0), though 2.020 (perl 5.10.1) says
 	# "Header Error: Minimum header size is 10 bytes".
-	if ($file =~ /\.vcf\.b?gz\z/i) {
+	if ($packed eq 'gz') {
 		require IO::Uncompress::Gunzip;
 		$fh = IO::Uncompress::Gunzip->new($file, MultiStream => 1, Transparent => 0)
 			or croak "$sub: can't read $file: " . ($IO::Uncompress::Gunzip::GunzipError || 'it isn\'t gzip-compressed');
 		$error = sub { $IO::Uncompress::Gunzip::GunzipError };
-	} elsif ($file =~ /\.vcf\.bz2\z/i) {
+	} elsif ($packed eq 'bz2') {
 		require IO::Uncompress::Bunzip2;
 		$fh = IO::Uncompress::Bunzip2->new($file, MultiStream => 1, Transparent => 0)
 			or croak "$sub: can't read $file: " . ($IO::Uncompress::Bunzip2::Bunzip2Error || 'it isn\'t bzip2-compressed');
 		$error = sub { $IO::Uncompress::Bunzip2::Bunzip2Error };
-	} elsif ($file =~ /\.vcf\z/i) {
+	} else {
 		open $fh, '<:raw', $file or croak "$sub: can't read $file: $!";
 		$error = sub { "$!" };
-	} else {
-		croak "$sub: \"$key\" file $file must end in .vcf, .vcf.gz, .vcf.bgz or .vcf.bz2";
 	}
 	my $next = sub {
 		my $block;
@@ -918,6 +928,22 @@ sub _sex_report {
 		. (@unknown ? scalar(@unknown) . ' of ' . scalar(@rows) . " unknown: no het or hom-ALT call on X\n" : '');
 }
 
+# peddy 0.4.3's (sex_check() in peddy/peddy.py): male below a het to hom-ALT
+# ratio of 0.6 on non-PAR X. sex_check's default "cutoff", and what relatedness
+# tells sex by.
+my $Sex_cutoff = 0.6;
+
+# The het_ratio and sex of one sample's counts, $s, from Bioinf.xs's
+# sex_count(), set in $s: male when the ratio is below $cutoff. peddy divides
+# by a hom-ALT count of 0 as if it were 1, and so calls a sample with no calls
+# on X male; here it is undef, as is its sex.
+sub _sex_of {
+	my ($s, $cutoff) = @_;
+	my $calls = $s->{x_het} + $s->{x_hom_alt};
+	$s->{het_ratio} = $calls ? $s->{x_het} / ($s->{x_hom_alt} || 1) : undef;
+	$s->{sex} = !$calls ? undef : $s->{het_ratio} < $cutoff ? 'male' : 'female';
+}
+
 sub sex_check {
 	my $sub = 'sex_check';
 	# sex_check($file) and sex_check($file, %options) take the file first; an
@@ -929,7 +955,7 @@ sub sex_check {
 	my %r;
 	# peddy 0.4.3's defaults (sex_check() in peddy/peddy.py): male below a het
 	# to hom-ALT ratio of 0.6 on non-PAR X, and genotypes of depth 7 or more
-	$r{cutoff} = $args->{cutoff} // 0.6;
+	$r{cutoff} = $args->{cutoff} // $Sex_cutoff;
 	croak "$sub: \"cutoff\" must be a number above 0, not " . _what($r{cutoff})
 		unless !ref $r{cutoff} && $r{cutoff} =~ $Number && $r{cutoff} > 0;
 	$r{min_depth} = $args->{min_depth} // 7; # 0 = count every genotype, whatever its DP
@@ -941,13 +967,7 @@ sub sex_check {
 	my ($next, $close) = _vcf_open($sub, 'vcf', $vcf);
 	my ($tally, $x_sites, $order) = _sex_tally($next, $vcf, $r{min_depth});
 	$close->();
-	foreach my $s (values %{ $tally }) {
-		# peddy divides by a hom-ALT count of 0 as if it were 1, and so calls a
-		# sample with no calls on X male; here it is undef, as is its sex
-		my $calls = $s->{x_het} + $s->{x_hom_alt};
-		$s->{het_ratio} = $calls ? $s->{x_het} / ($s->{x_hom_alt} || 1) : undef;
-		$s->{sex} = !$calls ? undef : $s->{het_ratio} < $r{cutoff} ? 'male' : 'female';
-	}
+	_sex_of($_, $r{cutoff}) foreach values %{ $tally };
 	if ($r{report}) {
 		print STDOUT _sex_report($vcf, \%r, $tally, $order) or croak "$sub: can't print the report: $!";
 	}
@@ -972,6 +992,29 @@ my @King = ([0.354, 'the same person or identical twins'], [0.177, 'first-degree
 # gives about 150,000 and a genome 3 million, so only a small panel, or
 # files that hardly overlap, comes near it.
 my $Parent_sites = 1000;
+
+# The KING-robust between-family kinship (Manichaikul et al. 2010,
+# Bioinformatics 26:2867) of two samples with $het_a and $het_b het calls at the
+# sites compared, $het_het sites where both are het and $ibs0 opposite
+# homozygotes, in the form PLINK 2's --make-king-table gives it (t/parent.t's
+# header says how the two were found to agree); undef when either has no het
+# call.
+sub _king {
+	my ($het_a, $het_b, $het_het, $ibs0) = @_;
+	my $min_het = $het_a < $het_b ? $het_a : $het_b;
+	return undef unless $min_het;
+	0.5 - ($het_a + $het_b - 2 * $het_het + 4 * $ibs0) / (4 * $min_het);
+}
+
+# The relationship that a $kinship and an IBS0 rate say, by KING's ranges, with
+# an IBS0 rate below $max_ibs0 telling parent and child from full siblings.
+sub _relationship {
+	my ($kinship, $ibs0_rate, $max_ibs0) = @_;
+	my $band = (grep { $kinship > $King[$_][0] } 0 .. $#King)[0];
+	!defined $band ? 'unrelated' : $band == 0 ? 'duplicate'
+		: $band == 1 ? ($ibs0_rate < $max_ibs0 ? 'parent-child' : 'full siblings')
+		: $band == 2 ? 'second-degree' : 'third-degree';
+}
 
 # parent's report, given its sample or file names, the resolved options, and
 # its result.
@@ -1071,17 +1114,10 @@ sub parent {
 	croak "$sub: $what have only $s{sites} autosomal biallelic SNVs of DP $r{min_depth} or more where either carries the ALT,"
 		. " and $Parent_sites are needed" . (defined $vcf ? '' : '; if the files share few sites, check that they are of the same genome build')
 		if $s{sites} < $Parent_sites;
-	my $min_het = $s{child_het} < $s{parent_het} ? $s{child_het} : $s{parent_het};
-	croak "$sub: " . ($s{child_het} ? 'the parent' : 'the child') . " of $what has no het call at the sites compared, so no kinship can be taken" unless $min_het;
-	# KING-robust between-family kinship (Manichaikul et al. 2010,
-	# Bioinformatics 26:2867), in the form PLINK 2's --make-king-table gives
-	# it: t/parent.t's header says how the two were found to agree
-	$s{kinship} = 0.5 - ($s{child_het} + $s{parent_het} - 2 * $s{het_het} + 4 * $s{ibs0}) / (4 * $min_het);
+	$s{kinship} = _king(@s{qw(child_het parent_het het_het ibs0)});
+	croak "$sub: " . ($s{child_het} ? 'the parent' : 'the child') . " of $what has no het call at the sites compared, so no kinship can be taken" unless defined $s{kinship};
 	$s{ibs0_rate} = $s{ibs0} / $s{sites};
-	my $band = (grep { $s{kinship} > $King[$_][0] } 0 .. $#King)[0];
-	$s{relationship} = !defined $band ? 'unrelated' : $band == 0 ? 'duplicate'
-		: $band == 1 ? ($s{ibs0_rate} < $r{max_ibs0} ? 'parent-child' : 'full siblings')
-		: $band == 2 ? 'second-degree' : 'third-degree';
+	$s{relationship} = _relationship($s{kinship}, $s{ibs0_rate}, $r{max_ibs0});
 	$s{parent} = $s{relationship} eq 'parent-child' ? 1 : 0;
 	if ($r{report}) {
 		print STDOUT _parent_report($child, $parent, $vcf, \%r, \%s) or croak "$sub: can't print the report: $!";
@@ -1097,6 +1133,227 @@ sub parent {
 		. ' a site that one lacks is taken as hom-REF in it, so IBS0 and the kinship are not to be trusted'
 		if !defined $vcf && $n_more > 2 * $n_fewer;
 	wantarray ? ($s{parent}, \%s) : $s{parent};
+}
+
+# The words for a male and a female relative, in relatedness's categories:
+# the parent, the child, the sibling.
+my %Kin_word = (male => [qw(father son brother)], female => [qw(mother daughter sister)]);
+
+# relatedness's report, given its files, the resolved options, the samples in
+# order, each one's sex counts, and $each_pair, which gives each pair in order
+# to a sub. Columns are as wide as their widest entry, numbers right-aligned.
+# The pairs' rows are made twice, once for the widths and once for the lines,
+# rather than held: 1,000 samples have 499,500.
+sub _relatedness_report {
+	my ($files, $r, $names, $tally, $each_pair) = @_;
+	# the lines of the rows that $rows gives to a sub, under @head, with the
+	# columns in %$right right-aligned
+	my $table = sub {
+		my ($right, $rows, @head) = @_;
+		my @w = map { length } @head;
+		$rows->(sub {
+			foreach my $i (0 .. $#_) {
+				$w[$i] = length $_[$i] if length $_[$i] > $w[$i];
+			}
+		});
+		my $text = '';
+		my $line = sub {
+			(my $l = join '  ', map { $right->{$_} ? sprintf('%*s', $w[$_], $_[$_]) : sprintf('%-*s', $w[$_], $_[$_]) } 0 .. $#_) =~ s/ +\z//;
+			$text .= "$l\n";
+		};
+		$line->(@head);
+		$rows->($line);
+		$text;
+	};
+	my $several = @{ $files } > 1;
+	my $samples = sub {
+		my ($row) = @_;
+		foreach my $x (@{ $names }) {
+			my $s = $tally->{$x};
+			$row->($x, $s->{sex} // 'unknown', defined $s->{het_ratio} ? sprintf('%.3f', $s->{het_ratio}) : '-', $several ? $s->{file} : ());
+		}
+	};
+	my $pairs = sub {
+		my ($row) = @_;
+		$each_pair->(sub {
+			my ($x, $y, $s) = @_;
+			$row->($x, $y, $s->{sites}, defined $s->{ibs0_rate} ? sprintf('%.4f', $s->{ibs0_rate}) : '-', defined $s->{kinship} ? sprintf('%.4f', $s->{kinship}) : '-',
+				defined $s->{undecided} ? "undecided: $s->{undecided}" : $s->{category} . (defined $s->{parent} ? " ($s->{parent} the parent)" : ''));
+		});
+	};
+	'relatedness: ' . join(', ', @{ $files }) . "\n"
+		. "KING-robust kinship over autosomal biallelic SNVs where either carries the ALT, genotypes of DP below $r->{min_depth} not counted;"
+		. " first-degree from 0.177 to 0.354, and of those, parent and child when the IBS0 rate is below $r->{max_ibs0};"
+		. " male when het/hom-ALT on X outside its pseudo-autosomal regions is below $Sex_cutoff\n"
+		. $table->({ 2 => 1 }, $samples, 'sample', 'sex', 'X het/hom-ALT', $several ? 'VCF' : ())
+		. $table->({ 2 => 1, 3 => 1, 4 => 1 }, $pairs, 'sample', 'sample', 'sites', 'IBS0 rate', 'kinship', 'relationship');
+}
+
+sub relatedness {
+	my $sub = 'relatedness';
+	# relatedness($file, ...) takes the VCFs first, unnamed, up to the first word:
+	# a VCF's name has a dot, as its suffix must, and an option's name, or a
+	# misspelling of one, has none
+	my @vcf;
+	push @vcf, shift @_ while @_ && defined $_[0] && !ref $_[0] && $_[0] !~ /\A\w+\z/;
+	my $args = _args(\@_, $sub, [], [qw(vcf min_depth max_ibs0 report)]);
+	if (defined $args->{vcf}) {
+		croak "$sub: the VCFs are given either first, unnamed, or as \"vcf\", not both" if @vcf;
+		@vcf = ref $args->{vcf} eq 'ARRAY' ? @{ $args->{vcf} } : $args->{vcf};
+	}
+	croak "$sub: needs a VCF of several samples, or several VCFs of one, as relatedness(\$file) or relatedness(\$file, \$file2)" unless @vcf;
+	my %r;
+	$r{min_depth} = $args->{min_depth} // 10; # 0 = count every genotype, whatever its DP; 10 is parent's, for parent's reasons
+	croak "$sub: \"min_depth\" must be a whole number, 0 or more, not " . _what($r{min_depth})
+		unless !ref $r{min_depth} && $r{min_depth} =~ /\A[0-9]+\z/;
+	$r{max_ibs0} = $args->{max_ibs0} // 0.012; # parent's, and peddy 0.4.3's
+	croak "$sub: \"max_ibs0\" must be a number above 0, not " . _what($r{max_ibs0})
+		unless !ref $r{max_ibs0} && $r{max_ibs0} =~ $Number && $r{max_ibs0} > 0;
+	$r{report} = $args->{report} // 1; # 1 = print the report to STDOUT; 0 = only return
+	croak "$sub: \"report\" must be 0 or 1, not " . _what($r{report}) unless !ref $r{report} && ($r{report} eq '0' || $r{report} eq '1');
+	# every file checked before any is read, which can take minutes
+	my %given;
+	foreach my $file (@vcf) {
+		_vcf_check($sub, 'vcf', $file);
+		croak "$sub: \"$file\" is given twice" if $given{$file}++;
+	}
+	my ($names, $counts, $tally); # the samples in order; REL_T counts a pair, as Bioinf.xs describes them, packed as UVs; each sample's sex counts
+	if (@vcf == 1) {
+		my ($next, $close) = _vcf_open($sub, 'vcf', $vcf[0]);
+		($names, $counts, $tally) = _relatedness_one($next, $vcf[0], $r{min_depth});
+		$close->();
+	} else {
+		# each opened as Bioinf.xs comes to it, and closed at its end, so that only
+		# one is open at a time
+		my @next = map {
+			my $file = $_;
+			my ($next, $close);
+			sub {
+				($next, $close) = _vcf_open($sub, 'vcf', $file) unless $next;
+				my $block = $next->();
+				$close->() unless defined $block;
+				$block;
+			};
+		} @vcf;
+		($names, $counts, $tally) = _relatedness_own(\@next, \@vcf, $r{min_depth});
+	}
+	foreach my $i (0 .. $#{ $names }) {
+		my $s = $tally->{ $names->[$i] };
+		_sex_of($s, $Sex_cutoff);
+		$s->{file} = @vcf == 1 ? $vcf[0] : $vcf[$i];
+	}
+	my %out = map { $_ => {} } @{ $names };
+	# each pair, in the samples' order, given to $code as (first, second, its
+	# hash); walked when needed rather than held as a list, which for 1,000
+	# samples would be 499,500 arrays, each with a copy of both names
+	my $each_pair = sub {
+		my ($code) = @_;
+		foreach my $i (0 .. $#{ $names } - 1) {
+			my $x = $names->[$i];
+			$code->($x, $_, $out{$x}{$_}) foreach @{ $names }[$i + 1 .. $#{ $names }];
+		}
+	};
+	my $pair = 11 * length pack 'J', 0; # bytes of a pair's counts in $counts
+	my $k = 0; # where the pair's counts start in $counts
+	foreach my $i (0 .. $#{ $names } - 1) {
+		foreach my $j ($i + 1 .. $#{ $names }) {
+			my ($x, $y) = @{ $names }[$i, $j];
+			# t[3 * x's ALT count + y's], as parent's, and then the sites in both VCFs,
+			# in x's alone and in y's alone
+			my @t = (0, unpack "x$k J11", $counts);
+			my @in = splice @t, 9;
+			$k += $pair;
+			# Flat, but for het and only: on 1,000 samples (2026-10-19) the pairs took
+			# 560 MB with no field a hash, and 1,110 MB with four, which were these two
+			# and each sample's hom-ALT count and share of ibs0.
+			my %s;
+			$s{sites} = 0;
+			$s{sites} += $_ foreach @t;
+			@in = ($s{sites}, 0, 0) if @vcf == 1;
+			$s{in_both} = $in[0];
+			$s{only} = { $x => $in[1], $y => $in[2] };
+			$s{ibs0} = $t[2] + $t[6];
+			$s{ibs1} = $t[1] + $t[3] + $t[5] + $t[7];
+			$s{ibs2} = $t[4] + $t[8];
+			$s{het_het} = $t[4];
+			$s{het} = { $x => $t[3] + $t[4] + $t[5], $y => $t[1] + $t[4] + $t[7] };
+			$s{kinship} = _king($s{het}{$x}, $s{het}{$y}, $s{het_het}, $s{ibs0});
+			$s{ibs0_rate} = $s{sites} ? $s{ibs0} / $s{sites} : undef;
+			# parent's reasons for dying, in parent's order
+			$s{undecided} = $s{sites} && !($t[1] + $t[2] + $t[3] + $t[6])
+				? 'neither has a hom-REF call where the other carries the ALT, so no opposite homozygote can be seen, as in a VCF merged from VCFs that list only their own variants; give each sample\'s own VCF instead'
+				: $s{sites} < $Parent_sites ? "$s{sites} sites compared, and $Parent_sites are needed"
+				: !defined $s{kinship} ? ($s{het}{$x} ? $y : $x) . ' has no het call at the sites compared'
+				: undef;
+			$s{relationship} = defined $s{undecided} ? undef : _relationship($s{kinship}, $s{ibs0_rate}, $r{max_ibs0});
+			$s{parent} = $s{category} = undef; # below, once every pair is known
+			$out{$x}{$y} = $out{$y}{$x} = \%s;
+		}
+	}
+	undef $counts;
+	# Which of a parent and child is the parent, where a third sample says, since
+	# two people's genotypes cannot: x is y's parent when x has another child who
+	# is y's full sibling, or when y has another parent who is unrelated to x, the
+	# two being y's parents. Two of y's parent-child partners who are
+	# second-degree relatives are y's parent and y's child, and say nothing about
+	# which. "Third-degree" is not taken as unrelated: in the CEPH 1463 pedigree
+	# (peddy's ceph1463.peddy.vcf.gz), the grandfather NA12889 and grandson
+	# NA12893 had a kinship of 0.0839, below KING's 0.0884, and would have made
+	# NA12893's father NA12877 his son too.
+	my %pc; # sample => its parent-child partners
+	$each_pair->(sub {
+		my ($x, $y, $s) = @_;
+		return unless ($s->{relationship} // '') eq 'parent-child';
+		push @{ $pc{$x} }, $y;
+		push @{ $pc{$y} }, $x;
+	});
+	my $is_parent = sub { # 1 or 0, and never a list, which would spill into the caller's next variable
+		my ($x, $y) = @_;
+		(grep { $_ ne $y && ($out{$y}{$_}{relationship} // '') eq 'full siblings' } @{ $pc{$x} })
+			|| (grep { $_ ne $x && ($out{$x}{$_}{relationship} // '') eq 'unrelated' } @{ $pc{$y} }) ? 1 : 0;
+	};
+	$each_pair->(sub {
+		my ($x, $y, $s) = @_;
+		my ($rel, $sx, $sy) = ($s->{relationship}, $tally->{$x}{sex}, $tally->{$y}{sex});
+		return unless defined $rel;
+		if ($rel eq 'parent-child') {
+			my ($x_is, $y_is) = ($is_parent->($x, $y), $is_parent->($y, $x));
+			$s->{parent} = $x_is && !$y_is ? $x : $y_is && !$x_is ? $y : undef; # undef when neither is said, or both
+			if (defined $s->{parent}) {
+				my ($ps, $cs) = $s->{parent} eq $x ? ($sx, $sy) : ($sy, $sx);
+				$s->{category} = ($ps ? $Kin_word{$ps}[0] : 'parent') . '-' . ($cs ? $Kin_word{$cs}[1] : 'child');
+			} else { # two men are father and son, whichever is which
+				$s->{category} = $sx && $sy && $sx eq $sy ? "$Kin_word{$sx}[0]-$Kin_word{$sx}[1]" : 'parent-child';
+			}
+		} elsif ($rel eq 'full siblings') {
+			$s->{category} = !$sx || !$sy ? 'full siblings' : $sx ne $sy ? 'brother-sister' : $sx eq 'male' ? 'brothers' : 'sisters';
+		} else {
+			$s->{category} = $rel;
+		}
+	});
+	if ($r{report}) {
+		print STDOUT _relatedness_report(\@vcf, \%r, $names, $tally, $each_pair) or croak "$sub: can't print the report: $!";
+	}
+	my ($undecided, $first) = (0); # the pairs undecided, and the first of them as [first, second, why]
+	my @regions; # as parent warns, and for its reasons: the pairs whose VCFs differ in their regions
+	$each_pair->(sub {
+		my ($x, $y, $s) = @_;
+		if (defined $s->{undecided}) {
+			$first //= [$x, $y, $s->{undecided}];
+			$undecided++;
+		}
+		my ($more, $fewer) = $s->{only}{$x} > $s->{only}{$y} ? ($x, $y) : ($y, $x);
+		push @regions, "$tally->{$more}{file} against $tally->{$fewer}{file} ($s->{only}{$more} to $s->{only}{$fewer})"
+			if @vcf > 1 && $s->{only}{$more} > 2 * $s->{only}{$fewer};
+	});
+	my $n_pairs = @{ $names } * (@{ $names } - 1) / 2;
+	carp "$sub: $undecided of $n_pairs pairs are undecided, and their relationship undef, such as $first->[0] and $first->[1]: $first->[2]" if $undecided;
+	carp "$sub: the VCFs of " . scalar(@regions) . ' pair' . (@regions == 1 ? ' were' : 's were') . ' probably not sequenced over the same regions (an exome and a genome, or two capture kits),'
+		. ' since one has more than twice as many sites that the other lacks as the other has that it lacks: '
+		. join(', ', @regions[0 .. ($#regions < 2 ? $#regions : 2)]) . (@regions > 3 ? ', and ' . (@regions - 3) . ' more' : '')
+		. '; a site that one lacks is taken as hom-REF in it, so their IBS0 and kinship are not to be trusted'
+		if @regions;
+	wantarray ? (\%out, $tally) : \%out;
 }
 
 # ---- alignment plots and tables
@@ -1595,18 +1852,20 @@ __END__
  # whether two people are parent and child: 1 or 0
  my $is = parent(child => 'child.vcf.gz', parent => 'father.vcf.gz');
 
+ # how every two people are related: father-son, brother-sister, ...
+ my $kin = relatedness('mom.vcf.gz', 'dad.vcf.gz', 'kid.vcf.gz');
+ print $kin->{'kid'}{'dad'}{category}; # by the sample names in the VCFs
+
 =head1 DESCRIPTION
 
 FASTA I/O in XS, BLAST hit ranking, and multiple-sequence-alignment plots and
-LaTeX tables, taken from the maintainer's C<bioinf.pm>; polygenic scores
-from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex
-and whether two people are parent and child.
+LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, and how every two people are related.
 
 Nothing is exported by default; ask for functions by name or with C<:all>.
 Every function dies (via C<Carp::croak>) on bad arguments, with a message that
 starts with the name of the function that raised it, as in
 C<fasta2hash: couldn't find "four" in x.fa>. C<pgs_score>, C<sex_check>,
-C<parent>, C<plot_msa>, C<plot_phylo>, C<msa_quality_table> and C<clustal_view_residues>
+C<parent>, C<relatedness>, C<plot_msa>, C<plot_phylo>, C<msa_quality_table> and C<clustal_view_residues>
 take C<< name =E<gt> value >> pairs, not a hash ref.
 
 =head2 Alien::Bioinf
@@ -2176,6 +2435,171 @@ C<child_hom_alt> and C<parent_hom_alt>: each one's het and hom-ALT calls at
 the sites compared.
 
 =back
+
+A BCF is not read; convert it with C<bcftools view -Oz>.
+
+=head2 relatedness(@vcf, %args)
+
+Tells how every two people are related, from their genotypes: each pair's
+KING-robust kinship and its IBS0, IBS1 and IBS2 counts, as C<parent> takes them
+for one pair, and from those a relationship (parent and child, full siblings,
+one person twice, second- or third-degree relatives, or unrelated). Each
+person's sex is told from X in the same reading, as C<sex_check> tells it, so
+that the relationship can be named: C<father-son>, C<mother-daughter>,
+C<brother-sister>, C<brothers>, C<sisters>, and so on. Genotypes alone cannot
+tell which of a parent and child is the parent, but a third person often can,
+and C<relatedness> says which when one does.
+
+The people are either every sample of one VCF, or the one sample of each of
+several VCFs, as a sequencing company delivers them:
+
+ use Cn::Bioinf 'relatedness';
+
+ my $family = relatedness('family.vcf.gz');              # every pair of its samples
+ my $same   = relatedness('mom.vcf.gz', 'dad.vcf.gz', 'kid.vcf.gz', report => 0);
+ my ($pairs, $samples) = relatedness(vcf => ['mom.vcf.gz', 'dad.vcf.gz']);
+
+ print $family->{js}{dc}{category}; # father-son
+ print $family->{dc}{js}{category}; # the same hash, so the same
+
+The second prints
+
+ relatedness: mother.vcf.gz, father.vcf.gz, daughter.vcf.gz
+ KING-robust kinship over autosomal biallelic SNVs where either carries the ALT, genotypes of DP below 10 not counted; first-degree from 0.177 to 0.354, and of those, parent and child when the IBS0 rate is below 0.012; male when het/hom-ALT on X outside its pseudo-autosomal regions is below 0.6
+ sample   sex     X het/hom-ALT  VCF
+ mother  female          1.690  mother.vcf.gz
+ father  male            0.206  father.vcf.gz
+ daughter  female          1.698  daughter.vcf.gz
+ sample   sample    sites  IBS0 rate  kinship  relationship
+ mother  father  171033     0.0810   0.0174  unrelated
+ mother  daughter  158616     0.0020   0.2604  mother-daughter (mother the parent)
+ father  daughter  150970     0.0030   0.2587  father-daughter (father the parent)
+
+for the exomes of the family under C<parent>, and returns the same. Every
+pair's counts are those C<parent> gives for it.
+
+The VCFs are decompressed by perl and counted in XS. One VCF of several
+samples is read a record at a time, keeping nothing but each pair's counters,
+and each pair's counts are taken 64 sites at a time from bit masks of the
+samples' genotypes; several VCFs of one sample each are held in memory, 8 bytes
+a site, as C<parent> holds two, and opened one at a time. On 2026-10-19 the
+three exomes above took 2.5 s and 30 MB, where C<parent> takes 1.6 s for one
+pair of them. The 17 samples of the CEPH 1463 pedigree (peddy's
+C<ceph1463.peddy.vcf.gz>, 20,000 sites) took 0.27 s. A made-up VCF of 1,000
+samples and 20,000 sites took 5.3 s and 890 MB: the counting took 1.7 s and 96
+MB, and nearly all the rest is the 499,500 hashes returned.
+
+=over
+
+=item * The VCFs are given first, as C<relatedness($file)> or
+C<relatedness($file, $file2, ...)>, before any option, or as C<vcf>. Each is a
+C<.vcf>, C<.vcf.gz>, C<.vcf.bgz> or C<.vcf.bz2> file, as for C<sex_check>. One VCF
+must have two samples or more; each of several must have one, and no two the
+same sample name, which is what each sample is known by.
+
+=item * C<vcf>: a VCF, or an array ref of them, in place of giving them first.
+
+=item * C<min_depth>: a genotype whose C<DP> is below this is not counted, on X as on
+the autosomes. The default, 10, is C<parent>'s, for C<parent>'s reasons; 0
+counts every genotype.
+
+=item * C<max_ibs0>: the IBS0 rate that a parent and child must be below, which tells
+them from full siblings. The default, 0.012, is C<parent>'s.
+
+=item * C<report>: 1 (the default) prints the report to STDOUT; 0 prints nothing.
+
+=back
+
+What is counted is what C<parent> counts, for every pair: the autosomal
+biallelic SNVs where either of the two carries the ALT, a site that one own VCF
+lacks taken as hom-REF in that person, and a site left out of a pair for the
+reasons given under C<parent>. Each person's sex is from SNVs on X outside its
+pseudo-autosomal regions, as C<sex_check> tells it with its default C<cutoff>
+(0.6), but with C<min_depth> as given here.
+
+A pair's relationship is decided as C<parent> decides it: by KING's kinship
+ranges, with the IBS0 rate telling parent and child from full siblings. Its
+category names it from the two sexes:
+
+=over
+
+=item * A parent and child is C<father-son>, C<father-daughter>, C<mother-son> or
+C<mother-daughter> when it is known which is the parent and both sexes are
+known, with C<parent> or C<child> in place of a word whose sex is unknown
+(C<parent-son>). When it is not known which is the parent, two men are
+C<father-son> and two women C<mother-daughter> all the same, and a man and a
+woman are C<parent-child>.
+
+=item * Full siblings are C<brothers>, C<sisters> or C<brother-sister>, or
+C<full siblings> when either's sex is unknown.
+
+=item * Any other relationship is its own category: C<duplicate>, C<second-degree>,
+C<third-degree> or C<unrelated>.
+
+=back
+
+Which of a parent and child is the parent is told by a third person: x is y's
+parent when x has another child who is y's full sibling, or when y has another
+parent who is unrelated to x (the two being y's parents). When neither is
+said, or both, as in a pedigree that this reading cannot untangle, C<parent> is
+undef. On CEPH 1463, three generations of 17 people, C<relatedness> agreed with
+the pedigree on all 17 sexes and on 134 of the 136 pairs, including every
+father, mother, son, daughter, brother and sister, and which of each parent
+and child was the parent. The other two pairs were the grandson NA12893 with
+his grandfather and with his grandmother, whose kinships of 0.0839 and 0.0799
+are just under KING's 0.0884 for second-degree relatives, and so are
+C<third-degree>.
+
+Where C<parent> would die, C<relatedness> decides nothing about that pair and
+goes on to the next: its C<relationship> and C<category> are undef and
+C<undecided> says why, and C<relatedness> warns once, counting such pairs. That
+is when fewer than 1,000 sites are compared, when neither has a hom-REF call
+where the other carries the ALT (as in a VCF merged without C<-0>), or when one
+has no het call, which leaves C<kinship> undef too. When several VCFs are
+given, C<relatedness> also warns once about the pairs whose VCFs look
+sequenced over different regions, as C<parent> warns about one.
+
+In scalar context C<relatedness> returns a hash of hashes keyed by each sample
+and then by each other sample, so that C<< $r-E<gt>{js}{dc} >> and C<< $r-E<gt>{dc}{js} >> are
+the same pair, and the same hash: changing one changes the other. In list
+context it returns that and a hash ref of the samples. A pair's hash has these
+fields on every return:
+
+=over
+
+=item * C<relationship>: as C<parent> gives it (C<parent-child>, C<full siblings>,
+C<duplicate>, C<second-degree>, C<third-degree> or C<unrelated>), or undef when
+the pair is undecided.
+
+=item * C<category>: the relationship named by sex, as above, or undef.
+
+=item * C<parent>: the name of the one that is the parent, for a parent and child
+where a third person says which; otherwise undef.
+
+=item * C<undecided>: why the pair is undecided, or undef.
+
+=item * C<kinship>: the KING-robust between-family estimate, or undef when either has
+no het call. On C<t/data/parent.vcf> it agreed with PLINK 2's
+C<--make-king-table> for all 21 pairs.
+
+=item * C<ibs0_rate>: C<ibs0> divided by C<sites>, or undef when there are no sites.
+
+=item * C<sites>: the sites compared, of which C<in_both> were in both VCFs, and
+C<only>, a hash of each of the two samples, those in that sample's VCF alone.
+With one VCF, every site is C<in_both>.
+
+=item * C<ibs0>, C<ibs1>, C<ibs2>: the sites where the two share no allele, one, or
+both; C<het_het>: those where both are het; C<het>, a hash of each of the two
+samples: its het calls at the sites compared.
+
+=back
+
+C<parent>'s split of C<ibs0>, and each one's hom-ALT count, are left out, since
+each hash of two numbers adds a third to a pair's memory; C<parent> gives them
+for any one pair.
+
+The samples' hash has, for each sample, what C<sex_check> returns for it
+(C<sex>, C<het_ratio>, C<x_het>, C<x_hom_alt> and the rest), and C<file>, its VCF.
 
 A BCF is not read; convert it with C<bcftools view -Oz>.
 

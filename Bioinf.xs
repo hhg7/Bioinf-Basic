@@ -1,5 +1,5 @@
 /*FASTA reading and writing for Cn::Bioinf, and the genotype counts behind its
-sex_check and parent.
+sex_check, parent and relatedness.
 
 fasta2hash() and hash2fasta_file() used to be pure perl in ~/Scripts/bioinf.pm:
 one readline, chomp and string append per line in, and one substr-sized SV per
@@ -18,7 +18,7 @@ perl side (lib/Cn/Bioinf.pm) opens and closes the files.
 
 Every croak() and warn() here starts with C99's __func__, so a message names
 the C function that raised it (read_fasta, write_fasta, or one of the vcf_,
-sex_ and parent_ ones) and stays right if one is renamed.*/
+sex_, parent_ and rel_ ones) and stays right if one is renamed.*/
 #define PERL_NO_GET_CONTEXT
 #include "EXTERN.h"
 #include "perl.h"
@@ -250,7 +250,7 @@ static void write_fasta(pTHX_ PerlIO *fh, HV *h, AV *order, STRLEN width) {
 	if (PerlIO_error(fh)) croak("%s: error writing FASTA: %s", __func__, Strerror(errno));
 }
 
-/*Reading a VCF, for sex_check() and parent().
+/*Reading a VCF, for sex_check(), parent() and relatedness().
 
 The file is read by perl, which knows gzip and bzip2 through IO::Uncompress
 (linking zlib and libbz2 here would be a build dependency on every platform),
@@ -557,6 +557,36 @@ static void sex_header(pTHX_ vcf_reader *r) {
 	SAVEFREEPV(t->count); // freed at the caller's LEAVE, croak or not; see vcf_read()'s block
 }
 
+/*Whether the record of chrom (23 for X, 24 for Y), whose columns vcf_columns()
+put in col, is one that sex counts: outside the PARs, a biallelic SNV, and with
+GT, whose place in FORMAT goes in *gt and DP's in *dp. format_end is
+vcf_columns()'s.*/
+static bool sex_site(pTHX_ const vcf_reader *r, unsigned short int chrom, const char **col, const char *format_end, size_t *gt, size_t *dp) {
+	UV pos = vcf_pos(aTHX_ r, col[1], col[2] - 1);
+	if (sex_par(chrom, pos) || !vcf_base(col[3], col[4] - 1) || !vcf_base(col[4], col[5] - 1)) return FALSE;
+	vcf_format(col[8], format_end, gt, dp);
+	return *gt != VCF_ABSENT;
+}
+
+/*One sample's call, the field p..e, at a site of chrom that sex_site() took,
+into c, the sample's SEX_FIELDS counters.*/
+static void sex_count(const vcf_reader *r, UV *c, unsigned short int chrom, const char *p, const char *e, size_t gt, size_t dp) {
+	unsigned short int alleles, alt;
+	short int call = vcf_call(r, p, e, gt, dp, &alleles, &alt);
+	if (call == VCF_SHALLOW) return;
+	if (chrom == 24) {
+		if (call == VCF_NO_CALL) return;
+		c[SEX_Y_CALLED]++;
+		if (alt) c[SEX_Y_ALT]++;
+	} else if (call == VCF_NO_CALL) {
+		c[SEX_X_MISSING]++;
+	} else {
+		if (alleles == 1) c[SEX_X_HAPLOID]++;
+		// a haploid call is hom-ALT or hom-REF, as peddy's cyvcf2 counts it
+		c[alt == 0 ? SEX_X_HOM_REF : alt == alleles ? SEX_X_HOM_ALT : SEX_X_HET]++;
+	}
+}
+
 //The record p..e.*/
 static void sex_record(pTHX_ vcf_reader *r, const char *p, const char *e) {
 	sex_tally *t = (sex_tally*)r;
@@ -565,33 +595,28 @@ static void sex_record(pTHX_ vcf_reader *r, const char *p, const char *e) {
 	if (chrom != 23 && chrom != 24) return;
 	const char *col[9];
 	const char *format_end = vcf_columns(aTHX_ r, p, f, e, col);
-	UV pos = vcf_pos(aTHX_ r, col[1], col[2] - 1);
-	if (sex_par(chrom, pos) || !vcf_base(col[3], col[4] - 1) || !vcf_base(col[4], col[5] - 1)) return;
 	size_t gt, dp;
-	vcf_format(col[8], format_end, &gt, &dp);
-	if (gt == VCF_ABSENT) return;
+	if (!sex_site(aTHX_ r, chrom, col, format_end, &gt, &dp)) return;
 	if (chrom == 23) t->x_sites++;
 	p = format_end + 1;
 	for (size_t i = 0; i < r->n; i++) {
-		const char *se = vcf_sample(aTHX_ r, p, e, i), *sample = p;
+		const char *se = vcf_sample(aTHX_ r, p, e, i);
+		sex_count(r, t->count + i * SEX_FIELDS, chrom, p, se, gt, dp);
 		p = se + 1;
-		unsigned short int alleles, alt;
-		short int call = vcf_call(r, sample, se, gt, dp, &alleles, &alt);
-		if (call == VCF_SHALLOW) continue;
-		UV *c = t->count + i * SEX_FIELDS;
-		if (chrom == 24) {
-			if (call == VCF_NO_CALL) continue;
-			c[SEX_Y_CALLED]++;
-			if (alt) c[SEX_Y_ALT]++;
-		} else if (call == VCF_NO_CALL) {
-			c[SEX_X_MISSING]++;
-		} else {
-			if (alleles == 1) c[SEX_X_HAPLOID]++;
-			// a haploid call is hom-ALT or hom-REF, as peddy's cyvcf2 counts it
-			c[alt == 0 ? SEX_X_HOM_REF : alt == alleles ? SEX_X_HOM_ALT : SEX_X_HET]++;
-		}
 	}
 	vcf_samples_end(aTHX_ r, p, e);
+}
+
+/*The SEX_FIELDS counts in count of the n samples in names, each stored in out
+as sample => hash of counts, in place of anything out held for it.*/
+static void sex_rows(pTHX_ HV *out, AV *names, const UV *count, size_t n, const char *name) {
+	for (size_t i = 0; i < n; i++) {
+		SV **sample = av_fetch(names, (SSize_t)i, 0);
+		if (!sample) croak("%s: sample %" UVuf " of %s has lost its name", __func__, (UV)i, name); // cannot happen: every sample read was pushed
+		HV *row = newHV();
+		for (unsigned short int k = 0; k < SEX_FIELDS; k++) (void)hv_store(row, SEX_NAME[k], (I32)strlen(SEX_NAME[k]), newSVuv(count[i * SEX_FIELDS + k]), 0);
+		(void)hv_store_ent(out, *sample, newRV_noinc((SV*)row), 0);
+	}
 }
 
 /*The counts of every sample of the VCF name, which next returns a block of
@@ -606,13 +631,7 @@ static HV *sex_tally_vcf(pTHX_ SV *next, const char *name, UV min_depth, UV *x_s
 	t.r.on_record = sex_record;
 	vcf_read(aTHX_ next, &t.r);
 	HV *out = t.r.samples;
-	for (size_t i = 0; i < t.r.n; i++) {
-		SV **sample = av_fetch(t.r.names, (SSize_t)i, 0);
-		if (!sample) croak("%s: sample %" UVuf " of %s has lost its name", __func__, (UV)i, name); // cannot happen: vcf_header() pushed every one
-		HV *row = newHV();
-		for (unsigned short int k = 0; k < SEX_FIELDS; k++) (void)hv_store(row, SEX_NAME[k], (I32)strlen(SEX_NAME[k]), newSVuv(t.count[i * SEX_FIELDS + k]), 0);
-		(void)hv_store_ent(out, *sample, newRV_noinc((SV*)row), 0); // in place of the column vcf_header() stored
-	}
+	sex_rows(aTHX_ out, t.r.names, t.count, t.r.n, name); // in place of the columns vcf_header() stored
 	*x_sites = t.x_sites;
 	*names = t.r.names;
 	return out;
@@ -761,20 +780,26 @@ static int parent_cmp(const void *a, const void *b) {
 	return (x > y) - (x < y);
 }
 
+/*Own VCF: the sites of the VCF that next returns a block of at a time, read
+by t, whose name, min_depth and callbacks the caller has set, sorted.*/
+static parent_sites *parent_sites_read(pTHX_ parent_reader *t, SV *next) {
+	Newxz(t->sites, 1, parent_sites);
+	SAVEDESTRUCTOR_X(parent_sites_free, t->sites); // at the caller's LEAVE, croak or not
+	vcf_read(aTHX_ next, &t->r);
+	if (t->sites->n) qsort(t->sites->site, t->sites->n, sizeof *t->sites->site, parent_cmp);
+	return t->sites;
+}
+
 /*Own VCF: the sites of the VCF name, which next returns a block of at a
 time, sorted.*/
 static parent_sites *parent_sites_vcf(pTHX_ SV *next, const char *name, UV min_depth) {
 	parent_reader t;
 	Zero(&t, 1, parent_reader);
-	Newxz(t.sites, 1, parent_sites);
-	SAVEDESTRUCTOR_X(parent_sites_free, t.sites); // at the caller's LEAVE, croak or not
 	t.r.name = name;
 	t.r.min_depth = min_depth;
 	t.r.on_header = parent_header_own;
 	t.r.on_record = parent_record_own;
-	vcf_read(aTHX_ next, &t.r);
-	if (t.sites->n) qsort(t.sites->site, t.sites->n, sizeof *t.sites->site, parent_cmp);
-	return t.sites;
+	return parent_sites_read(aTHX_ &t, next);
 }
 
 /*The sites of the child's VCF, a, and of the parent's, b, both sorted, as t
@@ -800,6 +825,243 @@ static void parent_merge(const parent_sites *a, const parent_sites *b, UV *t, UV
 		t[3 * c + p]++;
 		if (c || p) in[na && nb ? 0 : na ? 1 : 2]++;
 	}
+}
+
+/*The genotype counts behind relatedness(): for every pair of samples, what
+parent() counts for one pair, and for every sample what sex_check() counts,
+from the same reading, so that brothers can be told from a brother and a
+sister.
+
+The samples are either all those of one VCF, or each the one sample of a VCF
+of its own. One VCF is read a record at a time and nothing kept but the
+counts: each sample's call at an autosomal site sets a bit in one of three
+words, for 0, 1 and 2 ALTs, and at the end of a block of 64 sites each pair's
+counts are taken from those words by popcount, 8 per pair, where taking them a
+site at a time would be 64 tests of the pair's two calls. Own VCFs are each
+read into parent_sites, as parent() reads them, and all of them held, and
+then merged in one pass, which applies parent_merge()'s rules to each pair.
+The files are opened by perl one at a time, so that only one is open.
+
+A pair's counts are REL_T UVs, in the order rel_pair() numbers the pairs: t[1]
+to t[8] of parent(), the sites by the first sample's ALT count and then the
+second's, flattened as t[3 * first + second] -- t[0], where both are hom-REF,
+is not a site compared, and is not kept -- and then, for own VCFs, in[0] to
+in[2] of parent_merge(): the sites in both files, in the first's alone and in
+the second's alone. For one VCF those three are left 0 and perl fills them.*/
+#define REL_T 11
+
+/*The number of pair (i, j), i < j, of n samples, when they are taken in the
+order (0, 1), (0, 2) .. (0, n - 1), (1, 2) ..*/
+static size_t rel_pair(size_t n, size_t i, size_t j) {
+	return i * (2 * n - i - 1) / 2 + (j - i - 1);
+}
+
+/*The pairs of n samples, which dies when their counters could not be
+addressed.*/
+static size_t rel_pairs(pTHX_ size_t n) {
+	if (n < 2) return 0;
+	if (n > ((size_t)-1 / sizeof(UV) / REL_T) / n) croak("%s: %" UVuf " samples make too many pairs to count", __func__, (UV)n);
+	return n * (n - 1) / 2;
+}
+
+/*The 1 bits in w, by the SWAR count of Sean Eron Anderson's "Bit Twiddling
+Hacks" (graphics.stanford.edu/~seander/bithacks.html, section
+CountBitsSetParallel), which needs no compiler builtin and no POPCNT
+instruction.*/
+static unsigned short int rel_popcount(uint64_t w) {
+	w -= (w >> 1) & UINT64_C(0x5555555555555555);
+	w = (w & UINT64_C(0x3333333333333333)) + ((w >> 2) & UINT64_C(0x3333333333333333));
+	w = (w + (w >> 4)) & UINT64_C(0x0f0f0f0f0f0f0f0f);
+	return (unsigned short int)((w * UINT64_C(0x0101010101010101)) >> 56);
+}
+
+typedef struct {
+	vcf_reader r;         // first, so that the vcf_reader * that the callbacks are given is this
+	uint64_t *plane;      // 3 words a sample: bit k of plane[3 * s + c] is set when sample s has c ALTs at the block's site k
+	unsigned short int k; // the block's sites so far, 0 to 63
+	UV *t;                // REL_T counters a pair
+	UV *sex;              // SEX_FIELDS counters a sample
+} rel_reader;
+
+/*One VCF: its counters, once the #CHROM line has said how many samples there
+are.*/
+static void rel_header_one(pTHX_ vcf_reader *r) {
+	rel_reader *t = (rel_reader*)r;
+	if (r->n < 2) croak("%s: %s has 1 sample, and relatedness compares two or more; give each person's VCF, as relatedness($file, $file2)", __func__, r->name);
+	size_t pairs = rel_pairs(aTHX_ r->n);
+	Newxz(t->plane, 3 * r->n, uint64_t);
+	SAVEFREEPV(t->plane); // these three at the caller's LEAVE, croak or not; see vcf_read()'s block
+	Newxz(t->t, pairs * REL_T, UV);
+	SAVEFREEPV(t->t);
+	Newxz(t->sex, r->n * SEX_FIELDS, UV);
+	SAVEFREEPV(t->sex);
+}
+
+/*One VCF: the block's sites added to every pair's counts, and the block
+emptied.*/
+static void rel_flush(rel_reader *t) {
+	const size_t n = t->r.n;
+	const uint64_t *pl = t->plane;
+	UV *c = t->t;
+	for (size_t i = 0; i + 1 < n; i++) {
+		const uint64_t a0 = pl[3 * i], a1 = pl[3 * i + 1], a2 = pl[3 * i + 2];
+		for (size_t j = i + 1; j < n; j++, c += REL_T) {
+			const uint64_t *b = pl + 3 * j;
+			c[0] += rel_popcount(a0 & b[1]); // c[3 * first + second - 1]
+			c[1] += rel_popcount(a0 & b[2]);
+			c[2] += rel_popcount(a1 & b[0]);
+			c[3] += rel_popcount(a1 & b[1]);
+			c[4] += rel_popcount(a1 & b[2]);
+			c[5] += rel_popcount(a2 & b[0]);
+			c[6] += rel_popcount(a2 & b[1]);
+			c[7] += rel_popcount(a2 & b[2]);
+		}
+	}
+	Zero(t->plane, 3 * n, uint64_t);
+	t->k = 0;
+}
+
+/*One VCF: the record p..e, an autosomal site for the pairs or an X or Y one
+for each sample's sex.*/
+static void rel_record_one(pTHX_ vcf_reader *r, const char *p, const char *e) {
+	rel_reader *t = (rel_reader*)r;
+	const char *f = vcf_field_end(p, e);
+	unsigned short int chrom = vcf_chrom(p, f);
+	if (chrom == 0) return;
+	const char *col[9];
+	const char *format_end = vcf_columns(aTHX_ r, p, f, e, col);
+	size_t gt, dp;
+	p = format_end + 1;
+	if (chrom > 22) {
+		if (!sex_site(aTHX_ r, chrom, col, format_end, &gt, &dp)) return;
+		for (size_t i = 0; i < r->n; i++) {
+			const char *se = vcf_sample(aTHX_ r, p, e, i);
+			sex_count(r, t->sex + i * SEX_FIELDS, chrom, p, se, gt, dp);
+			p = se + 1;
+		}
+		vcf_samples_end(aTHX_ r, p, e);
+		return;
+	}
+	if (!vcf_base(col[3], col[4] - 1) || !vcf_base(col[4], col[5] - 1)) return;
+	vcf_format(col[8], format_end, &gt, &dp);
+	if (gt == VCF_ABSENT) return;
+	const uint64_t bit = (uint64_t)1 << t->k;
+	for (size_t i = 0; i < r->n; i++) {
+		const char *se = vcf_sample(aTHX_ r, p, e, i);
+		unsigned short int code = parent_code(r, p, se, gt, dp);
+		if (code != PARENT_NONE) t->plane[3 * i + code] |= bit;
+		p = se + 1;
+	}
+	vcf_samples_end(aTHX_ r, p, e);
+	if (++t->k == 64) rel_flush(t);
+}
+
+typedef struct {
+	parent_reader p; // first, so that the vcf_reader * that the callbacks are given is this, and parent_record_own() can read it
+	UV *sex;         // the SEX_FIELDS counters of the file's one sample
+	HV *seen;        // every file's sample so far => that file's name
+	AV *names;       // every file's sample so far, in the files' order
+} rel_own_reader;
+
+/*Own VCF: one sample, or it isn't, and not one that an earlier file named.*/
+static void rel_header_own(pTHX_ vcf_reader *r) {
+	rel_own_reader *t = (rel_own_reader*)r;
+	if (r->n != 1) croak("%s: %s has %" UVuf " samples, and each of several VCFs must have one; give a VCF of several samples alone, as relatedness($file)", __func__, r->name, (UV)r->n);
+	SV **sample = av_fetch(r->names, 0, 0);
+	if (!sample) croak("%s: the sample of %s has lost its name", __func__, r->name); // cannot happen: vcf_header() pushed it
+	HE *he = hv_fetch_ent(t->seen, *sample, 0, 0);
+	if (he) {
+		const char *first = SvPV_nolen(HeVAL(he)), *name = SvPV_nolen(*sample);
+		croak("%s: %s and %s both name their sample \"%s\"", __func__, first, r->name, name);
+	}
+	(void)hv_store_ent(t->seen, *sample, newSVpv(r->name, 0), 0);
+	av_push(t->names, newSVsv(*sample));
+}
+
+/*Own VCF: the record p..e, counted for the sample's sex on X and Y and kept
+as a site, as parent() keeps it, on the autosomes.*/
+static void rel_record_own(pTHX_ vcf_reader *r, const char *p, const char *e) {
+	const char *f = vcf_field_end(p, e);
+	unsigned short int chrom = vcf_chrom(p, f);
+	if (chrom != 23 && chrom != 24) {
+		parent_record_own(aTHX_ r, p, e);
+		return;
+	}
+	const char *col[9];
+	const char *format_end = vcf_columns(aTHX_ r, p, f, e, col);
+	size_t gt, dp;
+	if (!sex_site(aTHX_ r, chrom, col, format_end, &gt, &dp)) return;
+	p = format_end + 1;
+	const char *se = vcf_sample(aTHX_ r, p, e, 0);
+	vcf_samples_end(aTHX_ r, se + 1, e);
+	sex_count(r, ((rel_own_reader*)r)->sex, chrom, p, se, gt, dp);
+}
+
+//What a file has at the position rel_merge() is comparing
+enum {
+	REL_ABSENT,   // no site: its sample is hom-REF there
+	REL_PRESENT,  // one site, whose call counts
+	REL_UNUSABLE  // more than one, a call that does not count, or more than one ALT: every pair with its sample leaves the position out
+};
+
+/*Own VCFs: the sites of the n files in s, each sorted, counted into t, pair by
+pair, by parent_merge()'s rules. Each position is found by looking at every
+file's next site, which is n steps, and then counted for each file that
+carries the ALT there against every other file, so that a pair where both are
+hom-REF costs nothing.*/
+static void rel_merge(pTHX_ parent_sites *const *s, size_t n, UV *t) {
+	size_t *at, *carrier;      // each file's next site; the files that carry the ALT at this position
+	uint64_t *key;             // each file's site at this position, when REL_PRESENT
+	unsigned short int *state; // each file's REL_ABSENT, REL_PRESENT or REL_UNUSABLE at this position
+	Newxz(at, n, size_t);
+	SAVEFREEPV(at); // these four at the caller's LEAVE, croak or not
+	Newx(carrier, n, size_t);
+	SAVEFREEPV(carrier);
+	Newx(key, n, uint64_t);
+	SAVEFREEPV(key);
+	Newx(state, n, unsigned short int);
+	SAVEFREEPV(state);
+	for (;;) {
+		uint64_t pos = UINT64_MAX; // the position to compare, as the sites' bits from PARENT_POS_SHIFT up
+		for (size_t f = 0; f < n; f++) {
+			if (at[f] < s[f]->n && s[f]->site[at[f]] >> PARENT_POS_SHIFT < pos) pos = s[f]->site[at[f]] >> PARENT_POS_SHIFT;
+		}
+		if (pos == UINT64_MAX) break;
+		size_t m = 0; // carriers
+		for (size_t f = 0; f < n; f++) {
+			size_t k = 0;
+			while (at[f] + k < s[f]->n && s[f]->site[at[f] + k] >> PARENT_POS_SHIFT == pos) k++;
+			if (!k) {
+				state[f] = REL_ABSENT;
+				continue;
+			}
+			key[f] = s[f]->site[at[f]];
+			at[f] += k;
+			state[f] = k > 1 || PARENT_CODE(key[f]) == PARENT_NONE || PARENT_ALT(key[f]) == 4 ? REL_UNUSABLE : REL_PRESENT;
+			if (state[f] == REL_PRESENT && PARENT_CODE(key[f])) carrier[m++] = f;
+		}
+		for (size_t q = 0; q < m; q++) {
+			const size_t i = carrier[q];
+			const unsigned short int ci = PARENT_CODE(key[i]);
+			for (size_t j = 0; j < n; j++) {
+				if (j == i || state[j] == REL_UNUSABLE) continue;
+				const bool both = state[j] == REL_PRESENT;
+				const unsigned short int cj = both ? PARENT_CODE(key[j]) : 0; // a site absent from a file is hom-REF there
+				if (cj && j < i) continue; // counted when j was the carrier
+				if (both && PARENT_ALLELES(key[i]) != PARENT_ALLELES(key[j])) continue;
+				UV *c = t + REL_T * (i < j ? rel_pair(n, i, j) : rel_pair(n, j, i));
+				c[i < j ? 3 * ci + cj - 1 : 3 * cj + ci - 1]++;
+				c[8 + (both ? 0 : i < j ? 1 : 2)]++;
+			}
+		}
+	}
+}
+
+/*The n samples' pair counters t as one string of UVs, for perl to unpack with
+"J". For 1,000 samples, an array of a scalar per counter took 226 MB where
+this takes 44 MB (2026-10-19).*/
+static SV *rel_counts(pTHX_ const UV *t, size_t n) {
+	return newSVpvn((const char*)t, rel_pairs(aTHX_ n) * REL_T * sizeof(UV));
 }
 
 MODULE = Cn::Bioinf	PACKAGE = Cn::Bioinf
@@ -879,3 +1141,65 @@ PPCODE:
 	EXTEND(SP, 12);
 	for (unsigned short int k = 0; k < 9; k++) PUSHs(sv_2mortal(newSVuv(t[k])));
 	for (unsigned short int k = 0; k < 3; k++) PUSHs(sv_2mortal(newSVuv(in[k])));
+
+void
+_relatedness_one(next, name, min_depth)
+	SV *next
+	const char *name
+	UV min_depth
+PPCODE:
+	rel_reader t;
+	Zero(&t, 1, rel_reader);
+	t.r.name = name;
+	t.r.min_depth = min_depth;
+	t.r.on_header = rel_header_one;
+	t.r.on_record = rel_record_one;
+	vcf_read(aTHX_ next, &t.r);
+	if (t.k) rel_flush(&t);
+	HV *sex = (HV*)sv_2mortal((SV*)newHV());
+	sex_rows(aTHX_ sex, t.r.names, t.sex, t.r.n, name);
+	EXTEND(SP, 3);
+	PUSHs(sv_2mortal(newRV_inc((SV*)t.r.names)));
+	PUSHs(sv_2mortal(rel_counts(aTHX_ t.t, t.r.n)));
+	PUSHs(sv_2mortal(newRV_inc((SV*)sex)));
+
+void
+_relatedness_own(nexts, files, min_depth)
+	AV *nexts
+	AV *files
+	UV min_depth
+PPCODE:
+	const size_t n = (size_t)(av_len(nexts) + 1);
+	if ((SSize_t)n != av_len(files) + 1) croak("%s: %" UVuf " readers for %" UVuf " files", __func__, (UV)n, (UV)(av_len(files) + 1)); // cannot happen: perl makes one for each
+	parent_sites **s; // each file's sites, freed by parent_sites_read()'s destructor
+	Newx(s, n, parent_sites*);
+	SAVEFREEPV(s);
+	UV *count; // SEX_FIELDS counters a file
+	Newxz(count, n * SEX_FIELDS, UV);
+	SAVEFREEPV(count);
+	HV *seen = (HV*)sv_2mortal((SV*)newHV());
+	AV *names = (AV*)sv_2mortal((SV*)newAV());
+	for (size_t f = 0; f < n; f++) {
+		SV **next = av_fetch(nexts, (SSize_t)f, 0), **file = av_fetch(files, (SSize_t)f, 0);
+		if (!next || !file) croak("%s: file %" UVuf " has no reader", __func__, (UV)f); // cannot happen: perl fills both arrays
+		rel_own_reader t;
+		Zero(&t, 1, rel_own_reader);
+		t.p.r.name = SvPV_nolen(*file);
+		t.p.r.min_depth = min_depth;
+		t.p.r.on_header = rel_header_own;
+		t.p.r.on_record = rel_record_own;
+		t.sex = count + f * SEX_FIELDS;
+		t.seen = seen;
+		t.names = names;
+		s[f] = parent_sites_read(aTHX_ &t.p, *next);
+	}
+	UV *t; // REL_T counters a pair
+	Newxz(t, rel_pairs(aTHX_ n) * REL_T, UV);
+	SAVEFREEPV(t);
+	rel_merge(aTHX_ (parent_sites *const *)s, n, t);
+	HV *sex = (HV*)sv_2mortal((SV*)newHV());
+	sex_rows(aTHX_ sex, names, count, n, "the VCFs");
+	EXTEND(SP, 3);
+	PUSHs(sv_2mortal(newRV_inc((SV*)names)));
+	PUSHs(sv_2mortal(rel_counts(aTHX_ t, n)));
+	PUSHs(sv_2mortal(newRV_inc((SV*)sex)));

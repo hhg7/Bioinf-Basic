@@ -26,16 +26,20 @@
     # whether two people are parent and child: 1 or 0
     my $is = parent(child => 'child.vcf.gz', parent => 'father.vcf.gz');
 
+    # how every two people are related: father-son, brother-sister, ...
+    my $kin = relatedness('mom.vcf.gz', 'dad.vcf.gz', 'kid.vcf.gz');
+    print $kin->{'kid'}{'dad'}{category}; # by the sample names in the VCFs
+
 # DESCRIPTION
 
 FASTA I/O in XS, BLAST hit ranking, and multiple-sequence-alignment plots and
-LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex and whether two people are parent and child.
+LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, and how every two people are related.
 
 Nothing is exported by default; ask for functions by name or with `:all`.
 Every function dies (via `Carp::croak`) on bad arguments, with a message that
 starts with the name of the function that raised it, as in
 `fasta2hash: couldn't find "four" in x.fa`. `pgs_score`, `sex_check`,
-`parent`, `plot_msa`, `plot_phylo`, `msa_quality_table` and `clustal_view_residues`
+`parent`, `relatedness`, `plot_msa`, `plot_phylo`, `msa_quality_table` and `clustal_view_residues`
 take `name => value` pairs, not a hash ref.
 
 ## Alien::Bioinf
@@ -520,6 +524,146 @@ a hash ref of what it was decided from, with the same fields on every return:
 - `het_het`: the sites where both are het; `child_het`, `parent_het`,
   `child_hom_alt` and `parent_hom_alt`: each one's het and hom-ALT calls at
   the sites compared.
+
+A BCF is not read; convert it with `bcftools view -Oz`.
+
+## relatedness(@vcf, %args)
+
+Tells how every two people are related, from their genotypes: each pair's
+KING-robust kinship and its IBS0, IBS1 and IBS2 counts, as `parent` takes them
+for one pair, and from those a relationship (parent and child, full siblings,
+one person twice, second- or third-degree relatives, or unrelated). Each
+person's sex is told from X in the same reading, as `sex_check` tells it, so
+that the relationship can be named: `father-son`, `mother-daughter`,
+`brother-sister`, `brothers`, `sisters`, and so on. Genotypes alone cannot
+tell which of a parent and child is the parent, but a third person often can,
+and `relatedness` says which when one does.
+
+The people are either every sample of one VCF, or the one sample of each of
+several VCFs, as a sequencing company delivers them:
+
+    use Cn::Bioinf 'relatedness';
+
+    my $family = relatedness('family.vcf.gz');              # every pair of its samples
+    my $same   = relatedness('mom.vcf.gz', 'dad.vcf.gz', 'kid.vcf.gz', report => 0);
+    my ($pairs, $samples) = relatedness(vcf => ['mom.vcf.gz', 'dad.vcf.gz']);
+
+    print $family->{js}{dc}{category}; # father-son
+    print $family->{dc}{js}{category}; # the same hash, so the same
+
+The second prints
+
+    relatedness: mother.vcf.gz, father.vcf.gz, daughter.vcf.gz
+    KING-robust kinship over autosomal biallelic SNVs where either carries the ALT, genotypes of DP below 10 not counted; first-degree from 0.177 to 0.354, and of those, parent and child when the IBS0 rate is below 0.012; male when het/hom-ALT on X outside its pseudo-autosomal regions is below 0.6
+    sample   sex     X het/hom-ALT  VCF
+    mother  female          1.690  mother.vcf.gz
+    father  male            0.206  father.vcf.gz
+    daughter  female          1.698  daughter.vcf.gz
+    sample   sample    sites  IBS0 rate  kinship  relationship
+    mother  father  171033     0.0810   0.0174  unrelated
+    mother  daughter  158616     0.0020   0.2604  mother-daughter (mother the parent)
+    father  daughter  150970     0.0030   0.2587  father-daughter (father the parent)
+
+for the exomes of the family under `parent`, and returns the same. Every
+pair's counts are those `parent` gives for it.
+
+The VCFs are decompressed by perl and counted in XS. One VCF of several
+samples is read a record at a time, keeping nothing but each pair's counters,
+and each pair's counts are taken 64 sites at a time from bit masks of the
+samples' genotypes; several VCFs of one sample each are held in memory, 8 bytes
+a site, as `parent` holds two, and opened one at a time. On 2026-10-19 the
+three exomes above took 2.5 s and 30 MB, where `parent` takes 1.6 s for one
+pair of them. The 17 samples of the CEPH 1463 pedigree (peddy's
+`ceph1463.peddy.vcf.gz`, 20,000 sites) took 0.27 s. A made-up VCF of 1,000
+samples and 20,000 sites took 5.3 s and 890 MB: the counting took 1.7 s and 96
+MB, and nearly all the rest is the 499,500 hashes returned.
+
+- The VCFs are given first, as `relatedness($file)` or
+  `relatedness($file, $file2, ...)`, before any option, or as `vcf`. Each is a
+  `.vcf`, `.vcf.gz`, `.vcf.bgz` or `.vcf.bz2` file, as for `sex_check`. One VCF
+  must have two samples or more; each of several must have one, and no two the
+  same sample name, which is what each sample is known by.
+- `vcf`: a VCF, or an array ref of them, in place of giving them first.
+- `min_depth`: a genotype whose `DP` is below this is not counted, on X as on
+  the autosomes. The default, 10, is `parent`'s, for `parent`'s reasons; 0
+  counts every genotype.
+- `max_ibs0`: the IBS0 rate that a parent and child must be below, which tells
+  them from full siblings. The default, 0.012, is `parent`'s.
+- `report`: 1 (the default) prints the report to STDOUT; 0 prints nothing.
+
+What is counted is what `parent` counts, for every pair: the autosomal
+biallelic SNVs where either of the two carries the ALT, a site that one own VCF
+lacks taken as hom-REF in that person, and a site left out of a pair for the
+reasons given under `parent`. Each person's sex is from SNVs on X outside its
+pseudo-autosomal regions, as `sex_check` tells it with its default `cutoff`
+(0.6), but with `min_depth` as given here.
+
+A pair's relationship is decided as `parent` decides it: by KING's kinship
+ranges, with the IBS0 rate telling parent and child from full siblings. Its
+category names it from the two sexes:
+
+- A parent and child is `father-son`, `father-daughter`, `mother-son` or
+  `mother-daughter` when it is known which is the parent and both sexes are
+  known, with `parent` or `child` in place of a word whose sex is unknown
+  (`parent-son`). When it is not known which is the parent, two men are
+  `father-son` and two women `mother-daughter` all the same, and a man and a
+  woman are `parent-child`.
+- Full siblings are `brothers`, `sisters` or `brother-sister`, or
+  `full siblings` when either's sex is unknown.
+- Any other relationship is its own category: `duplicate`, `second-degree`,
+  `third-degree` or `unrelated`.
+
+Which of a parent and child is the parent is told by a third person: x is y's
+parent when x has another child who is y's full sibling, or when y has another
+parent who is unrelated to x (the two being y's parents). When neither is
+said, or both, as in a pedigree that this reading cannot untangle, `parent` is
+undef. On CEPH 1463, three generations of 17 people, `relatedness` agreed with
+the pedigree on all 17 sexes and on 134 of the 136 pairs, including every
+father, mother, son, daughter, brother and sister, and which of each parent
+and child was the parent. The other two pairs were the grandson NA12893 with
+his grandfather and with his grandmother, whose kinships of 0.0839 and 0.0799
+are just under KING's 0.0884 for second-degree relatives, and so are
+`third-degree`.
+
+Where `parent` would die, `relatedness` decides nothing about that pair and
+goes on to the next: its `relationship` and `category` are undef and
+`undecided` says why, and `relatedness` warns once, counting such pairs. That
+is when fewer than 1,000 sites are compared, when neither has a hom-REF call
+where the other carries the ALT (as in a VCF merged without `-0`), or when one
+has no het call, which leaves `kinship` undef too. When several VCFs are
+given, `relatedness` also warns once about the pairs whose VCFs look
+sequenced over different regions, as `parent` warns about one.
+
+In scalar context `relatedness` returns a hash of hashes keyed by each sample
+and then by each other sample, so that `$r->{js}{dc}` and `$r->{dc}{js}` are
+the same pair, and the same hash: changing one changes the other. In list
+context it returns that and a hash ref of the samples. A pair's hash has these
+fields on every return:
+
+- `relationship`: as `parent` gives it (`parent-child`, `full siblings`,
+  `duplicate`, `second-degree`, `third-degree` or `unrelated`), or undef when
+  the pair is undecided.
+- `category`: the relationship named by sex, as above, or undef.
+- `parent`: the name of the one that is the parent, for a parent and child
+  where a third person says which; otherwise undef.
+- `undecided`: why the pair is undecided, or undef.
+- `kinship`: the KING-robust between-family estimate, or undef when either has
+  no het call. On `t/data/parent.vcf` it agreed with PLINK 2's
+  `--make-king-table` for all 21 pairs.
+- `ibs0_rate`: `ibs0` divided by `sites`, or undef when there are no sites.
+- `sites`: the sites compared, of which `in_both` were in both VCFs, and
+  `only`, a hash of each of the two samples, those in that sample's VCF alone.
+  With one VCF, every site is `in_both`.
+- `ibs0`, `ibs1`, `ibs2`: the sites where the two share no allele, one, or
+  both; `het_het`: those where both are het; `het`, a hash of each of the two
+  samples: its het calls at the sites compared.
+
+`parent`'s split of `ibs0`, and each one's hom-ALT count, are left out, since
+each hash of two numbers adds a third to a pair's memory; `parent` gives them
+for any one pair.
+
+The samples' hash has, for each sample, what `sex_check` returns for it
+(`sex`, `het_ratio`, `x_het`, `x_hom_alt` and the rest), and `file`, its VCF.
 
 A BCF is not read; convert it with `bcftools view -Oz`.
 

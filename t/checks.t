@@ -227,6 +227,52 @@ dies_like sub { get_best_alignment_hit(spew('twice.json', qq({"BlastOutput2":[$r
 	}
 }
 
+# ---- relatedness ------------------------------------------------------------
+
+# Added with relatedness on 2026-10-19; t/relatedness.t has the counts
+# themselves, and the errors that come from reading the files. Each case here
+# dies before any file is opened.
+{
+	my $hdr = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT";
+	my $two = spew('two.vcf', "$hdr\tA\tB\n1\t5\t.\tA\tG\t.\t.\t.\tGT\t0/1\t0/0\n");
+	my $a = spew('a.vcf', "$hdr\tA\n1\t5\t.\tA\tG\t.\t.\t.\tGT\t0/1\n");
+	my $b = spew('b.vcf', "$hdr\tB\n1\t6\t.\tA\tG\t.\t.\t.\tGT\t0/1\n");
+	my @w;
+	{
+		local $SIG{__WARN__} = sub { push @w, $_[0] };
+		is_deeply [sort keys %{ relatedness($two, report => 0) }], ['A', 'B'], 'relatedness: the arguments below differ from these only where they say';
+		is relatedness($a, $b, report => 0)->{A}{B}{sites}, 2, 'relatedness: and two own VCFs';
+	}
+	is scalar(@w), 2, 'relatedness: which are undecided, with too few sites, and say so';
+	my $none = catfile($dir, 'none.vcf');
+	my @cases = (
+		[[], qr/^relatedness: needs a VCF of several samples, or several VCFs of one/, 'nothing'],
+		[[report => 0], qr/^relatedness: needs a VCF/, 'options and no VCF'],
+		[[{ vcf => $two }], qr/^relatedness: takes name => value pairs, not a hash ref/, 'a hash ref'],
+		[[$two, 'report'], qr/^relatedness: takes name => value pairs, and was given an odd number of arguments/, 'the file and an option with no value'],
+		[[$two, depth => 7], qr/^relatedness: doesn't know "depth"; it takes max_ibs0, min_depth, report, vcf/, 'a misspelled option'],
+		[[$a, vcf => $b], qr/^relatedness: the VCFs are given either first, unnamed, or as "vcf", not both/, 'files both first and as "vcf"'],
+		[[vcf => []], qr/^relatedness: needs a VCF/, 'an empty array as "vcf"'],
+		[[vcf => { a => $a }], qr/^relatedness: "vcf" must be a file name, not a HASH ref/, 'a hash ref as "vcf"'],
+		[[vcf => [$a, undef]], qr/^relatedness: "vcf" must be a file name, not undef/, 'an undef among the files'],
+		[[vcf => [$a, \'b']], qr/^relatedness: "vcf" must be a file name, not a SCALAR ref/, 'a scalar ref among the files'],
+		[[$a, $none], qr/^relatedness: "vcf" file "\Q$none\E" doesn't exist or isn't readable/, 'a file that is not there'],
+		[[$a, $dir], qr/^relatedness: "vcf" file ".+" doesn't exist or isn't readable/, 'a directory'],
+		[[$a, spew('b.bcf', '')], qr/^relatedness: "vcf" file .+b\.bcf must end in \.vcf, \.vcf\.gz, \.vcf\.bgz or \.vcf\.bz2/, 'a BCF'],
+		[[$a, $b, $a], qr/^relatedness: "\Q$a\E" is given twice/, 'one file twice'],
+		[[$two, min_depth => -1], qr/^relatedness: "min_depth" must be a whole number, 0 or more, not "-1"/, 'min_depth -1'],
+		[[$two, min_depth => 7.5], qr/^relatedness: "min_depth" must be a whole number, 0 or more, not "7\.5"/, 'min_depth 7.5'],
+		[[$two, max_ibs0 => 0], qr/^relatedness: "max_ibs0" must be a number above 0, not "0"/, 'max_ibs0 0'],
+		[[$two, max_ibs0 => 'NaN'], qr/^relatedness: "max_ibs0" must be a number above 0, not "NaN"/, 'max_ibs0 NaN'],
+		[[$two, max_ibs0 => [0.01]], qr/^relatedness: "max_ibs0" must be a number above 0, not an ARRAY ref/, 'max_ibs0 an array ref'],
+		[[$two, report => 'yes'], qr/^relatedness: "report" must be 0 or 1, not "yes"/, 'report "yes"'],
+	);
+	foreach my $c (@cases) {
+		my ($args, $re, $name) = @{ $c };
+		dies_like sub { relatedness(@{ $args }) }, $re, "relatedness: $name dies";
+	}
+}
+
 # ---- plot_msa ---------------------------------------------------------------
 
 my %two = (fasta => { a => 'MK', b => 'MV' }, filename => catfile($dir, 'x.png'), query => 'a');
