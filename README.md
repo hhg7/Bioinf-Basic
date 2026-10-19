@@ -29,9 +29,7 @@
 # DESCRIPTION
 
 FASTA I/O in XS, BLAST hit ranking, and multiple-sequence-alignment plots and
-LaTeX tables, taken from the maintainer's `bioinf.pm`; polygenic scores
-from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex
-and whether two people are parent and child.
+LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex and whether two people are parent and child.
 
 Nothing is exported by default; ask for functions by name or with `:all`.
 Every function dies (via `Carp::croak`) on bad arguments, with a message that

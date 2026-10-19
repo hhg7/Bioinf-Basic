@@ -88,13 +88,13 @@ static bool any_space(const char *p, const char *e) {
 		uint64_t w;
 		memcpy(&w, p, 8); // not a cast to uint64_t *, since SPARC and some ARM fault on an unaligned load
 		const uint64_t sp = w ^ (ones * ' ');
-		if ((sp - ones) & ~sp & high) return TRUE;
+		if ((sp - ones) & ~sp & high) return 1;
 		if ((ones * (127 + 14) - (w & low7)) & ~w & ((w & low7) + ones * (127 - 8)) & high) return TRUE;
 	}
 	for (; p < e; p++) {
-		if (FASTA_SPACE(*p)) return TRUE;
+		if (FASTA_SPACE(*p)) return 1;
 	}
-	return FALSE;
+	return 0;
 }
 
 /*Drop the whitespace at the end of a defline, the '\r' of a CRLF file
@@ -157,7 +157,7 @@ static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 			if (bol || fed) break;
 			buf[0] = '\n';
 			n = 1;
-			fed = TRUE;
+			fed = 1;
 		}
 		const char *p = buf, *end = buf + n;
 		while (p < end) {
@@ -165,7 +165,7 @@ static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 				line++;
 				bol = FALSE;
 				if (*p == '>') {
-					in_hdr = TRUE;
+					in_hdr = 1;
 					SvCUR_set(hdr, 0);
 					p++;
 					continue;
@@ -179,7 +179,7 @@ static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 				croak("%s: %s line %" UVuf " is sequence, but no defline (\">...\") has come before it", __func__, name, line);
 			if (!nl) break;
 			p = nl + 1;
-			bol = TRUE;
+			bol = 1;
 			if (!in_hdr) continue;
 			in_hdr = FALSE;
 			chop_space(hdr);
@@ -187,10 +187,10 @@ static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 			if (seq) SvPV_shrink_to_cur(seq);
 			bool is_key = key && sv_eq(hdr, key);
 			if (key && !is_key && hv_exists_ent(out, key, 0)) {
-				done = TRUE; // the wanted record is complete
+				done = 1; // the wanted record is complete
 				break;
 			}
-			have_def = TRUE;
+			have_def = 1;
 			if (key && !is_key) {
 				seq = NULL;
 				continue;
@@ -365,7 +365,7 @@ static void vcf_format(const char *p, const char *e, size_t *gt, size_t *dp) {
 	}
 }
 
-/*What vcf_call() found.*/
+//What vcf_call() found
 enum {
 	VCF_SHALLOW, // a DP below min_depth: the genotype is not counted at all
 	VCF_NO_CALL, // missing, partly missing ("./1"), more than two alleles, or an allele the site lacks
@@ -380,7 +380,7 @@ static short int vcf_call(const vcf_reader *r, const char *p, const char *e, siz
 	const char *s, *sf;
 	if (dp != VCF_ABSENT && vcf_subfield(p, e, dp, &s, &sf) && s < sf && *s != '.') {
 		UV depth = 0;
-		bool number = TRUE;
+		bool number = 1;
 		for (; s < sf; s++) {
 			if (*s < '0' || *s > '9' || depth > (UV_MAX - 9) / 10) {
 				number = FALSE;
@@ -420,7 +420,7 @@ static void vcf_samples_end(pTHX_ const vcf_reader *r, const char *p, const char
 and its place in names, and then the reader's on_header is called.*/
 static void vcf_header(pTHX_ vcf_reader *r, const char *p, const char *e) {
 	if (r->header) croak("%s: %s line %" UVuf " is a second #CHROM line", __func__, r->name, r->line);
-	r->header = TRUE;
+	r->header = 1;
 	unsigned short int col = 0; // columns passed; the samples start after the 9th, FORMAT
 	while (p <= e && col < 9) {
 		p = vcf_field_end(p, e) + 1;
@@ -537,9 +537,9 @@ enum { SEX_X_HET, SEX_X_HOM_ALT, SEX_X_HOM_REF, SEX_X_HAPLOID, SEX_X_MISSING, SE
 static const char *const SEX_NAME[SEX_FIELDS] = { "x_het", "x_hom_alt", "x_hom_ref", "x_haploid", "x_missing", "y_called", "y_alt" };
 
 typedef struct {
-	vcf_reader r;  // first, so that the vcf_reader * that sex_header() and sex_record() are given is this
-	UV x_sites;    // non-PAR X SNVs read, for perl to say when there were none
-	UV *count;     // r.n * SEX_FIELDS counters, sample by sample
+	vcf_reader r; // first, so that the vcf_reader * that sex_header() and sex_record() are given is this
+	UV x_sites; // non-PAR X SNVs read, for perl to say when there were none
+	UV *count; // r.n * SEX_FIELDS counters, sample by sample
 } sex_tally;
 
 /*Whether pos on chrom (23 for X, 24 for Y) lies in a pseudo-autosomal
@@ -557,7 +557,7 @@ static void sex_header(pTHX_ vcf_reader *r) {
 	SAVEFREEPV(t->count); // freed at the caller's LEAVE, croak or not; see vcf_read()'s block
 }
 
-/*The record p..e.*/
+//The record p..e.*/
 static void sex_record(pTHX_ vcf_reader *r, const char *p, const char *e) {
 	sex_tally *t = (sex_tally*)r;
 	const char *f = vcf_field_end(p, e);
@@ -671,14 +671,13 @@ typedef struct {
 	parent_sites *sites; // own VCF: the file's sites
 } parent_reader;
 
-/*The code of the call in the sample field p..e: its ALT count, or
-PARENT_NONE.*/
+//The code of the call in the sample field p..e: its ALT count, or PARENT_NONE
 static unsigned short int parent_code(const vcf_reader *r, const char *p, const char *e, size_t gt, size_t dp) {
 	unsigned short int alleles, alt;
 	return vcf_call(r, p, e, gt, dp, &alleles, &alt) == VCF_CALL && alleles == 2 ? alt : PARENT_NONE;
 }
 
-/*One VCF: where the child's and the parent's columns are.*/
+//One VCF: where the child's and the parent's columns are.
 static void parent_header_one(pTHX_ vcf_reader *r) {
 	parent_reader *t = (parent_reader*)r;
 	for (unsigned short int k = 0; k < 2; k++) {
@@ -698,7 +697,7 @@ static void parent_header_one(pTHX_ vcf_reader *r) {
 	}
 }
 
-/*One VCF: the record p..e.*/
+//One VCF: the record p..e.
 static void parent_record_one(pTHX_ vcf_reader *r, const char *p, const char *e) {
 	parent_reader *t = (parent_reader*)r;
 	const char *f = vcf_field_end(p, e);
