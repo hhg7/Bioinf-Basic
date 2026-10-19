@@ -2,7 +2,7 @@
 image in any format matplotlib writes (the output file's extension picks it:
 .svg, .png, .pdf, ...).
 
-Run by Bioinf::Basic::plot_msa, plot_phylo and msa_quality_table with the Python
+Run by Cn::Bioinf::plot_msa, plot_phylo and msa_quality_table with the Python
 from Alien::Bioinf. The
 alignment drawing is ~/Scripts/HitList/scripts/x.my.align.py, cut down to what
 it uses; that script was itself derived from CIAlign (Tumescheit, Firth & Brown,
@@ -32,12 +32,12 @@ ap.add_argument('--y', default='Protein & Species', help='y-axis label')
 ap.add_argument('--s', help='JSON {label: 0-based alignment column} of vertical lines to draw')
 ap.add_argument('--l', help='JSON {tip name: label} for --tree')
 ap.add_argument('--table', help='JSON file of the table to draw instead: rows, cols, cells (null for none), vmin, vmax, log, numbers, title, cblabel')
-ap.add_argument('--c', default='Bioinf::Basic', help='Creator metadata: the script and sub that called this')
+ap.add_argument('--c', default='Cn::Bioinf', help='Creator metadata: the script and sub that called this')
 ap.add_argument('--p', help='JSON array of further provenance clauses to end the Creator with: the inputs and the commands that made them')
 ap.add_argument('--quiet', action='store_true', help="don't print 'wrote' and the output file; the caller prints its own")
 ap.add_argument('--argfile', help='a JSON array of every other argument, in place of them on the command line')
 a = ap.parse_args()
-# Bioinf::Basic passes everything through --argfile, because perl's system(LIST)
+# Cn::Bioinf passes everything through --argfile, because perl's system(LIST)
 # on Windows does not escape a '"' inside an argument, and the JSON options and
 # the Creator ("... called using \"plot_msa\" ...") are full of them.
 if a.argfile:
@@ -76,7 +76,7 @@ def save(fig, title, also=(), notes=()):
 	if not a.quiet:
 		print('wrote ' + a.o)
 
-# Bioinf::Basic writes every FASTA, newick and JSON file this reads in UTF-8, so
+# Cn::Bioinf writes every FASTA, newick and JSON file this reads in UTF-8, so
 # each is opened as UTF-8 rather than in the locale's encoding, which is cp1252
 # or the like on Windows.
 def read_fasta(path):

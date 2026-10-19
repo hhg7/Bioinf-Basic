@@ -1,4 +1,4 @@
-Revision history for Bioinf-Basic
+Revision history for Cn-Bioinf
 
 0.01 2026-09-30 CDT
 
@@ -39,8 +39,28 @@ Revision history for Bioinf-Basic
    its SHA-256, with the clustalo or blastp command that made them.
 
  - pgs_score computes a polygenic score for each sample of a VCF from a
-   PGS Catalog scoring file, both given as the data frames Stats::LikeR's
-   read_table returns, matching variants by position or by rsID. It gives
-   PLINK 2's sums (--score with no-mean-imputation), says how many
-   variants were scored, missing, or found with alleles that disagree,
-   and warns when the disagreement suggests two genome builds.
+   PGS Catalog scoring file, matching variants by position or by rsID. The
+   VCF may be a file (VCF, BCF or a PLINK 2 .pgen) or a data frame as
+   Stats::LikeR's read_table returns it, and so may the scoring file.
+   PLINK 2, which Alien::Bioinf now installs, does the scoring, so perl
+   never holds the genotypes: 1.77 million variants against a whole genome
+   took 25 s, perl peaking at 0.8 GB. It says how many variants were
+   scored, missing, or found with alleles that disagree, and warns when the
+   disagreement suggests two genome builds, or when a VCF lists only the
+   sites where its sample carries an ALT allele.
+
+ - sex_check tells each sample of a VCF (.vcf, .vcf.gz or .vcf.bz2) as
+   male or female by peddy's method: its ratio of heterozygous to
+   homozygous-ALT SNVs on X outside the pseudo-autosomal regions, male
+   below 0.6. It prints a table of each sample's sex and the counts it
+   was told from, and returns them as a hash. Perl decompresses the file
+   and XS counts it, keeping seven counters a sample, so a whole genome's
+   .vcf.gz took 4.8 s and 47 MB.
+ - parent returns 1 when two people are parent and child and 0 when not,
+   from two samples of one VCF or each person's own VCF: their IBS0 rate
+   (opposite homozygotes) must be below peddy's 0.012, and their
+   KING-robust kinship, which matches PLINK 2's, from 0.177 to 0.354. It
+   prints the counts it decided from, and returns them too in list
+   context. A site that one person's own VCF lacks is taken as hom-REF, so
+   it warns when one file has far more sites alone than the other, as an
+   exome against a genome does. Two exomes took 1.6 s.

@@ -6,7 +6,7 @@ use FindBin;
 use File::Temp qw(tempdir);
 use File::Spec::Functions qw(catfile);
 use Sys::Hostname ();
-use Bioinf::Basic qw(:all);
+use Cn::Bioinf qw(:all);
 # These run the clustalo, blastp and Python that Alien::Bioinf installed, on
 # t/data/DEG20010421.fa (see t/data/make_fixtures.pl). The clustal_view_residues
 # expectations are worked out by hand from the 2-sequence alignment below.
@@ -26,7 +26,7 @@ sub png { open my $fh, '<:raw', $_[0] or return ''; read $fh, my $b, 8; $b }
 sub slurp { open my $fh, '<:raw', $_[0] or return ''; local $/; <$fh> }
 # the Creator each image's metadata carries, its whole provenance on one line:
 # an SVG's <dc:title> in its <dc:creator>, a PNG's tEXt chunk
-sub creator { my ($sub, $by) = @_; qr/\Q$FindBin::RealScript\E called using "$sub" in .+Basic\.pm version \Q$Bioinf::Basic::VERSION\E with Alien::Bioinf [\d.]+ by user \S.* on host \Q${\ Sys::Hostname::hostname()}\E \(\Q$^O\E\) with Perl [\d.]+ \(\Q$^X\E\), drawn by $by/ }
+sub creator { my ($sub, $by) = @_; qr/\Q$FindBin::RealScript\E called using "$sub" in .+Bioinf\.pm version \Q$Cn::Bioinf::VERSION\E with Alien::Bioinf [\d.]+ by user \S.* on host \Q${\ Sys::Hostname::hostname()}\E \(\Q$^O\E\) with Perl [\d.]+ \(\Q$^X\E\), drawn by $by/ }
 my $by_py = qr/.+msa_plot\.py with Python [\d.]+\S* \(.+?\), matplotlib [\d.]+/;
 my $sha = qr/\(SHA-256 [0-9a-f]{64}\)/;
 # what _align_provenance says of an alignment of $fa, by a run of clustalo

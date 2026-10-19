@@ -3,7 +3,7 @@ use strict;
 use warnings FATAL => 'all';
 use Test::More;
 use FindBin;
-use Bioinf::Basic qw(get_best_alignment_hit);
+use Cn::Bioinf qw(get_best_alignment_hit);
 # t/data/hits.json and how it was made: see t/data/make_fixtures.pl. The
 # expected orders below are what bioinf.pm's get_best_alignment_hit returned
 # for it on 2026-09-29, as [hit id, number of the hsp chosen].

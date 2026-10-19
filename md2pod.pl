@@ -1,9 +1,9 @@
 #!/usr/bin/env perl
 
-# Regenerate the POD of lib/Bioinf/Basic.pm from README.md.
+# Regenerate the POD of lib/Cn/Bioinf.pm from README.md.
 #
 # README.md is the source of the documentation; everything after the "1;" line
-# that ends the code in lib/Bioinf/Basic.pm is replaced on every run by
+# that ends the code in lib/Cn/Bioinf.pm is replaced on every run by
 # "__END__" and the POD converted from README.md, which is also written to
 # read.me.pod for inspection. Re-run it with "perl md2pod.pl" after
 # editing README.md, from any directory, since it changes to its own first; it
@@ -31,7 +31,7 @@ use Test::Pod;
 use Test::CPAN::Changes;
 
 my $readme  = 'README.md';
-my $module  = 'lib/Bioinf/Basic.pm';
+my $module  = 'lib/Cn/Bioinf.pm';
 my $pod_out = 'read.me.pod';
 chdir $FindBin::Bin;    # the paths above are relative to the repository root
 

@@ -6,7 +6,7 @@ use warnings FATAL => 'all';
 use autodie ':default';
 use XS::Check;
 
-# Run XS::Check over Basic.xs, then the house rules below; print one line per
+# Run XS::Check over Bioinf.xs, then the house rules below; print one line per
 # finding and exit 1 if there were any.  Adapted from ~/Scripts/stats/xs.check.pl,
 # which is where the history below happened.
 #
@@ -17,7 +17,7 @@ use XS::Check;
 # unnoticed.  Two of its checks also need correcting before their findings mean
 # anything here; see decl_type() and %svpv_audited below.
 
-open my $xs, '<', 'Basic.xs';
+open my $xs, '<', 'Bioinf.xs';
 my @src = (undef, <$xs>);	# $src[$n] is line $n
 close $xs;
 
@@ -26,7 +26,7 @@ my $check = XS::Check->new(reporter => sub {
 	my %r = @_;
 	push @found, [ $r{line}, $r{message} ];
 });
-$check->check_file('Basic.xs');
+$check->check_file('Bioinf.xs');
 
 # A source line as a key: indentation and any trailing // comment removed, so
 # that re-indenting or re-wording the comment keeps an audit, and changing the
@@ -75,7 +75,7 @@ sub decl_type {
 # reason says.  Keyed by line_key(), so editing an audited line brings its
 # finding back until it is looked at again.
 #
-# None is audited here yet: every SvPV in this Basic.xs is SvPV_const,
+# None is audited here yet: every SvPV in this Bioinf.xs is SvPV_const,
 # SvPV_nolen or SvPVX, which XS::Check does not ask about.  The table that came
 # over from Stats::LikeR named that module's lines, and was emptied rather than
 # left to match an unrelated line here by accident.
@@ -105,13 +105,13 @@ for my $f (@found) {
 	}
 }
 
-# Perl_isnan/Perl_isinf/Perl_isfinite must never be called from Basic.xs: on
+# Perl_isnan/Perl_isinf/Perl_isfinite must never be called from Bioinf.xs: on
 # every perl before 5.22 they can expand to perl.h's Perl_fp_class() block,
 # which is written with an empty parameter list and compares against FP_CLASS_*
 # names <ieeefp.h> does not define.  Configure only reaches that block where it
 # fails to find isinf(), so the breakage is invisible here and fatal on
 # illumos/Solaris -- it is what stopped Stats::LikeR 0.298 building there.
-# Basic.xs needs none of them today (grid_build() tests finiteness as x - x ==
+# Bioinf.xs needs none of them today (grid_build() tests finiteness as x - x ==
 # 0); anything that does gets a width-correct wrapper, as CLAUDE.md says under
 # "Numbers must be exact".  Comments may still name the macros; only a call is
 # an error, so comments are blanked before the match -- string literals are
@@ -141,7 +141,7 @@ for my $n (1 .. $#src) {
 }
 
 for my $r (sort { $a->[0] <=> $b->[0] } @report) {
-	say "Basic.xs:$r->[0]: $r->[1]";
+	say "Bioinf.xs:$r->[0]: $r->[1]";
 }
-say scalar(@report), ' finding', (@report == 1 ? '' : 's'), ' in Basic.xs';
+say scalar(@report), ' finding', (@report == 1 ? '' : 's'), ' in Bioinf.xs';
 exit(@report ? 1 : 0);

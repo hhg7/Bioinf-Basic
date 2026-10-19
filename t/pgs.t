@@ -4,7 +4,12 @@ use warnings FATAL => 'all';
 use Test::More;
 use FindBin;
 use Storable qw(dclone);
-use Bioinf::Basic qw(pgs_score);
+use File::Temp qw(tempdir);
+use File::Spec::Functions qw(catfile);
+use IO::Compress::Gzip qw(gzip $GzipError);
+use Cn::Bioinf qw(pgs_score);
+plan skip_all => 'pgs_score runs PLINK 2, which Alien::Bioinf installs, and it is not installed here'
+	unless eval { require Alien::Bioinf; -x Alien::Bioinf->plink2 };
 # t/data/pgs.vcf and t/data/pgs_weights.txt were written by hand on
 # 2026-10-17, the weights in the layout of the PGS Catalog's PGS000138.txt.gz
 # (format 2.0). Between them they hold an effect allele that is the ALT, one
@@ -35,6 +40,11 @@ use Bioinf::Basic qw(pgs_score);
 # that pgs_score does; and it doesn't check the other allele, which agrees
 # with the VCF's wherever the effect allele does in this fixture. The scores
 # for matching by ID, and the cases built in this file, were counted by hand.
+#
+# Since 2026-10-17 pgs_score has PLINK 2 (Alien::Bioinf's v2.0.0-a.7.13LM, of
+# 15 Oct 2026) do the scoring, and the values above check that it hands PLINK
+# 2 the right records and alleles. Where PLINK 2's counting differs from a
+# count by hand -- a haploid call on X -- the case says so.
 
 # The fixtures, as Stats::LikeR's read_table returns them: the VCF as a hash of
 # hashes keyed by CHROM:POS:REF:ALT, with each sample's column split into
@@ -130,6 +140,26 @@ score_is pgs_score(vcf => hoa(\@vcf_rows, \@vcf_cols), weights => hoa($weights, 
 score_is pgs_score(vcf => aoa(\@vcf_rows, \@vcf_cols), weights => aoa($weights, \@weight_cols)), $plink, 'aoa';
 score_is pgs_score(vcf => $vcf, weights => { map { $_->{rsID} => $_ } @{ $weights } }), $plink, 'hoh weights';
 
+# ---- files -----------------------------------------------------------------------
+
+{
+	my $dir = tempdir(CLEANUP => 1);
+	my ($vcf_file, $weights_file) = map { "$FindBin::Bin/data/$_" } 'pgs.vcf', 'pgs_weights.txt';
+	score_is pgs_score(vcf => $vcf_file, weights => $weights_file), $plink, 'a VCF file and a scoring file';
+	my $gz = catfile($dir, 'pgs_weights.txt.gz');
+	gzip($weights_file => $gz) or die "gzip: $GzipError";
+	score_is pgs_score(vcf => $vcf, weights => $gz), $plink, 'a gzipped scoring file';
+	# a PLINK 2 fileset, made by PLINK 2 itself, its output kept off the TAP
+	my $prefix = catfile($dir, 'pgs');
+	open my $saved, '>&', \*STDOUT or die $!;
+	open STDOUT, '>', catfile($dir, 'plink2.out') or die $!;
+	my $rc = system(Alien::Bioinf->plink2, '--vcf', $vcf_file, '--make-pgen', '--out', $prefix);
+	open STDOUT, '>&', $saved or die $!;
+	is $rc, 0, 'PLINK 2 made a .pgen of the fixture';
+	score_is pgs_score(vcf => "$prefix.pgen", weights => $weights_file), $plink, 'a PLINK 2 .pgen';
+	score_is pgs_score(vcf => $vcf_file, weights => $weights_file, memory => 640, threads => 1), $plink, 'memory and threads';
+}
+
 # ---- matching by ID -----------------------------------------------------------
 
 # rs1, rs2 and rs3 are scored as by position; rs4's alleles disagree; rs5's
@@ -191,14 +221,23 @@ score_is pgs_score(vcf => $vcf, weights => $weights, match => 'id'), {
 		d => { CHROM => 'chr1', POS => 40, ID => '.', REF => 'C', ALT => '.', 'M.GT' => '0/0', 'F.GT' => '0/0' },
 		e => { CHROM => 'chr1', POS => 50, ID => '.', REF => 'C', ALT => '.', 'M.GT' => '0/0', 'F.GT' => '.' },
 	};
-	# M: 1 copy of T at X:10, a missing call at X:20, 1 copy of A at MT:30, 2 of
-	# C at 1:40 and none of T at 1:50, from 1 + 1 + 2 + 2 alleles.
+	# PLINK 2 reads X only once told the build (here hg19, whose
+	# pseudo-autosomal region 1 starts at 60,001, after both of these), and
+	# then counts a haploid call on X of a sample of unknown sex, as every
+	# sample is here, as homozygous: 2 copies and 2 alleles. On MT it is 1 of each.
+	# M: 2 copies of T at X:10, a missing call at X:20, 1 copy of A at MT:30, 2
+	# of C at 1:40 and none of T at 1:50, from 2 + 1 + 2 + 2 alleles.
 	# F: 2 copies of T, 1 of C at X:20, no GT at MT:30, 2 of C at 1:40, and a
 	# missing call at 1:50, from 2 + 2 + 2 alleles.
-	score_is pgs_score(vcf => $v, weights => $w), {
-		M => { alleles => 6, average => 2101 / 6, mismatched => 0, missing => 1, score => 2101, variants => 4 },
+	score_is pgs_score(vcf => $v, weights => $w, build => 'hg19'), {
+		M => { alleles => 7, average => 2102 / 7, mismatched => 0, missing => 1, score => 2102, variants => 4 },
 		F => { alleles => 6, average => 2012 / 6, mismatched => 0, missing => 2, score => 2012, variants => 3 },
 	}, 'haploid calls, part calls, no GT, records with no ALT, and chromosome names';
+	{
+		local $@;
+		ok !eval { pgs_score(vcf => $v, weights => $w); 1 }, 'without "build", variants on X die';
+		like $@, qr/^pgs_score: "weights" has variants on X, which PLINK 2 reads only when "build" says where/, 'and say why';
+	}
 	my $none = { a => { CHROM => '1', POS => 40, ID => '.', REF => 'C', ALT => 'T', 'N.GT' => './.' } };
 	score_is pgs_score(vcf => $none, weights => [$w->[3]]), {
 		N => { alleles => 0, average => undef, mismatched => 0, missing => 1, score => 0, variants => 0 },

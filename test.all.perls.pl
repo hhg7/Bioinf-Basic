@@ -1,18 +1,18 @@
 #!/usr/bin/env perl
-# test.all.perls.pl - build & test Bioinf::Basic against every perlbrew perl.
+# test.all.perls.pl - build & test Cn::Bioinf against every perlbrew perl.
 #
 # Adapted on 2026-09-30 from ~/Scripts/stats/test.all.perls.pl, which does the
 # same for Stats::LikeR; a fix to the shared machinery (discovery, the private
 # trees, the fork/reap loop, the summary) belongs in both copies.  What differs:
 #
-#   * Bioinf::Basic needs Alien::Bioinf, the sibling distribution in
+#   * Cn::Bioinf needs Alien::Bioinf, the sibling distribution in
 #     alien/Alien-Bioinf, and every perl has its own site_perl to install it
 #     into.  So, as compile.sh does, a perl that cannot load Alien::Bioinf gets
 #     it installed with cpanm first (see the 'alien' step in build_one).
 #   * The x87 row, the quadmath-first run order and the 32-bit-IV advice are
 #     gone.  They exist in Stats::LikeR because its XS does floating-point
 #     arithmetic whose result depends on how wide an NV is and how it is
-#     computed; Basic.xs does none, so those axes have nothing to catch here.
+#     computed; Bioinf.xs does none, so those axes have nothing to catch here.
 #
 # Automates the manual loop of:
 #     perlbrew use perl-5.10.1 && ./compile.sh
@@ -25,8 +25,8 @@
 # end.  Exit status is non-zero if any version failed.
 #
 # By default four perls are built at once (-P 4).  They cannot share the
-# distribution root: there is one Makefile, one Basic.c, one Basic.o and one
-# blib, and a Basic.o built by another perl links without complaint and then
+# distribution root: there is one Makefile, one Bioinf.c, one Bioinf.o and one
+# blib, and a Bioinf.o built by another perl links without complaint and then
 # dies at load.  So each parallel child builds in a private copy of the tree
 # under the log directory and reports its result back to the parent, which
 # leaves the root's Makefile and blib exactly as they were.  Nothing forces
@@ -226,7 +226,7 @@ die "$0: no perls found in $perls_dir\n" unless @targets;
 #
 # ivsize decides nothing about the run order.  It is reported because
 # 5.44.0-i686 is a 32-bit perl, the only one here where STRLEN and SSize_t --
-# what Basic.xs's FASTA reader and writer count lengths in -- are 32 bits wide,
+# what Bioinf.xs's FASTA reader and writer count lengths in -- are 32 bits wide,
 # and the label makes that row look different.  It is also not plain, so it is
 # never the build a serial run leaves the tree standing on.
 my %facts;
@@ -383,15 +383,15 @@ sub cpanm_for {
 
 # What must not be copied into a private build tree: the build products of
 # whichever perl last used the source tree (copying them would recreate exactly
-# the stale-Basic.o hazard the private trees exist to avoid), the repository, a
+# the stale-Bioinf.o hazard the private trees exist to avoid), the repository, a
 # dzil build directory, and the log/work tree itself.  The names are
 # .gitignore's, which also covers alien/Alien-Bioinf: its _alien/ holds
 # Alien::Build's state for the perl that last built it, and reusing that state
 # under another perl is the same hazard one level down.
 my %SKIP_DIR  = map { $_ => 1 } qw(.git .build blib _alien);
-my @SKIP_FILE = (qr/\.(?:o|a|so|bs|dylib|dll)$/, qr/^Basic\.c$/,
+my @SKIP_FILE = (qr/\.(?:o|a|so|bs|dylib|dll)$/, qr/^Bioinf\.c$/,
 	qr/^Makefile(?:\.old)?$/, qr/^pm_to_blib$/, qr/^blibdirs$/,
-	qr/^MYMETA\./, qr/^Bioinf-Basic-.*\.tar\.gz$/);
+	qr/^MYMETA\./, qr/^Cn-Bioinf-.*\.tar\.gz$/);
 
 sub copy_tree {
 	my ($src, $dst) = @_;
@@ -403,7 +403,7 @@ sub copy_tree {
 		my $s = File::Spec->catfile($src, $e);
 		my $d = File::Spec->catfile($dst, $e);
 		if (-d $s) {
-			next if $SKIP_DIR{$e} || $e =~ /^Bioinf-Basic-[\d.]+$/;
+			next if $SKIP_DIR{$e} || $e =~ /^Cn-Bioinf-[\d.]+$/;
 			# a --log-dir inside the tree would copy itself forever
 			my $abs = File::Spec->rel2abs($s);
 			next if $abs eq $work_root || $abs eq $log_dir;

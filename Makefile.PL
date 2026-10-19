@@ -8,7 +8,7 @@ use File::Spec ();
 
 install_share dist => 'share';
 
-# Basic.xs declares variables in for() and after statements, which is C99. The
+# Bioinf.xs declares variables in for() and after statements, which is C99. The
 # flag that asks for it is per-vendor and cannot be told from $Config{cc}
 # (that is plain "cc" for Solaris Studio and HP-UX aCC), so each candidate is
 # trial-compiled -- the same probe as ~/Scripts/stats. MSVC needs none and
@@ -30,9 +30,9 @@ unless ($Config{cc} =~ /(?:^|[\/\\])cl(?:\.exe)?$/i) {
 }
 
 WriteMakefile(
-	NAME             => 'Bioinf::Basic',
-	DISTNAME         => 'Bioinf-Basic',
-	VERSION_FROM     => 'lib/Bioinf/Basic.pm',
+	NAME             => 'Cn::Bioinf',
+	DISTNAME         => 'Cn-Bioinf',
+	VERSION_FROM     => 'lib/Cn/Bioinf.pm',
 	ABSTRACT         => 'FASTA I/O in XS, BLAST hit ranking, and alignment plots and tables', # the POD has no NAME section; PodWeaver makes one from '# ABSTRACT:'
 	AUTHOR           => 'David E. Condon <dcondon@uidaho.edu>',
 	LICENSE          => 'perl_5',

@@ -6,7 +6,7 @@ use File::Temp qw(tempdir);
 use File::Spec;
 use File::Spec::Functions qw(catfile);
 use IO::Compress::Gzip ();
-use Bioinf::Basic qw(fasta2hash hash2fasta_file);
+use Cn::Bioinf qw(fasta2hash hash2fasta_file);
 # The expected values are what bioinf.pm's pure-perl fasta2hash and
 # hash2fasta_file returned for the same input (checked 2026-09-29), except
 # where a case says the XS deliberately differs. Those for whitespace are what
@@ -63,7 +63,7 @@ is fasta2hash($ws, 'x'), 'ACGTAC', 'so a defline with a trailing space is found 
 # start of a defline's name
 is fasta2hash(spew('tab.fa', ">x\nAC\tGT\n"), 'x'), 'ACGT', 'a tab inside a line is dropped too';
 is_deeply fasta2hash(spew('lead-ws.fa', " \t\r\n>x\nA\n")), { x => 'A' }, 'a line of whitespace before the first defline is allowed';
-# Every byte but "\n" at each place 1 to 19 of a 20-byte line, which Basic.xs
+# Every byte but "\n" at each place 1 to 19 of a 20-byte line, which Bioinf.xs
 # reads as two 8-byte words and a 4-byte tail: its 8-bytes-at-once test for
 # whitespace must drop " ", "\t", "\r", "\f" and "\x0b", as Python's
 # str.split() would, and keep every other byte.
@@ -86,7 +86,7 @@ like $@, qr/couldn't find any sequences/, 'an empty file dies';
 eval { fasta2hash(catfile($dir, 'nope.fa')) };
 like $@, qr/doesn't exist or isn't a readable file/, 'a missing file dies';
 
-# A record that straddles Basic.xs's 64 KiB read blocks. ">x\r\n" is 4 bytes,
+# A record that straddles Bioinf.xs's 64 KiB read blocks. ">x\r\n" is 4 bytes,
 # so 65531 residues put the "\r" at byte 65535, the last of the first block,
 # and its "\n" first in the second: the "\r" has to be chopped after the fact.
 my $long = 'A' x 65531;

@@ -1,5 +1,6 @@
 package Alien::Bioinf;
-# Module-local Clustal Omega, NCBI BLAST+ and a Python venv for Bioinf::Basic.
+# Module-local Clustal Omega, NCBI BLAST+, PLINK 2 and a Python venv for
+# Cn::Bioinf.
 #
 # Where each tool comes from, as checked on 2026-09-29:
 #
@@ -16,6 +17,18 @@ package Alien::Bioinf;
 #              (the upstream repository; 1.2.4 was the newest) and it is built
 #              from that tag's tarball against argtable2-13, the release
 #              clustalo's configure asks for, fetched from SourceForge.
+#   PLINK 2    https://www.cog-genomics.org/plink/2.0/ (added 2026-10-17), the
+#              zips in the page's stable column, which link to
+#              s3.amazonaws.com/plink2-assets/alpha<n>/plink2_<platform>_<date>.zip:
+#              alpha 7.13 of 15 Oct 2026 was current. Each zip holds plink2,
+#              vcf_subset and Intel's licence; only plink2 is kept. Nothing on
+#              the page gives a checksum, so the zip is checked only by
+#              unpacking it and by the build date plink2 --version reports.
+#              The builds are linux_x86_64 and linux_i686, mac and mac_arm64,
+#              and win64 and win32; there is none for Linux on aarch64. The
+#              AVX2 builds are faster but stop on a CPU without AVX2, so the
+#              plain ones are used. A version such as 2.0.0-a.7.13 doesn't
+#              compare as a number, so the build date stands for it.
 #   Python     Alien::CPython3 supplies the interpreter; a venv on top of it
 #              gets numpy, matplotlib, adjustText and biopython -- what
 #              share/msa_plot.py and Matplotlib::Simple import -- and their
@@ -51,12 +64,13 @@ our $VERSION = '0.01';
 my @PY_PACKAGES = qw(numpy matplotlib adjustText biopython);
 # the name each of @PY_PACKAGES is imported by, where that is not its PyPI name
 my %PY_IMPORT = (biopython => 'Bio');
-my @TOOLS = qw(clustalo blast python python-packages);
+my @TOOLS = qw(clustalo blast plink2 python python-packages);
 my $BLAST_URL = 'https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/LATEST/';
 my $CLUSTAL_URL = 'https://www.clustal.org/omega/';
 my $CLUSTAL_GIT = 'https://api.github.com/repos/GSLBiotech/clustal-omega/tags';
 my $ARGTABLE_URL = 'https://downloads.sourceforge.net/project/argtable/argtable/argtable-2.13/argtable2-13.tar.gz';
 my $PY_URL = 'https://www.python.org/api/v2/downloads/release/?is_published=true&pre_release=false';
+my $PLINK2_URL = 'https://www.cog-genomics.org/plink/2.0/';
 my $WIN = $^O eq 'MSWin32';
 my $EXE = $WIN ? '.exe' : '';
 
@@ -73,9 +87,12 @@ sub blast {
 	catfile($c->_root($root), 'blast', $c->_ver('blast', $root), 'bin', ($prog // 'blastp') . $EXE);
 }
 
+sub plink2 { my ($c, $root) = @_; catfile($c->_root($root), 'plink2', $c->_ver('plink2', $root), 'bin', "plink2$EXE") }
+
 sub python { my ($c, $root) = @_; catfile($c->_root($root), 'venv', $WIN ? ('Scripts', 'python.exe') : ('bin', 'python')) }
 
-sub bin_dir { my $c = shift; map { dirname($_) } $c->clustalo, $c->blast, $c->python }
+# plink2 only where it was installed, which it is not where PLINK 2 has no build
+sub bin_dir { my $c = shift; map { dirname($_) } $c->clustalo, $c->blast, ($c->versions->{plink2} ? $c->plink2 : ()), $c->python }
 
 sub versions { my ($c, $root) = @_; my $s = $c->_state($root); +{ map { $_ => $s->{$_}{version} } keys %{ $s } } }
 
@@ -137,6 +154,7 @@ sub latest {
 	my ($c, $tool) = @_;
 	return _blast_latest() if $tool eq 'blast';
 	return _clustalo_latest() if $tool eq 'clustalo';
+	return _plink2_latest() if $tool eq 'plink2';
 	if ($tool eq 'python') {
 		require JSON::PP;
 		my ($v) = sort { _vcmp($b, $a) } map { $_->{name} =~ /^Python (3\.\d+\.\d+)$/ ? $1 : () } @{ JSON::PP::decode_json(_get($PY_URL)) };
@@ -197,6 +215,12 @@ sub install {
 		remove_tree(catdir($root, 'clustalo', $l->{version}));
 		_local_copy('clustalo', $l->{version}, $bin, 0) or ($l->{url} ? _clustalo_binary($l, $bin) : _clustalo_source($l, $bin));
 		$c->_save($root, clustalo => $l->{version});
+	} elsif ($tool eq 'plink2') {
+		my $l = _plink2_latest();
+		my $bin = catdir($root, 'plink2', $l->{version}, 'bin');
+		remove_tree(catdir($root, 'plink2', $l->{version}));
+		_local_copy('plink2', $l->{version}, $bin, 0) or _plink2_unpack($l, $bin);
+		$c->_save($root, plink2 => $l->{version});
 	} elsif ($tool eq 'python') {
 		my $venv = catdir($root, 'venv');
 		_run(_base_python(), '-m', 'venv', $venv);
@@ -207,7 +231,7 @@ sub install {
 		_run($py, '-I', '-c', _py_imports());
 		$c->_save($root, python => _line($py, '-c', 'import platform; print(platform.python_version())'));
 	} else {
-		croak "install() knows blast, clustalo and python, not \"$tool\"";
+		croak "install() knows blast, clustalo, plink2 and python, not \"$tool\"";
 	}
 }
 
@@ -268,24 +292,26 @@ sub _base_python {
 sub _base_python_version { _line(_base_python(), '-c', 'import platform; print(platform.python_version())') }
 
 # A copy of $prog already on this machine at exactly $version, copied into
-# $bin instead of downloading. ALIEN_BIOINF_CLUSTALO / ALIEN_BIOINF_BLAST name
-# one explicitly (the clustalo binary itself, or BLAST's bin directory); failing
-# that, PATH is searched. BLAST is a directory of ~30 programs, so a PATH hit is
-# only copied from a directory that is plainly an unpacked NCBI tarball
-# (.../ncbi-blast-<v>+/bin) -- never, say, all of /usr/bin.
+# $bin instead of downloading. ALIEN_BIOINF_CLUSTALO / ALIEN_BIOINF_BLAST /
+# ALIEN_BIOINF_PLINK2 name one explicitly (the clustalo or plink2 binary itself,
+# or BLAST's bin directory); failing that, PATH is searched. BLAST is a
+# directory of ~30 programs, so a PATH hit is only copied from a directory that
+# is plainly an unpacked NCBI tarball (.../ncbi-blast-<v>+/bin) -- never, say,
+# all of /usr/bin. A plink2's version is its build date, as _plink2_date reads it.
+my %LOCAL_ENV = (blastp => 'ALIEN_BIOINF_BLAST', clustalo => 'ALIEN_BIOINF_CLUSTALO', plink2 => 'ALIEN_BIOINF_PLINK2');
 sub _local_copy {
 	my ($prog, $version, $bin, $whole_dir) = @_;
-	my $env = $ENV{ $prog eq 'blastp' ? 'ALIEN_BIOINF_BLAST' : 'ALIEN_BIOINF_CLUSTALO' };
+	my $env = $ENV{ $LOCAL_ENV{$prog} };
 	my @cand = defined $env ? ($whole_dir ? catfile($env, "$prog$EXE") : $env) : ();
 	push @cand, map { catfile($_, "$prog$EXE") } File::Spec->path unless @cand;
 	foreach my $exe (grep { -f $_ && -x _ } @cand) {
 		next if $whole_dir && !defined $env && dirname($exe) !~ /ncbi-blast-\Q$version\E\+[\/\\]bin\z/;
 		my $out = eval { _run_out($exe, $prog eq 'blastp' ? '-version' : '--version') } // next;
-		next unless $out =~ /^\s*(?:blastp:\s*)?\Q$version\E\+?\s*$/m;
+		next unless $prog eq 'plink2' ? (_plink2_date($out) // '') eq $version : $out =~ /^\s*(?:blastp:\s*)?\Q$version\E\+?\s*$/m;
 		make_path($bin);
 		my @files = $whole_dir ? _dir_files(dirname($exe)) : ($exe);
 		foreach my $f (@files) {
-			my $to = catfile($bin, $whole_dir ? basename($f) : "clustalo$EXE");
+			my $to = catfile($bin, $whole_dir ? basename($f) : "$prog$EXE");
 			copy($f, $to) or croak "copy $f: $!";
 			chmod 0755, $to;
 		}
@@ -422,6 +448,73 @@ sub _clustalo_source {
 	chmod 0755, catfile($bin, 'clustalo');
 }
 
+# The platform in the name of PLINK 2's zip for this machine, or undef where it
+# publishes none.
+sub _plink2_platform {
+	my $cpu = _cpu();
+	my %p = (linux => { x64 => 'linux_x86_64', x86 => 'linux_i686' },
+		darwin => { x64 => 'mac', aarch64 => 'mac_arm64' },
+		MSWin32 => { x64 => 'win64', x86 => 'win32' });
+	$p{$^O}{$cpu};
+}
+
+my %MONTH = (Jan => 1, Feb => 2, Mar => 3, Apr => 4, May => 5, Jun => 6, Jul => 7, Aug => 8, Sep => 9, Oct => 10, Nov => 11, Dec => 12);
+
+# The build date in plink2 --version's "PLINK v2.0.0-a.7.13LM 64-bit Intel (15
+# Oct 2026)", as 20261015, which is how its zips are named; undef if there is none.
+sub _plink2_date {
+	my ($out) = @_;
+	$out =~ /^PLINK v2\S* .*\((\d{1,2}) ([A-Z][a-z]{2}) (\d{4})\)/m && $MONTH{$2} or return undef;
+	sprintf '%04d%02d%02d', $3, $MONTH{$2}, $1;
+}
+
+# The newest zip in the stable column of $PLINK2_URL for this platform. Where
+# there is none, a plink2 named by ALIEN_BIOINF_PLINK2 is used at whatever
+# build it is.
+sub _plink2_latest {
+	my $plat = _plink2_platform();
+	unless (defined $plat) {
+		my $exe = $ENV{ALIEN_BIOINF_PLINK2}
+			// croak "PLINK 2 publishes no build for $^O/" . _cpu() . "; set ALIEN_BIOINF_PLINK2 to a plink2 built here";
+		my $date = _plink2_date(_run_out($exe, '--version')) // croak "$exe --version gives no build date";
+		return { version => $date };
+	}
+	my $page = _get($PLINK2_URL);
+	my ($best, $url);
+	while ($page =~ m{href="(https://s3\.amazonaws\.com/plink2-assets/alpha\d+/plink2_\Q$plat\E_(\d{8})\.zip)"}g) {
+		($best, $url) = ($2, $1) if !defined $best || $2 > $best;
+	}
+	defined $best or croak "no plink2_${plat}_<date>.zip in the stable column of $PLINK2_URL";
+	{ version => $best, url => $url, file => basename($url) };
+}
+
+sub _plink2_unpack {
+	my ($l, $bin) = @_;
+	my $zip = _fetch($l->{url}, $l->{file});
+	require IO::Uncompress::Unzip;
+	my $z = IO::Uncompress::Unzip->new($zip) or croak "can't read $zip: $IO::Uncompress::Unzip::UnzipError";
+	my $to = catfile($bin, "plink2$EXE");
+	make_path($bin);
+	my $status = 1;
+	while ($status > 0) {
+		if ($z->getHeaderInfo->{Name} eq "plink2$EXE") {
+			open my $fh, '>:raw', $to or croak "$to: $!";
+			my $buf;
+			while (($status = $z->read($buf)) > 0) {
+				print {$fh} $buf;
+			}
+			croak "can't unzip plink2$EXE from $zip: $IO::Uncompress::Unzip::UnzipError" if $status < 0;
+			close $fh or croak "$to: $!";
+		}
+		$status = $z->nextStream;
+	}
+	croak "can't read $zip: $IO::Uncompress::Unzip::UnzipError" if $status < 0;
+	-s $to or croak "$zip had no plink2$EXE";
+	chmod 0755, $to;
+	my $date = _plink2_date(_run_out($to, '--version')) // '';
+	$date eq $l->{version} or croak "$to reports build date \"$date\", not $l->{version}, as $l->{file} is named";
+}
+
 # ---- helpers ----------------------------------------------------------------
 
 # x64, aarch64, x86 or other. $Config{archname} says nothing about the CPU on
@@ -510,13 +603,14 @@ __END__
 
 =head1 NAME
 
-Alien::Bioinf - module-local Clustal Omega, NCBI BLAST+ and Python for Bioinf::Basic
+Alien::Bioinf - module-local Clustal Omega, NCBI BLAST+, PLINK 2 and Python for Cn::Bioinf
 
 =head1 SYNOPSIS
 
  use Alien::Bioinf;
  system Alien::Bioinf->clustalo, '--in', 'seqs.fa', '--out', 'aln.fa';
  system Alien::Bioinf->blast('blastp'), '-query', 'q.fa', '-subject', 's.fa';
+ system Alien::Bioinf->plink2, '--vcf', 'calls.vcf.gz', '--make-pgen', '--out', 'calls';
  system Alien::Bioinf->python, 'script.py';
 
  my $behind = Alien::Bioinf->check_updates;          # every tool
@@ -529,17 +623,21 @@ From the shell:
 
 =head1 DESCRIPTION
 
-Installing this distribution puts the newest Clustal Omega and BLAST+ for the
-running operating system, and a Python venv holding numpy, matplotlib,
+Installing this distribution puts the newest Clustal Omega, BLAST+ and PLINK 2
+for the running operating system, and a Python venv holding numpy, matplotlib,
 adjustText and Biopython, into its own share directory. None of it touches PATH.
+PLINK 2 publishes no build for Linux on aarch64, so there it is left out, with
+a warning, unless C<ALIEN_BIOINF_PLINK2> names a plink2 built there.
 
 =head2 Nothing is downloaded twice
 
 Downloads are kept in L</cache_dir> and reused from there by later installs
-and updates. Before downloading clustalo or BLAST, the installer looks for a
-copy already on the machine at the version it wants and copies that instead:
-C<ALIEN_BIOINF_CLUSTALO> may name a clustalo binary and C<ALIEN_BIOINF_BLAST>
-the C<bin> directory of an unpacked BLAST+, and otherwise C<PATH> is searched.
+and updates. Before downloading clustalo, BLAST or PLINK 2, the installer looks
+for a copy already on the machine at the version it wants and copies that
+instead: C<ALIEN_BIOINF_CLUSTALO> may name a clustalo binary,
+C<ALIEN_BIOINF_PLINK2> a plink2 binary, and C<ALIEN_BIOINF_BLAST> the C<bin>
+directory of an unpacked BLAST+, and otherwise C<PATH> is searched. PLINK 2's
+version is its build date, such as C<20261015>.
 pip reuses the wheels in its own cache. The venv does not see the base
 interpreter's packages, so a change to those cannot break it.
 
@@ -549,9 +647,10 @@ Setting C<ALIEN_INSTALL_NETWORK> to 0 stops every download, pip's included.
 
 =over
 
-=item clustalo, blast($program), python
+=item clustalo, blast($program), plink2, python
 
 Full paths to the installed programs. C<blast> defaults to C<blastp>.
+C<plink2> dies where PLINK 2 was not installed.
 
 =item versions
 
@@ -559,8 +658,8 @@ A hash reference of tool => installed version.
 
 =item check_updates(@tools)
 
-For each of C<clustalo>, C<blast>, C<python> and C<python-packages> (all four
-by default), what is installed and what the upstream site offers. Each tool
+For each of C<clustalo>, C<blast>, C<plink2>, C<python> and C<python-packages>
+(all five by default), what is installed and what the upstream site offers. Each tool
 maps to C<< { installed, latest, update } >>; C<python-packages> maps each
 outdated package to the same.
 
@@ -572,7 +671,7 @@ L<Alien::CPython3> first, since a venv cannot change interpreter.
 
 =item latest($tool)
 
-The newest upstream version of C<clustalo>, C<blast> or C<python>.
+The newest upstream version of C<clustalo>, C<blast>, C<plink2> or C<python>.
 
 =item cache_dir
 

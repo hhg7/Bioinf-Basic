@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the Bioinf-Basic release tarball, for inspection before `dzil release`.
+# Build the Cn-Bioinf release tarball, for inspection before `dzil release`.
 #
 # Adapted on 2026-10-05 from ~/Scripts/stats/dzil.sh (commit a7869a7 there),
 # which does the same for Stats-LikeR. This copy also fails, rather than only
@@ -12,19 +12,19 @@ cd "$(dirname "$0")"
 perl md2pod.pl
 # [Git::GatherDir] takes only what is committed, so the regenerated POD has to
 # be committed before the build sees it. -a commits every tracked file that has
-# changed, not only lib/Bioinf/Basic.pm, and never adds untracked ones (-A
+# changed, not only lib/Cn/Bioinf.pm, and never adds untracked ones (-A
 # would); `|| true` because there is nothing to commit when the POD is current.
 git commit -am "Update generated docs" || true
 dzil clean
 dzil build
-tarball=$(ls Bioinf-Basic-*.tar.gz)
+tarball=$(ls Cn-Bioinf-*.tar.gz)
 echo "==== $tarball ===="
 tar tzf "$tarball"
 # Products of compile.sh and of make (see .gitignore), coverage data, and a
-# nested Bioinf-Basic-*/ from an earlier build gathered into this one. Each
+# nested Cn-Bioinf-*/ from an earlier build gathered into this one. Each
 # entry is <dist>-<version>/<path>, so the first component is stripped first.
 if tar tzf "$tarball" | sed 's|^[^/]*/||' |
-	grep -E '\.(c|o|obj|bs|dll|so|gcda|gcno)$|(^|/)(blib|_alien|\.build|cover_db|Bioinf-Basic-[^/]*)/|(^|/)(pm_to_blib|MYMETA\.[a-z]+)$'
+	grep -E '\.(c|o|obj|bs|dll|so|gcda|gcno)$|(^|/)(blib|_alien|\.build|cover_db|Cn-Bioinf-[^/]*)/|(^|/)(pm_to_blib|MYMETA\.[a-z]+)$'
 then
 	echo "dzil.sh: the build products above are in $tarball; it is not fit to release" >&2
 	exit 1

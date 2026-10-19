@@ -12,6 +12,16 @@ my $v = Alien::Bioinf->versions;
 ok defined $v->{$_}, "$_ has a recorded version" foreach qw(clustalo blast python);
 run_ok([Alien::Bioinf->clustalo, '--version'])->success->out_like(qr/^\Q$v->{clustalo}\E\s*$/);
 run_ok([Alien::Bioinf->blast('blastp'), '-version'])->success->out_like(qr/blastp: \Q$v->{blast}\E\+/);
+SKIP: {
+	skip "PLINK 2 has no build for $^O on this CPU, and none was given in ALIEN_BIOINF_PLINK2", 2
+		unless defined $v->{plink2} || defined Alien::Bioinf::_plink2_platform() || defined $ENV{ALIEN_BIOINF_PLINK2};
+	like $v->{plink2} // '', qr/\A20[0-9]{6}\z/, 'plink2 has a recorded build date';
+	run_ok([Alien::Bioinf->plink2, '--version'])->success->out_like(qr/^PLINK v2\S* .*\(\d{1,2} [A-Z][a-z]{2} \d{4}\)/);
+}
+# the build date of PLINK v2.0.0-a.7.13LM, downloaded on 2026-10-17
+is Alien::Bioinf::_plink2_date("PLINK v2.0.0-a.7.13LM 64-bit Intel (15 Oct 2026)\n"), '20261015', '_plink2_date reads plink2 --version';
+is Alien::Bioinf::_plink2_date("PLINK v2.0.0-a.6.9LM 64-bit Intel (5 Jan 2025)\n"), '20250105', 'and pads a one-digit day';
+is Alien::Bioinf::_plink2_date('vcf_subset v1.1.0 64-bit (16 May 2026)'), undef, 'and gives undef for anything else';
 run_ok([Alien::Bioinf->python, '-c', 'import numpy, matplotlib, adjustText, Bio; import platform; print(platform.python_version())'])
 	->success->out_like(qr/^\Q$v->{python}\E\s*$/);
 # Up to 0.01 the venv was checked with "import biopython", which always fails

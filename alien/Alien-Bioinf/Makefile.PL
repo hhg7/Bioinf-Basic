@@ -27,7 +27,7 @@ WriteMakefile($abmm->mm_args(
 	BUILD_REQUIRES   => { 'Alien::CPython3' => '0' },
 	PREREQ_PM        => {
 		'Alien::Base' => '0', 'Alien::CPython3' => '0', 'Archive::Tar' => '0', 'Capture::Tiny' => '0',
-		'Digest::MD5' => '0', 'HTTP::Tiny' => '0.014', 'IO::Socket::SSL' => '1.56', 'JSON::PP' => '0',
+		'Digest::MD5' => '0', 'HTTP::Tiny' => '0.014', 'IO::Uncompress::Unzip' => '0', 'IO::Socket::SSL' => '1.56', 'JSON::PP' => '0',
 		'Net::SSLeay' => '1.49', 'parent' => '0',
 	},
 	TEST_REQUIRES    => { 'Test::More' => '0.88', 'Test::Alien' => '0' },

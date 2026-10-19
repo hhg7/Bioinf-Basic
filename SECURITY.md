@@ -5,13 +5,13 @@
 Please report security issues privately, by email to dcondon@uidaho.edu,
 rather than by opening an issue on the GitHub tracker, which is public.
 
-It helps if you can include the version of Bioinf::Basic and of
+It helps if you can include the version of Cn::Bioinf and of
 Alien::Bioinf, the output of `perl -V` (or at least `ivsize`, `useithreads`
 and `cc` — the FASTA reader is C, and a memory bug there is often specific to
 a platform or a compiler), and a short script that shows the problem together
 with any input file it needs.
 
-Bioinf::Basic is maintained by one person, unpaid, so there is no guaranteed
+Cn::Bioinf is maintained by one person, unpaid, so there is no guaranteed
 response time and no bounty. Reports are nevertheless taken seriously, and
 you will be credited in `Changes` for anything that leads to a fix unless you
 would rather not be.

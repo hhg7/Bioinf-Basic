@@ -3,10 +3,14 @@
 These add to `~/.claude/CLAUDE.md`, and take precedence over it where they
 differ.
 
-Bioinf::Basic is FASTA reading and writing in XS (`Basic.xs`), BLAST hit
-ranking, and alignment plots and tables drawn by running Clustal Omega, BLAST+
+Cn::Bioinf is FASTA reading and writing in XS (`Bioinf.xs`), BLAST hit
+ranking, alignment plots and tables drawn by running Clustal Omega, BLAST+
 and `share/msa_plot.py` under the Python that Alien::Bioinf (the sibling
-distribution in `alien/Alien-Bioinf`) installs. It is meant for CPAN, so it has
+distribution in `alien/Alien-Bioinf`) installs, and polygenic scores
+(`pgs_score`) computed by the PLINK 2 that Alien::Bioinf also installs (since
+2026-10-17), and each sample's sex (`sex_check`) and whether two people are
+parent and child (`parent`) from VCFs, counted in XS by one shared VCF reader,
+the `vcf_*` functions (both since 2026-10-18). It is meant for CPAN, so it has
 to work on perls and platforms that are not this one.
 
 On 2026-10-07 the rules below were merged in from the `CLAUDE.md` of three
@@ -19,7 +23,7 @@ learns something new, check whether it belongs here too.
 
 ## Error messages name the function that raised them
 
-Every error or warning raised in `Basic.xs` or `lib/Bioinf/Basic.pm` starts
+Every error or warning raised in `Bioinf.xs` or `lib/Cn/Bioinf.pm` starts
 with the name of the function that raised it, a colon and a space:
 `fasta2hash: couldn't find "four" in x.fa`. This covers `croak`, `carp`, `die`
 and `warn` in perl and `croak()` and `warn()` in C, including new ones.
@@ -42,28 +46,28 @@ and `warn` in perl and `croak()` and `warn()` in C, including new ones.
 
 ### README.md is the source of the POD
 
-`md2pod.pl` replaces everything after the `1;` line of `lib/Bioinf/Basic.pm`
+`md2pod.pl` replaces everything after the `1;` line of `lib/Cn/Bioinf.pm`
 with `__END__` and POD converted from README.md, then checks the module with
 `pod_file_ok()` and `Changes` with `changes_file_ok()`. It is a copy of
 `~/Scripts/stats/md2pod.pl`, made on 2026-09-30, so a fix to the conversion
 belongs in both copies.
 
 - Document a function in README.md and run `perl md2pod.pl`; do not edit the
-  POD in `lib/Bioinf/Basic.pm` directly (no `Edit`, `Write`, `sed -i` or patch),
+  POD in `lib/Cn/Bioinf.pm` directly (no `Edit`, `Write`, `sed -i` or patch),
   since the next run discards it. Fix a POD problem in the Markdown it came
   from.
-- On 2026-09-30 the POD in `lib/Bioinf/Basic.pm` was still written by hand and
+- On 2026-09-30 the POD in `lib/Cn/Bioinf.pm` was still written by hand and
   said far more than README.md, which has empty sections for
   `get_best_alignment_hit` and `plot_phylo`. Running `md2pod.pl` then would
   have thrown that POD away. Move it into README.md first, and check with
-  `git diff lib/Bioinf/Basic.pm` after a run that nothing was lost.
+  `git diff lib/Cn/Bioinf.pm` after a run that nothing was lost.
 - `md2pod.pl` is an author-only helper that `[PruneFiles]` keeps out of the
   tarball. Like the helper scripts in `~/Scripts/stats`, it may use modern perl
   (`use 5.044`), whereas the module and `t/` are held to 5.10.
 
 ### Other build output
 
-- `Bioinf-Basic-*/` and `Bioinf-Basic-*.tar.gz` are `dzil build` output, and
+- `Cn-Bioinf-*/` and `Cn-Bioinf-*.tar.gz` are `dzil build` output, and
   `read.me.pod` is written by `md2pod.pl`. All are in `.gitignore`. Do not edit
   them, and leave them out of any repo-wide search-and-replace.
 - `cover_db/` and the `*.gcov`, `*.gcda` and `*.gcno` files in the root are
@@ -93,7 +97,7 @@ release note. These rules are taken from `~/Scripts/stats/CLAUDE.md` and
 - An entry says what was wrong and what the user will now observe, not "fixed a
   bug". When it is about a platform, name the platform and the report that
   found it. This rule comes from Matplotlib::Simple.
-- `$VERSION` in `lib/Bioinf/Basic.pm` is the version in progress. Work done
+- `$VERSION` in `lib/Cn/Bioinf.pm` is the version in progress. Work done
   while it reads a given version belongs under that version's section, so do
   not open a section for the next one. Check what has actually shipped (on
   PAUSE, not in the local tarballs) before assuming a version is released.
@@ -141,10 +145,13 @@ at compile time, which is not core and not a prereq.
 
 ### Running external programs
 
-clustalo, blastp and the plotting Python come from Alien::Bioinf, never from
-PATH, and are run by `_run` with list-form `system`. Some of the rules below
-come from Matplotlib::Simple and SimpleFlow, and some describe what
-`lib/Bioinf/Basic.pm` already does:
+clustalo, blastp, plink2 and the plotting Python come from Alien::Bioinf, never
+from PATH, and are run with list-form `system`: by `_run`, or for plink2 by
+`_plink2`, which keeps PLINK 2's output off the caller's terminal and puts its
+`Error:` lines in the message. `pgs_score` hands PLINK 2 files and reads its
+results a line at a time, so that genotypes are never held in perl. Some of
+the rules below come from Matplotlib::Simple and SimpleFlow, and some describe
+what `lib/Cn/Bioinf.pm` already does:
 
 - Never use the one-argument `system`, backticks or `qx//` to run anything. Each
   of those goes through a shell (`cmd.exe` on Windows), so a path containing a
@@ -188,17 +195,17 @@ with Cpanel::JSON::XS hidden:
 
 ### Prereqs
 
-`[Prereqs]` in `dist.ini` lists what `lib/Bioinf/Basic.pm` loads, core modules
+`[Prereqs]` in `dist.ini` lists what `lib/Cn/Bioinf.pm` loads, core modules
 included. Anything only `t/` needs goes under `[Prereqs / TestRequires]`, and
 anything only the `Makefile.PL` probe needs goes under
 `[Prereqs / ConfigureRequires]`. Alien::Bioinf stays under `RuntimeRecommends`,
 for the reason the comment there gives. The author-only scripts declare
 nothing.
 
-## C in `Basic.xs`
+## C in `Bioinf.xs`
 
 This section is taken from `~/Scripts/stats/CLAUDE.md`, whose `LikeR.xs` is
-the house style. `Basic.xs` does no floating-point arithmetic today, so the
+the house style. `Bioinf.xs` does no floating-point arithmetic today, so the
 `NV` rules matter only if it starts to.
 
 ### Types match the value's real domain
@@ -228,7 +235,7 @@ warnings, including mixed-sign comparisons.
 ### `restrict`, and when not to use it
 
 Pointer parameters and locals get `restrict`, with `const` when the pointee is
-not written, unless they may alias. The header comment of `Basic.xs` explains
+not written, unless they may alias. The header comment of `Bioinf.xs` explains
 why only `read_fasta()`'s block buffer carries it: every other pointer there is
 perl's, and a defline and its sequence can be COW copies of one buffer. Leave
 it off, with a short comment saying why, for overlapping buffers, re-pointed
@@ -268,12 +275,12 @@ while writing; no test run here will catch it.
   module gets the plain one, which put Stats::LikeR 0.316's `srand` out of step.
 - If a Solaris or POSIX declaration ever goes missing under strict C99, add
   the `_GNU_SOURCE`/`__EXTENSIONS__` block from the top of `LikeR.xs`. If a
-  perl API newer than 5.10 is used, add `ppport.h`; `Basic.xs` has needed
+  perl API newer than 5.10 is used, add `ppport.h`; `Bioinf.xs` has needed
   neither so far.
 - The C99 flag is probed by the `[MakeMaker::Awesome]` header in `dist.ini`.
   Change the probe there, not only in the hand-kept `Makefile.PL`.
 
-`perl xs.check.pl` runs XS::Check and the house rules over `Basic.xs`; run it
+`perl xs.check.pl` runs XS::Check and the house rules over `Bioinf.xs`; run it
 after any edit there.
 
 ## Tests
@@ -308,11 +315,11 @@ A CPAN smoker has the prereqs in `dist.ini` and nothing else: no network, no
 Alien::Bioinf (which is not on CPAN), and often no gzip and no Python.
 
 - Anything that needs Alien::Bioinf's tools is skipped when they are missing,
-  as `t/msa.t` does with `plan skip_all`. A missing dependency must produce a
-  SKIP and never a FAIL.
+  as `t/msa.t` and `t/pgs.t` do with `plan skip_all`. A missing dependency must
+  produce a SKIP and never a FAIL.
 - Everything that does not need those tools must still run there. Argument
-  checks, and anything else that is decided before clustalo, blastp or Python
-  starts, go in `t/checks.t`, because that is the part a Windows smoker
+  checks, and anything else that is decided before clustalo, blastp, plink2 or
+  Python starts, go in `t/checks.t`, because that is the part a Windows smoker
   actually exercises.
 - Never skip a test because a reference implementation (R, Python, Biopython)
   is missing, since expected values are frozen and a skipped cross-check never
@@ -326,7 +333,7 @@ Alien::Bioinf (which is not on CPAN), and often no gzip and no Python.
   Use `File::Temp` and `File::Spec`, as the existing tests do. Matplotlib::Simple
   0.312 failed 131 of 166 Windows subtests because of one `/tmp`.
 - A child perl that loads the module gets this working copy's `@INC`, as
-  `t/checks.t` passes `@inc`, and never a bare `-MBioinf::Basic`.
+  `t/checks.t` passes `@inc`, and never a bare `-MCn::Bioinf`.
 - Never depend on mtimes or `time` advancing during a `sleep`: a VM's clock can
   lag, and mtimes can be whole seconds. Check contents, or set times apart with
   `utime`.
@@ -361,12 +368,12 @@ the first:
 Aim to exercise every path: each call form, each option and its default, every
 `croak`/`carp` message, every validation branch, and each returned field. The
 committed `cover_db/` and the `.gcov` files are stale, so regenerate them with
-`Devel::Cover` (and `gcov` for `Basic.xs`) before quoting a number. Gate
+`Devel::Cover` (and `gcov` for `Bioinf.xs`) before quoting a number. Gate
 genuinely slow cases behind `EXTENDED_TESTING` rather than dropping them.
 
 ## Every change must hold across the support matrix
 
-`dist.ini` declares `perl = 5.010`, and `lib/Bioinf/Basic.pm` says
+`dist.ini` declares `perl = 5.010`, and `lib/Cn/Bioinf.pm` says
 `require 5.010`.
 
 ### Back to perl 5.10
@@ -391,7 +398,7 @@ default), `perl-5.42.3` (threaded), `perl-5.32.1`, `perl-5.12.5` (long double),
 
 `./test.all.perls.pl` builds and tests against all of them, installing
 Alien::Bioinf into any perl that lacks it, and with `-p` against chosen ones.
-Run it for anything that touches `Basic.xs` or `lib/Bioinf/Basic.pm`.
+Run it for anything that touches `Bioinf.xs` or `lib/Cn/Bioinf.pm`.
 
 On 2026-10-07 only `perl-5.44.0` had Alien::Bioinf. Every other perl failed at
 the script's `alien` step, because Alien::Build was not installed on it, and

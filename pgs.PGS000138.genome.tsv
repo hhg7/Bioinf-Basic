@@ -1,0 +1,32 @@
+super_pop	pop	population	n	mean	sd	5%	95%	genome z	genome percentile
+AFR	ACB	African Caribbean in Barbados	96	-1.355	3.213	-6.136	3.966	0.74	79.2
+AFR	ASW	African Ancestry in Southwest US	61	-1.632	3.395	-6.628	4.659	0.79	80.3
+AFR	ESN	Esan in Nigeria	99	-1.789	2.795	-6.336	3.945	1.01	85.9
+AFR	GWD	Gambian in Western Division, The Gambia	113	-1.890	2.981	-6.952	2.770	0.98	82.3
+AFR	LWK	Luhya in Webuye, Kenya	99	-2.048	3.103	-7.217	2.516	0.99	82.8
+AFR	MSL	Mende in Sierra Leone	85	-1.771	3.145	-6.330	3.656	0.89	81.2
+AFR	YRI	Yoruba in Ibadan, Nigeria	108	-1.816	2.978	-6.988	2.855	0.96	80.6
+AFR	all	all AFR	661	-1.770	3.061	-6.743	3.487	0.92	81.8
+AMR	CLM	Colombian in Medellin, Colombia	94	-0.792	3.513	-7.130	5.017	0.52	72.3
+AMR	MXL	Mexican Ancestry in Los Angeles, California	64	0.288	3.537	-5.759	5.887	0.21	56.2
+AMR	PEL	Peruvian in Lima, Peru	85	0.418	3.273	-4.193	6.348	0.19	61.2
+AMR	PUR	Puerto Rican in Puerto Rico	104	-0.939	3.771	-7.504	5.231	0.52	68.3
+AMR	all	all AMR	347	-0.340	3.579	-6.130	5.928	0.38	65.4
+EAS	CDX	Chinese Dai in Xishuangbanna, China	93	0.078	2.813	-3.795	5.437	0.34	62.4
+EAS	CHB	Han Chinese in Bejing, China	103	0.460	3.303	-4.133	5.998	0.17	57.3
+EAS	CHS	Southern Han Chinese, China	105	0.222	3.227	-5.118	5.379	0.25	57.1
+EAS	JPT	Japanese in Tokyo, Japan	104	0.230	2.973	-4.550	5.623	0.27	65.4
+EAS	KHV	Kinh in Ho Chi Minh City, Vietnam	99	0.246	2.893	-3.901	4.756	0.27	63.6
+EAS	all	all EAS	504	0.250	3.044	-4.411	5.920	0.26	61.1
+EUR	CEU	Utah residents with Northern and Western European ancestry	99	-2.525	3.598	-8.098	3.495	0.99	82.8
+EUR	FIN	Finnish in Finland	99	-2.779	3.501	-8.498	2.117	1.09	86.9
+EUR	GBR	British in England and Scotland	91	-2.339	3.655	-7.915	3.973	0.92	85.7
+EUR	IBS	Iberian populations in Spain	107	-2.305	3.533	-8.041	2.678	0.95	75.7
+EUR	TSI	Toscani in Italy	107	-2.315	3.478	-7.624	3.050	0.96	81.3
+EUR	all	all EUR	503	-2.450	3.541	-8.171	3.178	0.98	82.3
+SAS	BEB	Bengali in Bangladesh	86	-0.763	3.741	-6.085	6.446	0.48	74.4
+SAS	GIH	Gujarati Indian in Houston,TX	103	-1.018	3.257	-6.077	4.728	0.63	75.7
+SAS	ITU	Indian Telugu in the UK	102	-0.949	3.191	-6.388	4.058	0.62	71.6
+SAS	PJL	Punjabi in Lahore,Pakistan	96	-0.882	3.470	-6.562	5.029	0.55	71.9
+SAS	STU	Sri Lankan Tamil in the UK	102	-0.973	3.326	-5.392	4.765	0.60	70.6
+SAS	all	all SAS	489	-0.923	3.377	-6.426	4.815	0.58	72.8
