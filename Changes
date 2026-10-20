@@ -77,3 +77,17 @@ Revision history for Cn-Bioinf
    stopping the rest. XS counts every pair 64 sites at a time: the 17
    people of the CEPH 1463 pedigree took 0.27 s, and agreed with it on
    every sex and on 134 of 136 pairs, and three exomes took 2.5 s.
+ - concordance compares a test VCF's calls with a truth VCF's, sample by
+   sample, or the one sample of each whatever they are called, and counts
+   the 45 kinds of agreement and disagreement and the metrics of the
+   maintainer's x.low_ram_local_concordance.pl, with each discordant,
+   gained and lost site. Unlike that script it finds a site whatever its
+   ID and with "chr" in both files, compares calls by their alleles, so 1/0
+   and 0|1 are 0/1, and takes ./1 as a no-call, where it died. Its true
+   positives are corrected to the matched calls that carry an ALT, where
+   the script counted matched hom-REF calls and missed matched het-REF
+   ones, and its true negatives to every matched reference call, haploid
+   or diploid; a discordance of two ALT-carrying calls (0/1 against 1/1)
+   is a false positive and a false negative, where the script counted it
+   as neither. XS compares them, holding only the test's sites: two exomes
+   took 1.9 s, and a genome against itself 14 s.

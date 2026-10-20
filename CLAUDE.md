@@ -9,11 +9,12 @@ and `share/msa_plot.py` under the Python that Alien::Bioinf (the sibling
 distribution in `alien/Alien-Bioinf`) installs, and polygenic scores
 (`pgs_score`) computed by the PLINK 2 that Alien::Bioinf also installs (since
 2026-10-17), and each sample's sex (`sex_check`), whether two people are
-parent and child (`parent`), and how every two people are related
-(`relatedness`) from VCFs, counted in XS by one shared VCF reader, the `vcf_*`
-functions (`sex_check` and `parent` since 2026-10-18, `relatedness` since
-2026-10-19). It is meant for CPAN, so it has to work on perls and platforms
-that are not this one.
+parent and child (`parent`), how every two people are related
+(`relatedness`), and how well a test VCF's calls agree with a truth VCF's
+(`concordance`) from VCFs, counted in XS by one shared VCF reader, the `vcf_*`
+functions (`sex_check` and `parent` since 2026-10-18, `relatedness` and
+`concordance` since 2026-10-19). It is meant for CPAN, so it has to work on
+perls and platforms that are not this one.
 
 On 2026-10-07 the rules below were merged in from the `CLAUDE.md` of three
 sibling distributions: `~/Scripts/stats` (Stats::LikeR, XS),
@@ -207,8 +208,11 @@ nothing.
 ## C in `Bioinf.xs`
 
 This section is taken from `~/Scripts/stats/CLAUDE.md`, whose `LikeR.xs` is
-the house style. `Bioinf.xs` does no floating-point arithmetic today, so the
-`NV` rules matter only if it starts to.
+the house style. The only floating-point arithmetic in `Bioinf.xs` is
+`concordance`'s ratios (`conc_ratio()`, since 2026-10-19), one `NV` division
+each, which `t/concordance.t` compares within a relative 1e-15 so that
+long-double and quadmath perls pass; follow the `NV` rules for anything
+more.
 
 ### Types match the value's real domain
 

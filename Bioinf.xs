@@ -1,5 +1,5 @@
 /*FASTA reading and writing for Cn::Bioinf, and the genotype counts behind its
-sex_check, parent and relatedness.
+sex_check, parent, relatedness and concordance.
 
 fasta2hash() and hash2fasta_file() used to be pure perl in ~/Scripts/bioinf.pm:
 one readline, chomp and string append per line in, and one substr-sized SV per
@@ -18,7 +18,7 @@ perl side (lib/Cn/Bioinf.pm) opens and closes the files.
 
 Every croak() and warn() here starts with C99's __func__, so a message names
 the C function that raised it (read_fasta, write_fasta, or one of the vcf_,
-sex_, parent_ and rel_ ones) and stays right if one is renamed.*/
+sex_, parent_, rel_ and conc_ ones) and stays right if one is renamed.*/
 #define PERL_NO_GET_CONTEXT
 #include "EXTERN.h"
 #include "perl.h"
@@ -250,7 +250,7 @@ static void write_fasta(pTHX_ PerlIO *fh, HV *h, AV *order, STRLEN width) {
 	if (PerlIO_error(fh)) croak("%s: error writing FASTA: %s", __func__, Strerror(errno));
 }
 
-/*Reading a VCF, for sex_check(), parent() and relatedness().
+/*Reading a VCF, for sex_check(), parent(), relatedness() and concordance().
 
 The file is read by perl, which knows gzip and bzip2 through IO::Uncompress
 (linking zlib and libbz2 here would be a build dependency on every platform),
@@ -265,6 +265,7 @@ struct vcf_reader {
 	UV min_depth;     // a genotype whose DP is below this is not counted
 	size_t n;         // samples; 0 until the #CHROM line
 	bool header;      // the #CHROM line has been read
+	bool stop;        // set by on_header to read no further, as concordance() does to learn the truth's samples
 	HV *samples;      // sample => its 0-based column among the samples
 	AV *names;        // the samples in file order
 	void (*on_header)(pTHX_ vcf_reader *r);                               // once the #CHROM line has been read
@@ -372,24 +373,26 @@ enum {
 	VCF_CALL     // one or two alleles, each REF or the one ALT
 };
 
+/*Whether the sample field p..e, whose FORMAT has DP at dp, has a DP below
+r->min_depth. A DP that is absent, "." or not a whole number is not.*/
+static bool vcf_shallow(const vcf_reader *r, const char *p, const char *e, size_t dp) {
+	const char *s, *sf;
+	if (dp == VCF_ABSENT || !vcf_subfield(p, e, dp, &s, &sf) || s == sf || *s == '.') return FALSE;
+	UV depth = 0;
+	for (; s < sf; s++) {
+		if (*s < '0' || *s > '9' || depth > (UV_MAX - 9) / 10) return FALSE;
+		depth = depth * 10 + (UV)(*s - '0');
+	}
+	return depth < r->min_depth;
+}
+
 /*The call in the sample field p..e of a biallelic site, whose FORMAT has GT
 at gt and DP at dp: one of the values above, and for VCF_CALL the number of
 alleles in *alleles and how many of them are the ALT in *alt. A DP that is
 absent, "." or not a whole number leaves the genotype counted.*/
 static short int vcf_call(const vcf_reader *r, const char *p, const char *e, size_t gt, size_t dp, unsigned short int *alleles, unsigned short int *alt) {
 	const char *s, *sf;
-	if (dp != VCF_ABSENT && vcf_subfield(p, e, dp, &s, &sf) && s < sf && *s != '.') {
-		UV depth = 0;
-		bool number = 1;
-		for (; s < sf; s++) {
-			if (*s < '0' || *s > '9' || depth > (UV_MAX - 9) / 10) {
-				number = FALSE;
-				break;
-			}
-			depth = depth * 10 + (UV)(*s - '0');
-		}
-		if (number && depth < r->min_depth) return VCF_SHALLOW;
-	}
+	if (vcf_shallow(r, p, e, dp)) return VCF_SHALLOW;
 	*alleles = *alt = 0;
 	if (!vcf_subfield(p, e, gt, &s, &sf) || s == sf) return VCF_NO_CALL;
 	while (s < sf) {
@@ -414,6 +417,19 @@ static const char *vcf_sample(pTHX_ const vcf_reader *r, const char *p, const ch
 start at p.*/
 static void vcf_samples_end(pTHX_ const vcf_reader *r, const char *p, const char *e) {
 	if (p <= e) croak("%s: %s line %" UVuf " has more samples than the %" UVuf " its #CHROM line names", __func__, r->name, r->line, (UV)r->n);
+}
+
+/*The first 5 of names, quoted, and how many more there are, which is enough
+to show how a VCF's samples are named; a mortal's PV.*/
+static const char *vcf_names_list(pTHX_ AV *names) {
+	SV *some = sv_2mortal(newSVpvs(""));
+	const SSize_t last = av_len(names);
+	for (SSize_t i = 0; i <= last && i < 5; i++) {
+		SV **s = av_fetch(names, i, 0);
+		sv_catpvf(some, "%s\"%s\"", i ? ", " : "", s ? SvPV_nolen(*s) : "");
+	}
+	if (last >= 5) sv_catpvf(some, " and %" UVuf " more", (UV)(last - 4));
+	return SvPV_nolen(some);
 }
 
 /*The #CHROM line p..e: each sample after FORMAT gets its column in samples
@@ -486,10 +502,10 @@ static void vcf_read(pTHX_ SV *next, vcf_reader *r) {
 		PUTBACK;
 		FREETMPS;
 		LEAVE;
-		if (!SvOK(block)) break;
+		if (!SvOK(block) || r->stop) break;
 		STRLEN n;
 		const char *b = SvPV_const(block, n), *end = b + n; // not restrict: perl's buffer
-		while (b < end) {
+		while (b < end && !r->stop) {
 			const char *nl = (const char*)memchr(b, '\n', (size_t)(end - b));
 			if (!nl) {
 				sv_catpvn(carry, b, (STRLEN)(end - b));
@@ -505,7 +521,7 @@ static void vcf_read(pTHX_ SV *next, vcf_reader *r) {
 			b = nl + 1;
 		}
 	}
-	if (SvCUR(carry)) vcf_line(aTHX_ r, SvPVX_const(carry), SvPVX_const(carry) + SvCUR(carry));
+	if (SvCUR(carry) && !r->stop) vcf_line(aTHX_ r, SvPVX_const(carry), SvPVX_const(carry) + SvCUR(carry));
 	if (!r->header) croak("%s: %s has no #CHROM line, so it isn't a VCF", __func__, r->name);
 }
 
@@ -523,11 +539,10 @@ least 0.01) are left out, since they mean nothing for a VCF of one genome,
 which is the usual input here.
 
 Non-PAR Y is counted too, for the caller to see, but decides nothing: on
-2026-10-18 the exome mother, whose X is plainly female (2,592 het to 2,673
-hom-ALT), had 530 called SNVs on non-PAR Y, and the male exome father had
-659. Y's PARs are GRCh37's (Y:10001-2649520, Y:59034050-59363566) and
-GRCh38's (Y:10001-2781479, Y:56887903-57217415), from the GRC's assembly
-reports.
+2026-10-18 the mother's exome, whose X is plainly female (2,592 het to 2,673
+hom-ALT), had 530 called SNVs on non-PAR Y, and the father's exome had 659.
+Y's PARs are GRCh37's (Y:10001-2649520, Y:59034050-59363566) and GRCh38's
+(Y:10001-2781479, Y:56887903-57217415), from the GRC's assembly reports.
 
 Nothing is kept but a fixed set of counters for each sample.*/
 
@@ -705,13 +720,7 @@ static void parent_header_one(pTHX_ vcf_reader *r) {
 			t->col[k] = (size_t)SvUV(HeVAL(he));
 			continue;
 		}
-		SV *some = sv_2mortal(newSVpvs("")); // the first 5 samples, quoted, which is enough to show how they are named
-		for (SSize_t i = 0; i <= av_len(r->names) && i < 5; i++) {
-			SV **s = av_fetch(r->names, i, 0);
-			sv_catpvf(some, "%s\"%s\"", i ? ", " : "", s ? SvPV_nolen(*s) : "");
-		}
-		if (r->n > 5) sv_catpvf(some, " and %" UVuf " more", (UV)(r->n - 5));
-		const char *want = SvPV_nolen(t->want[k]), *list = SvPV_nolen(some);
+		const char *want = SvPV_nolen(t->want[k]), *list = vcf_names_list(aTHX_ r->names);
 		croak("%s: %s has no sample \"%s\"; its samples are %s", __func__, r->name, want, list);
 	}
 }
@@ -1064,6 +1073,582 @@ static SV *rel_counts(pTHX_ const UV *t, size_t n) {
 	return newSVpvn((const char*)t, rel_pairs(aTHX_ n) * REL_T * sizeof(UV));
 }
 
+/*The genotype comparison behind concordance().
+
+The method is ~/Scripts/old/x.low_ram_local_concordance.pl's (its
+assay_concordance(), concordance() and metrics(), as they stood on
+2026-10-19), which compared each sample of a directory of test VCFs with the
+same sample in a directory of truth VCFs. Every record of the test is compared,
+sample by sample, with the truth's record of the same site, and a site that
+the truth lacks is a no-call there; a site that the truth has and the test
+lacks is not compared at all. Each comparison is one of the 45 kinds of
+CONC_NAME, and the metrics are taken from their counts as metrics() took them.
+
+It departs from that script where the script died or could not match:
+- A site is CHROM, POS, REF and ALT. The script also took ID, so that "rs123"
+in one file and "." in the other were two sites, and it dropped a "chr" from
+the truth's CHROM alone, so that two files that both had one shared no site;
+here "chr", in any case, is dropped from both.
+- A call is compared as its alleles, in either order, so that "1/0", "0|1" and
+"0/1" are one call; the script compared GT strings, and died on the first two.
+- A call missing in both ("." and "./.") is concordant_no_call, where the
+script made it discordant_no_call_to_no_call, a kind outside its 45.
+- A partly missing call ("./1"), one of more than two alleles, and one whose
+DP is below min_depth are each a no-call, where the script died on the first
+two and had no min_depth.
+- The metrics' true positives and true negatives are corrected, and a
+discordance of two ALT-carrying calls is a false positive and a false
+negative, as the comment above CONC_TP says.
+
+The test is read first, and every site of it kept with its calls for the
+samples compared, and then the truth is read a record at a time and looked up
+among them. RAM thus goes with the test's sites, which for the usual input, a
+panel against a genome, are the fewer, and a truth record that matches no
+test site costs no more than finding its end.*/
+
+//What one call is. The order is that of the classes' names, which CONC_NAME's kinds are sorted by
+enum { CONC_HAPLOID_ALT, CONC_HAPLOID_REF, CONC_HET_ALT, CONC_HET_REF, CONC_HOM_ALT, CONC_HOM_REF, CONC_NO_CALL };
+
+/*The kinds of comparison, truth first and then test, in the order and with the
+names of the script's @concordance_types.*/
+#define CONC_KINDS 45
+static const char *const CONC_NAME[CONC_KINDS] = {
+	"concordant_diploid_ref_to_haploid_ref", "concordant_haploid_alt", "concordant_haploid_alt_to_hom_alt",
+	"concordant_haploid_ref", "concordant_haploid_ref_to_diploid_ref", "concordant_het_alt", "concordant_het_ref",
+	"concordant_hom_alt", "concordant_hom_alt_to_diploid_alt", "concordant_hom_ref", "concordant_no_call",
+	"discordant_haploid_alt_to_haploid_alt", "discordant_haploid_alt_to_haploid_ref", "discordant_haploid_alt_to_het_alt",
+	"discordant_haploid_alt_to_het_ref", "discordant_haploid_alt_to_hom_alt", "discordant_haploid_alt_to_hom_ref",
+	"discordant_haploid_ref_to_haploid_alt", "discordant_haploid_ref_to_het_alt", "discordant_haploid_ref_to_het_ref",
+	"discordant_haploid_ref_to_hom_alt",
+	"discordant_het_alt_to_haploid_alt", "discordant_het_alt_to_haploid_ref", "discordant_het_alt_to_het_alt",
+	"discordant_het_alt_to_het_ref", "discordant_het_alt_to_hom_alt", "discordant_het_alt_to_hom_ref",
+	"discordant_het_ref_to_haploid_alt", "discordant_het_ref_to_haploid_ref", "discordant_het_ref_to_het_alt",
+	"discordant_het_ref_to_het_ref", "discordant_het_ref_to_hom_alt", "discordant_het_ref_to_hom_ref",
+	"discordant_hom_alt_to_haploid_alt", "discordant_hom_alt_to_haploid_ref", "discordant_hom_alt_to_het_alt",
+	"discordant_hom_alt_to_het_ref", "discordant_hom_alt_to_hom_alt", "discordant_hom_alt_to_hom_ref",
+	"discordant_hom_ref_to_haploid_alt", "discordant_hom_ref_to_het_alt", "discordant_hom_ref_to_het_ref",
+	"discordant_hom_ref_to_hom_alt",
+	"gained_site", "lost_site"
+};
+//The kinds that conc_kind() names, as indexes into CONC_NAME
+enum {
+	CONC_DIPLOID_REF_TO_HAPLOID_REF = 0,
+	CONC_HAPLOID_ALT_TO_HOM_ALT = 2,
+	CONC_HAPLOID_REF_TO_DIPLOID_REF = 4,
+	CONC_HOM_ALT_TO_DIPLOID_ALT = 8,
+	CONC_DISCORDANT = 11, // the first discordant_ kind; every kind before it is concordant_
+	CONC_GAINED = 43,     // the truth a no-call, the test not
+	CONC_LOST = 44        // the test a no-call, the truth not
+};
+//concordant_<class>, by the class of the two calls, which are the same
+static const unsigned short int CONC_SAME[7] = { 1, 3, 5, 6, 7, 9, 10 };
+/*discordant_<truth's class>_to_<test's class>, by the two classes. -1 marks
+the four pairs of reference calls, which are concordant whatever their
+ploidy.*/
+static const short int CONC_DIFFERENT[6][6] = {
+	{ 11, 12, 13, 14, 15, 16 },
+	{ 17, -1, 18, 19, 20, -1 },
+	{ 21, 22, 23, 24, 25, 26 },
+	{ 27, 28, 29, 30, 31, 32 },
+	{ 33, 34, 35, 36, 37, 38 },
+	{ 39, -1, 40, 41, 42, -1 }
+};
+
+/*The sets of kinds that metrics() summed, as bits of CONC_NAME's indexes,
+written out so that the rule cannot drift with the names. Each is what the
+script's regex picked out of @concordance_types, but for CONC_TP, CONC_TN and
+CONC_MISMATCH, which correct it (since 2026-10-19):
+- CONC_TP, the true positives, is every concordant kind whose call carries an
+ALT. The script's /^conc\w+(?:alt|hom)/ took concordant_hom_ref, by the "hom"
+in it, so that a hom-REF site counted as a true positive and a true negative
+both, and it left out concordant_het_ref, the commonest true positive.
+- CONC_TN, the true negatives, is every concordant kind of reference calls,
+whatever the ploidy of either. The script's tn_site,
+/^concordant_(?:hom|haploid)\w+ref$/, left out
+concordant_diploid_ref_to_haploid_ref, the mirror of a kind it took; and its
+tn_genotype was concordant_hom_ref alone, though CONC_FP_REF counts a
+haploid-REF truth called otherwise, so that specificity gave no credit for a
+haploid-REF truth called right, as on a male's X. Here tn_genotype is
+tn_site.
+- CONC_MISMATCH is every discordant kind where both calls carry an ALT (0/1
+against 1/1, or 0/1 against 0/2), which the script counted in neither
+fp_genotype, which was CONC_FP_REF alone, nor fn_genotype, which was
+CONC_FN_REF alone, so that it changed no precision or recall. It is now in
+both, as benchmarking tools count it: the test's call is wrong, and the
+truth's is missed. Specificity still takes CONC_FP_REF alone, since only a
+reference truth is a negative.*/
+#define CONC_BIT(k) ((uint64_t)1 << (k))
+#define CONC_TP (CONC_BIT(1) | CONC_BIT(2) | CONC_BIT(5) | CONC_BIT(6) | CONC_BIT(7) | CONC_BIT(8))
+#define CONC_TN (CONC_BIT(0) | CONC_BIT(3) | CONC_BIT(4) | CONC_BIT(9))
+#define CONC_FP_REF (CONC_BIT(17) | CONC_BIT(18) | CONC_BIT(19) | CONC_BIT(20) | CONC_BIT(39) | CONC_BIT(40) | CONC_BIT(41) | CONC_BIT(42)) // /^discordant_(haploid|hom)_ref_\w+/: a reference truth, the test carrying an ALT
+#define CONC_FN_REF (CONC_BIT(12) | CONC_BIT(16) | CONC_BIT(22) | CONC_BIT(26) | CONC_BIT(28) | CONC_BIT(32) | CONC_BIT(34) | CONC_BIT(38)) // /^discordant_\w+_(?:hom|haploid)_ref$/: the truth carrying an ALT, a reference test
+#define CONC_MISMATCH (CONC_BIT(11) | CONC_BIT(13) | CONC_BIT(14) | CONC_BIT(15) | CONC_BIT(21) | CONC_BIT(23) | CONC_BIT(24) | CONC_BIT(25) \
+	| CONC_BIT(27) | CONC_BIT(29) | CONC_BIT(30) | CONC_BIT(31) | CONC_BIT(33) | CONC_BIT(35) | CONC_BIT(36) | CONC_BIT(37))
+#define CONC_AGREE (CONC_BIT(CONC_DISCORDANT - 1) - 1)                                                  // /^concordant_\w+(?:alt|ref)$/: every concordant_ kind but concordant_no_call
+#define CONC_CALLED (((CONC_BIT(CONC_GAINED) - 1) & ~CONC_BIT(CONC_DISCORDANT - 1)))                   // /(?:alt|ref)$/: every kind but concordant_no_call, gained_site and lost_site
+
+/*One sample's call. Alleles are held in 16 bits, which keeps a call to 6
+bytes, two of which each test site keeps for each sample compared; conc_gt()
+dies on an allele above 65535, which no VCF of real data has.*/
+typedef struct {
+	uint16_t a, b;   // the alleles, in GT's order; b is 0 for a haploid call
+	unsigned char n; // 0 = no-call, 1 = haploid, 2 = diploid
+	bool phased;     // GT separated them with '|'
+} conc_call;
+
+/*A site of the test.*/
+typedef struct {
+	uint64_t hash; // conc_hash()'s, of CHROM, POS, REF and ALT
+	UV pos;
+	size_t text;   // where its CHROM to ALT, as the test has them and ended by '\n', start in conc_store's text
+	bool found;    // the truth has it
+} conc_site;
+
+/*Everything the test's reading keeps and the truth's reading looks in, in a
+holder that the scope's destructor frees, since Renew() moves the arrays.*/
+typedef struct {
+	char *text;          // every site's CHROM to ALT, each ended by '\n'
+	size_t text_n, text_room;
+	conc_site *site;
+	size_t n, room;      // sites used and allocated
+	size_t *slot;        // an open-addressed table of the sites by hash: a site's index + 1, or 0 for an empty slot
+	size_t slots;        // 0, or a power of 2 at least twice n
+	conc_call *call;     // 2 * pairs a site: for each pair, the test's call and then the truth's
+	size_t *hit;         // the sites that one truth record matches
+	size_t hit_room;
+	conc_call *truth;    // a truth record's calls, one a pair
+	size_t pairs;        // samples compared
+	size_t *test_col;    // each pair's column among the test's samples
+	size_t *truth_col;   // and among the truth's
+	size_t *test_pair;   // each test column's pair + 1, or 0 when it is not compared
+	size_t *truth_pair;  // each truth column's pair + 1, or 0
+	size_t truth_n;      // the truth's samples, as read before the test
+	UV found;            // test sites that the truth has
+} conc_store;
+
+static void conc_store_free(pTHX_ void *p) {
+	conc_store *s = (conc_store*)p;
+	Safefree(s->text);
+	Safefree(s->site);
+	Safefree(s->slot);
+	Safefree(s->call);
+	Safefree(s->hit);
+	Safefree(s->truth);
+	Safefree(s->test_col);
+	Safefree(s->truth_col);
+	Safefree(s->test_pair);
+	Safefree(s->truth_pair);
+	Safefree(s);
+}
+
+typedef struct {
+	vcf_reader r;     // first, so that the vcf_reader * that the callbacks are given is this
+	conc_store *s;
+	AV *truth_names;  // the test's reader: the truth's samples, in its order
+} conc_reader;
+
+/*CHROM p..f without a "chr" prefix, in any case, as vcf_chrom() drops it; the
+start is returned.*/
+static const char *conc_chrom(const char *p, const char *f) {
+	if (f - p > 3 && (p[0] == 'c' || p[0] == 'C') && (p[1] == 'h' || p[1] == 'H') && (p[2] == 'r' || p[2] == 'R')) p += 3;
+	return p;
+}
+
+/*FNV-1a, 64-bit (Fowler, Noll and Vo; www.isthe.com/chongo/tech/comp/fnv/,
+read 2026-10-19), of the bytes p..e, continuing from h.*/
+static uint64_t conc_fnv(uint64_t h, const char *p, const char *e) {
+	for (; p < e; p++) {
+		h ^= (unsigned char)*p;
+		h *= UINT64_C(0x100000001b3);
+	}
+	return h;
+}
+
+/*The hash of a site: its CHROM (less "chr") c..cf, POS, REF r..rf and ALT
+a..af, with a byte that no field holds between the fields, so that moving a
+byte from one to the next changes it.*/
+static uint64_t conc_hash(const char *c, const char *cf, UV pos, const char *r, const char *rf, const char *a, const char *af) {
+	static const char tab = '\t';
+	uint64_t h = conc_fnv(UINT64_C(0xcbf29ce484222325), c, cf);
+	h = conc_fnv(h, &tab, &tab + 1);
+	for (unsigned short int i = 0; i < 64; i += 8) { // POS's 8 bytes, low first, whatever the width of a UV
+		const char byte = (char)(((uint64_t)pos >> i) & 0xff);
+		h = conc_fnv(h, &byte, &byte + 1);
+	}
+	h = conc_fnv(h, r, rf);
+	h = conc_fnv(h, &tab, &tab + 1);
+	return conc_fnv(h, a, af);
+}
+
+/*Where each of the five fields of site k's text starts, in fld, with fld[5]
+one past its '\n', so that fld[i + 1] - 1 ends field i. The text has its four
+tabs and its '\n', as conc_record_test() stored it.*/
+static void conc_fields(const conc_store *s, size_t k, const char **fld) {
+	const char *e = s->text + s->text_n;
+	fld[0] = s->text + s->site[k].text;
+	for (unsigned short int i = 1; i < 5; i++) fld[i] = (const char*)memchr(fld[i - 1], '\t', (size_t)(e - fld[i - 1])) + 1;
+	fld[5] = (const char*)memchr(fld[4], '\n', (size_t)(e - fld[4])) + 1;
+}
+
+/*Whether two byte ranges are equal.*/
+static bool conc_eq(const char *p, const char *pe, const char *q, const char *qe) {
+	return pe - p == qe - q && memcmp(p, q, (size_t)(pe - p)) == 0;
+}
+
+/*The call in the sample field p..e, whose FORMAT has GT at gt and DP at dp,
+into *c. A GT that FORMAT lacks, an empty or missing one, a partly missing one
+("./1"), one of more than two alleles, and a DP below min_depth are each a
+no-call. Dies on a GT that is not one, naming the sample of column i.*/
+static void conc_gt(pTHX_ const vcf_reader *r, const char *p, const char *e, size_t gt, size_t dp, size_t i, conc_call *c) {
+	c->a = c->b = 0;
+	c->n = 0;
+	c->phased = FALSE;
+	const char *s, *sf;
+	if (gt == VCF_ABSENT || vcf_shallow(r, p, e, dp) || !vcf_subfield(p, e, gt, &s, &sf) || s == sf) return;
+	const char *g = s;  // GT, for messages
+	UV allele[2] = { 0, 0 };
+	size_t n = 0;       // alleles
+	bool missing = FALSE, phased = FALSE;
+	for (;;) {
+		UV v = 0;
+		if (s < sf && *s == '.') {
+			missing = TRUE;
+			s++;
+		} else {
+			const char *d = s;
+			for (; s < sf && *s >= '0' && *s <= '9'; s++) {
+				v = v * 10 + (UV)(*s - '0');
+				if (v > 65535) {
+					SV **name = av_fetch(r->names, (SSize_t)i, 0);
+					croak("%s: %s line %" UVuf " has GT \"%.*s\" for sample \"%s\", whose allele is beyond the 65535 that concordance can compare", __func__, r->name, r->line, (int)(sf - g), g, name ? SvPV_nolen(*name) : "");
+				}
+			}
+			if (s == d) break; // not an allele: said below
+		}
+		if (n < 2) allele[n] = v;
+		n++;
+		if (s == sf) {
+			if (missing || n > 2) return;
+			c->n = (unsigned char)n;
+			c->a = (uint16_t)allele[0];
+			c->b = (uint16_t)allele[1];
+			c->phased = phased;
+			return;
+		}
+		if (*s == '|') phased = TRUE;
+		else if (*s != '/') break;
+		if (++s == sf) break; // "0/"
+	}
+	SV **name = av_fetch(r->names, (SSize_t)i, 0);
+	croak("%s: %s line %" UVuf " has GT \"%.*s\" for sample \"%s\", which isn't a genotype", __func__, r->name, r->line, (int)(sf - g), g, name ? SvPV_nolen(*name) : "");
+}
+
+/*The class of call c.*/
+static unsigned short int conc_class(const conc_call *c) {
+	if (c->n == 0) return CONC_NO_CALL;
+	if (c->n == 1) return c->a ? CONC_HAPLOID_ALT : CONC_HAPLOID_REF;
+	if (c->a == c->b) return c->a ? CONC_HOM_ALT : CONC_HOM_REF;
+	return c->a && c->b ? CONC_HET_ALT : CONC_HET_REF;
+}
+
+/*Whether two calls are the same: both no-calls, or of one ploidy with the same
+alleles, in either order.*/
+static bool conc_same(const conc_call *x, const conc_call *y) {
+	if (x->n != y->n) return FALSE;
+	if (x->n < 2) return x->a == y->a;
+	return (x->a == y->a && x->b == y->b) || (x->a == y->b && x->b == y->a);
+}
+
+/*The kind of comparison, an index into CONC_NAME, of the truth's call and the
+test's, by the script's assay_concordance(), in its order.*/
+static unsigned short int conc_kind(const conc_call *truth, const conc_call *test) {
+	const unsigned short int ct = conc_class(truth), cs = conc_class(test);
+	if (conc_same(truth, test)) return CONC_SAME[ct];
+	if (cs == CONC_NO_CALL) return CONC_LOST; // the truth is not, or the two would be the same
+	if (ct == CONC_NO_CALL) return CONC_GAINED;
+	if (ct == CONC_HOM_REF && cs == CONC_HAPLOID_REF) return CONC_DIPLOID_REF_TO_HAPLOID_REF;
+	if (ct == CONC_HAPLOID_REF && cs == CONC_HOM_REF) return CONC_HAPLOID_REF_TO_DIPLOID_REF;
+	if (ct == CONC_HOM_ALT && test->n == 1 && test->a == truth->a) return CONC_HOM_ALT_TO_DIPLOID_ALT;
+	if (cs == CONC_HOM_ALT && truth->n == 1 && truth->a == test->a) return CONC_HAPLOID_ALT_TO_HOM_ALT;
+	return (unsigned short int)CONC_DIFFERENT[ct][cs]; // never -1: those four pairs were taken above
+}
+
+/*Call c as GT would write it, a mortal: "." for a no-call.*/
+static SV *conc_call_sv(pTHX_ const conc_call *c) {
+	if (c->n == 0) return sv_2mortal(newSVpvs("."));
+	if (c->n == 1) return sv_2mortal(newSVpvf("%u", (unsigned)c->a));
+	return sv_2mortal(newSVpvf("%u%c%u", (unsigned)c->a, c->phased ? '|' : '/', (unsigned)c->b));
+}
+
+/*The test's #CHROM line: the pairs of samples to compare. Two VCFs of one
+sample each are compared whatever their samples are called; otherwise each of
+the test's samples is compared with the truth's of the same name.*/
+static void conc_header_test(pTHX_ vcf_reader *r) {
+	conc_reader *t = (conc_reader*)r;
+	conc_store *s = t->s;
+	Newxz(s->test_col, r->n, size_t);
+	Newxz(s->truth_col, r->n, size_t);
+	Newxz(s->test_pair, r->n, size_t);
+	Newxz(s->truth_pair, s->truth_n, size_t);
+	if (r->n == 1 && s->truth_n == 1) {
+		s->pairs = 1;
+		s->test_pair[0] = s->truth_pair[0] = 1;
+	} else {
+		HV *truth = (HV*)sv_2mortal((SV*)newHV()); // the truth's sample => its column
+		for (size_t j = 0; j < s->truth_n; j++) {
+			SV **name = av_fetch(t->truth_names, (SSize_t)j, 0);
+			if (name) (void)hv_store_ent(truth, *name, newSVuv((UV)j), 0);
+		}
+		for (size_t i = 0; i < r->n; i++) {
+			SV **name = av_fetch(r->names, (SSize_t)i, 0);
+			HE *he = name ? hv_fetch_ent(truth, *name, 0, 0) : NULL;
+			if (!he) continue;
+			const size_t j = (size_t)SvUV(HeVAL(he));
+			s->test_col[s->pairs] = i;
+			s->truth_col[s->pairs] = j;
+			s->test_pair[i] = s->truth_pair[j] = ++s->pairs;
+		}
+	}
+	if (!s->pairs) {
+		const char *test = vcf_names_list(aTHX_ r->names), *truth = vcf_names_list(aTHX_ t->truth_names);
+		croak("%s: %s and the truth share no sample: the test's are %s, and the truth's %s", __func__, r->name, test, truth);
+	}
+	Newx(s->truth, s->pairs, conc_call);
+}
+
+/*Room for one more site of the test r, its calls, and a slot in the table,
+which is rebuilt at twice the size when it would be more than half full. Dies,
+naming r, when the calls' size would not fit in a size_t: on a 32-bit perl,
+349,526 samples or more do at the first 1,024 sites. Renew() checks only the
+multiplication by the type's size, and only on a perl built with
+usemallocwrap (the default), where it died with "panic: memory wrap", naming
+nothing; on one built without, the calls were allocated too small.*/
+static void conc_grow(pTHX_ const vcf_reader *r, conc_store *s) {
+	if (s->n == s->room) {
+		const size_t room = s->room ? 2 * s->room : 1024; // small, since its calls are 12 bytes a pair each: 1,000 samples start at 12 MB
+		if (room < s->room || room > ((size_t)-1 / sizeof(conc_call) / 2) / s->pairs)
+			croak("%s: %s has more sites of its %" UVuf " samples compared than this perl can hold (%" UVuf " already)", __func__, r->name, (UV)s->pairs, (UV)s->n);
+		s->room = room;
+		Renew(s->site, s->room, conc_site);
+		Renew(s->call, s->room * 2 * s->pairs, conc_call);
+	}
+	if (2 * (s->n + 1) <= s->slots) return;
+	s->slots = s->slots ? 2 * s->slots : 2048;
+	Safefree(s->slot);
+	Newxz(s->slot, s->slots, size_t);
+	for (size_t k = 0; k < s->n; k++) {
+		size_t at = (size_t)s->site[k].hash & (s->slots - 1);
+		while (s->slot[at]) at = (at + 1) & (s->slots - 1);
+		s->slot[at] = k + 1;
+	}
+}
+
+/*The test's record p..e, kept as a site with its calls for each pair. A site
+the test lists twice is kept twice, and each compared, as the script compared
+each line.*/
+static void conc_record_test(pTHX_ vcf_reader *r, const char *p, const char *e) {
+	conc_store *s = ((conc_reader*)r)->s;
+	const char *f = vcf_field_end(p, e);
+	const char *col[9];
+	const char *format_end = vcf_columns(aTHX_ r, p, f, e, col);
+	conc_grow(aTHX_ r, s);
+	conc_site *site = s->site + s->n;
+	site->pos = vcf_pos(aTHX_ r, col[1], col[2] - 1);
+	const char *chrom = conc_chrom(col[0], col[1] - 1);
+	site->hash = conc_hash(chrom, col[1] - 1, site->pos, col[3], col[4] - 1, col[4], col[5] - 1);
+	site->found = FALSE;
+	const size_t len = (size_t)(col[5] - p); // CHROM to ALT, and the tab after ALT, which becomes the '\n'
+	if (s->text_n + len > s->text_room) {
+		while (s->text_n + len > s->text_room) {
+			if (s->text_room > (size_t)-1 / 2) croak("%s: %s has more sites than this perl can hold (%" UVuf " already)", __func__, r->name, (UV)s->n); // doubling would wrap to 0, and loop for ever
+			s->text_room = s->text_room ? 2 * s->text_room : 1 << 20;
+		}
+		Renew(s->text, s->text_room, char);
+	}
+	site->text = s->text_n;
+	Copy(p, s->text + s->text_n, len, char);
+	s->text_n += len;
+	s->text[s->text_n - 1] = '\n';
+	size_t at = (size_t)site->hash & (s->slots - 1);
+	while (s->slot[at]) at = (at + 1) & (s->slots - 1);
+	s->slot[at] = ++s->n;
+	conc_call *call = s->call + (s->n - 1) * 2 * s->pairs;
+	Zero(call, 2 * s->pairs, conc_call); // the truth's calls stay no-calls unless it has the site
+	size_t gt, dp;
+	vcf_format(col[8], format_end, &gt, &dp);
+	p = format_end + 1;
+	for (size_t i = 0; i < r->n; i++) {
+		const char *se = vcf_sample(aTHX_ r, p, e, i);
+		if (s->test_pair[i]) conc_gt(aTHX_ r, p, se, gt, dp, i, call + 2 * (s->test_pair[i] - 1));
+		p = se + 1;
+	}
+	vcf_samples_end(aTHX_ r, p, e);
+}
+
+/*The truth's #CHROM line, which must be the one read before the test was.*/
+static void conc_header_truth(pTHX_ vcf_reader *r) {
+	conc_store *s = ((conc_reader*)r)->s;
+	if (r->n != s->truth_n) croak("%s: %s had %" UVuf " samples when it was first read, and has %" UVuf " now", __func__, r->name, (UV)s->truth_n, (UV)r->n);
+}
+
+/*The truth's record p..e: its calls for each pair, given to every test site
+that it is. A site the truth lists twice gives the test its last calls, as the
+script's hash of the truth's sites did.*/
+static void conc_record_truth(pTHX_ vcf_reader *r, const char *p, const char *e) {
+	conc_store *s = ((conc_reader*)r)->s;
+	if (!s->slots) return; // the test has no sites
+	const char *f = vcf_field_end(p, e);
+	const char *col[9];
+	const char *format_end = vcf_columns(aTHX_ r, p, f, e, col);
+	const UV pos = vcf_pos(aTHX_ r, col[1], col[2] - 1);
+	const char *chrom = conc_chrom(col[0], col[1] - 1);
+	const uint64_t hash = conc_hash(chrom, col[1] - 1, pos, col[3], col[4] - 1, col[4], col[5] - 1);
+	size_t hits = 0;
+	for (size_t at = (size_t)hash & (s->slots - 1); s->slot[at]; at = (at + 1) & (s->slots - 1)) {
+		const size_t k = s->slot[at] - 1;
+		const conc_site *site = s->site + k;
+		if (site->hash != hash || site->pos != pos) continue;
+		const char *fld[6];
+		conc_fields(s, k, fld);
+		if (!conc_eq(conc_chrom(fld[0], fld[1] - 1), fld[1] - 1, chrom, col[1] - 1) || !conc_eq(fld[3], fld[4] - 1, col[3], col[4] - 1)
+			|| !conc_eq(fld[4], fld[5] - 1, col[4], col[5] - 1)) continue;
+		if (hits == s->hit_room) {
+			s->hit_room = s->hit_room ? 2 * s->hit_room : 8; // a site the test lists more than once, which is rare
+			Renew(s->hit, s->hit_room, size_t);
+		}
+		s->hit[hits++] = k;
+	}
+	if (!hits) return;
+	size_t gt, dp;
+	vcf_format(col[8], format_end, &gt, &dp);
+	p = format_end + 1;
+	for (size_t i = 0; i < r->n; i++) {
+		const char *se = vcf_sample(aTHX_ r, p, e, i);
+		if (s->truth_pair[i]) conc_gt(aTHX_ r, p, se, gt, dp, i, s->truth + (s->truth_pair[i] - 1));
+		p = se + 1;
+	}
+	vcf_samples_end(aTHX_ r, p, e);
+	for (size_t h = 0; h < hits; h++) {
+		conc_site *site = s->site + s->hit[h];
+		if (!site->found) s->found++;
+		site->found = TRUE;
+		conc_call *call = s->call + s->hit[h] * 2 * s->pairs;
+		for (size_t k = 0; k < s->pairs; k++) call[2 * k + 1] = s->truth[k];
+	}
+}
+
+/*The sum of the counts c of the kinds in set, CONC_BIT()s.*/
+static UV conc_sum(const UV *c, uint64_t set) {
+	UV sum = 0;
+	for (unsigned short int k = 0; k < CONC_KINDS; k++) {
+		if (set & CONC_BIT(k)) sum += c[k];
+	}
+	return sum;
+}
+
+/*x / y as a mortal, or undef when y is 0, where the script gave the string
+"undefined" (and, for genotype_concordance, died).*/
+static SV *conc_ratio(pTHX_ UV x, UV y) {
+	return y ? sv_2mortal(newSVnv((NV)x / (NV)y)) : sv_newmortal();
+}
+
+static void conc_store_sv(pTHX_ HV *h, const char *key, SV *v) {
+	(void)hv_store(h, key, (I32)strlen(key), SvREFCNT_inc_simple_NN(v), 0);
+}
+
+/*The metrics of counts c, by the script's metrics() called as its main
+program called it, with no-calls left out ("no"), and with the corrections
+given above CONC_TP.*/
+static HV *conc_metrics(pTHX_ const UV *c) {
+	HV *m = newHV();
+	const UV tp = conc_sum(c, CONC_TP), fp_site = c[CONC_GAINED], fn_site = c[CONC_LOST];
+	const UV fp_ref = conc_sum(c, CONC_FP_REF), mismatch = conc_sum(c, CONC_MISMATCH);
+	const UV fp_genotype = fp_ref + mismatch, fn_genotype = conc_sum(c, CONC_FN_REF) + mismatch;
+	const UV tn = conc_sum(c, CONC_TN);
+	conc_store_sv(aTHX_ m, "tp_site", sv_2mortal(newSVuv(tp)));
+	conc_store_sv(aTHX_ m, "fp_site", sv_2mortal(newSVuv(fp_site)));
+	conc_store_sv(aTHX_ m, "fn_site", sv_2mortal(newSVuv(fn_site)));
+	conc_store_sv(aTHX_ m, "tn_site", sv_2mortal(newSVuv(tn)));
+	conc_store_sv(aTHX_ m, "tp_genotype", sv_2mortal(newSVuv(tp)));
+	conc_store_sv(aTHX_ m, "fp_genotype", sv_2mortal(newSVuv(fp_genotype)));
+	conc_store_sv(aTHX_ m, "fn_genotype", sv_2mortal(newSVuv(fn_genotype)));
+	conc_store_sv(aTHX_ m, "tn_genotype", sv_2mortal(newSVuv(tn)));
+	conc_store_sv(aTHX_ m, "genotype_concordance", conc_ratio(aTHX_ conc_sum(c, CONC_AGREE), conc_sum(c, CONC_CALLED)));
+	conc_store_sv(aTHX_ m, "precision_site", conc_ratio(aTHX_ tp, tp + fp_site));
+	conc_store_sv(aTHX_ m, "recall_site", conc_ratio(aTHX_ tp, tp + fn_site));
+	conc_store_sv(aTHX_ m, "precision_genotype", conc_ratio(aTHX_ tp, tp + fp_genotype));
+	conc_store_sv(aTHX_ m, "recall_genotype", conc_ratio(aTHX_ tp, tp + fn_genotype));
+	conc_store_sv(aTHX_ m, "specificity_genotype", conc_ratio(aTHX_ tn, tn + fp_ref));
+	return m;
+}
+
+/*Each pair's results, keyed by the test's name for its sample, from the test
+and truth names, the sites s holds, and whether to list the discordant,
+gained and lost ones.*/
+static HV *conc_results(pTHX_ const conc_store *s, AV *test_names, AV *truth_names, bool discordances) {
+	UV *count; // CONC_KINDS a pair
+	Newxz(count, s->pairs * CONC_KINDS, UV);
+	SAVEFREEPV(count);
+	AV **list; // each pair's discordances, or NULL
+	Newxz(list, s->pairs, AV*);
+	SAVEFREEPV(list);
+	for (size_t k = 0; k < s->pairs && discordances; k++) list[k] = (AV*)sv_2mortal((SV*)newAV());
+	for (size_t i = 0; i < s->n; i++) {
+		const conc_call *call = s->call + i * 2 * s->pairs;
+		const char *fld[6];
+		bool split = FALSE; // fld has been set
+		for (size_t k = 0; k < s->pairs; k++) {
+			const unsigned short int kind = conc_kind(call + 2 * k + 1, call + 2 * k);
+			count[k * CONC_KINDS + kind]++;
+			if (!list[k] || kind < CONC_DISCORDANT) continue;
+			if (!split) {
+				conc_fields(s, i, fld);
+				split = TRUE;
+			}
+			HV *row = newHV();
+			conc_store_sv(aTHX_ row, "chrom", sv_2mortal(newSVpvn(fld[0], (STRLEN)(fld[1] - 1 - fld[0]))));
+			conc_store_sv(aTHX_ row, "pos", sv_2mortal(newSVuv(s->site[i].pos)));
+			conc_store_sv(aTHX_ row, "id", sv_2mortal(newSVpvn(fld[2], (STRLEN)(fld[3] - 1 - fld[2]))));
+			conc_store_sv(aTHX_ row, "ref", sv_2mortal(newSVpvn(fld[3], (STRLEN)(fld[4] - 1 - fld[3]))));
+			conc_store_sv(aTHX_ row, "alt", sv_2mortal(newSVpvn(fld[4], (STRLEN)(fld[5] - 1 - fld[4]))));
+			conc_store_sv(aTHX_ row, "type", sv_2mortal(newSVpvn(CONC_NAME[kind], strlen(CONC_NAME[kind]))));
+			conc_store_sv(aTHX_ row, "test", conc_call_sv(aTHX_ call + 2 * k));
+			conc_store_sv(aTHX_ row, "truth", conc_call_sv(aTHX_ call + 2 * k + 1));
+			av_push(list[k], newRV_noinc((SV*)row));
+		}
+	}
+	HV *out = (HV*)sv_2mortal((SV*)newHV());
+	for (size_t k = 0; k < s->pairs; k++) {
+		SV **test = av_fetch(test_names, (SSize_t)s->test_col[k], 0), **truth = av_fetch(truth_names, (SSize_t)s->truth_col[k], 0);
+		if (!test || !truth) croak("%s: pair %" UVuf " has lost a sample's name", __func__, (UV)k); // cannot happen: both headers pushed every name
+		const UV *c = count + k * CONC_KINDS;
+		HV *pair = newHV();
+		HV *counts = newHV();
+		for (unsigned short int j = 0; j < CONC_KINDS; j++) (void)hv_store(counts, CONC_NAME[j], (I32)strlen(CONC_NAME[j]), newSVuv(c[j]), 0);
+		conc_store_sv(aTHX_ pair, "test_sample", sv_2mortal(newSVsv(*test)));
+		conc_store_sv(aTHX_ pair, "truth_sample", sv_2mortal(newSVsv(*truth)));
+		conc_store_sv(aTHX_ pair, "sites", sv_2mortal(newSVuv((UV)s->n)));
+		conc_store_sv(aTHX_ pair, "in_truth", sv_2mortal(newSVuv(s->found)));
+		(void)hv_store(pair, "counts", 6, newRV_noinc((SV*)counts), 0);
+		(void)hv_store(pair, "metrics", 7, newRV_noinc((SV*)conc_metrics(aTHX_ c)), 0);
+		(void)hv_store(pair, "discordances", 12, list[k] ? newRV_inc((SV*)list[k]) : newSV(0), 0);
+		(void)hv_store_ent(out, *test, newRV_noinc((SV*)pair), 0);
+	}
+	return out;
+}
+
+/*An on_header that reads no further, and an on_record that is never called
+after it, for _vcf_samples(), which reads only the #CHROM line.*/
+static void conc_stop(pTHX_ vcf_reader *r) {
+	r->stop = TRUE;
+}
+
+static void conc_skip(pTHX_ vcf_reader *r, const char *p, const char *e) {
+	PERL_UNUSED_ARG(r);
+	PERL_UNUSED_ARG(p);
+	PERL_UNUSED_ARG(e);
+}
+
 MODULE = Cn::Bioinf	PACKAGE = Cn::Bioinf
 PROTOTYPES: DISABLE
 
@@ -1203,3 +1788,52 @@ PPCODE:
 	PUSHs(sv_2mortal(newRV_inc((SV*)names)));
 	PUSHs(sv_2mortal(rel_counts(aTHX_ t, n)));
 	PUSHs(sv_2mortal(newRV_inc((SV*)sex)));
+
+void
+_vcf_samples(next, name)
+	SV *next
+	const char *name
+PPCODE:
+	vcf_reader r;
+	Zero(&r, 1, vcf_reader);
+	r.name = name;
+	r.on_header = conc_stop;
+	r.on_record = conc_skip;
+	vcf_read(aTHX_ next, &r);
+	XPUSHs(sv_2mortal(newRV_inc((SV*)r.names)));
+
+void
+_concordance(test_next, test_name, truth_next, truth_name, truth_names, min_depth, discordances)
+	SV *test_next
+	const char *test_name
+	SV *truth_next
+	const char *truth_name
+	AV *truth_names
+	UV min_depth
+	bool discordances
+PPCODE:
+	conc_store *s;
+	Newxz(s, 1, conc_store);
+	SAVEDESTRUCTOR_X(conc_store_free, s); // at this call's LEAVE, croak or not
+	s->truth_n = (size_t)(av_len(truth_names) + 1);
+	conc_reader test;
+	Zero(&test, 1, conc_reader);
+	test.r.name = test_name;
+	test.r.min_depth = min_depth;
+	test.r.on_header = conc_header_test;
+	test.r.on_record = conc_record_test;
+	test.s = s;
+	test.truth_names = truth_names;
+	vcf_read(aTHX_ test_next, &test.r);
+	conc_reader truth;
+	Zero(&truth, 1, conc_reader);
+	truth.r.name = truth_name;
+	truth.r.min_depth = min_depth;
+	truth.r.on_header = conc_header_truth;
+	truth.r.on_record = conc_record_truth;
+	truth.s = s;
+	vcf_read(aTHX_ truth_next, &truth.r);
+	HV *out = conc_results(aTHX_ s, test.r.names, truth.r.names, discordances);
+	EXTEND(SP, 2);
+	PUSHs(sv_2mortal(newRV_inc((SV*)out)));
+	PUSHs(sv_2mortal(newRV_inc((SV*)test.r.names)));

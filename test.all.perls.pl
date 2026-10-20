@@ -12,7 +12,9 @@
 #   * The x87 row, the quadmath-first run order and the 32-bit-IV advice are
 #     gone.  They exist in Stats::LikeR because its XS does floating-point
 #     arithmetic whose result depends on how wide an NV is and how it is
-#     computed; Bioinf.xs does none, so those axes have nothing to catch here.
+#     computed; Bioinf.xs's only floating point is concordance's ratios, one
+#     division each, which t/concordance.t compares within a relative 1e-15,
+#     so those axes have little to catch here.
 #
 # Automates the manual loop of:
 #     perlbrew use perl-5.10.1 && ./compile.sh

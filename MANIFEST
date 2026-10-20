@@ -10,8 +10,13 @@ SECURITY.md
 share/msa_plot.py
 t/blast.t
 t/checks.t
+t/concordance.t
 t/data/DEG20010421.fa
+t/data/concordance.test.vcf
+t/data/concordance.truth.vcf
+t/data/concordance_reference.pl
 t/data/hits.json
+t/data/make_concordance_vcf.pl
 t/data/make_fixtures.pl
 t/data/make_parent_vcf.pl
 t/data/parent.C.vcf

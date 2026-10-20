@@ -27,11 +27,11 @@ use Cn::Bioinf qw(sex_check);
 # are not in the distribution; they are why peddy's 0.6 is kept, being about
 # three times the highest male ratio and a third of the lowest female one:
 #
-#   genome.vcf.gz  whole genome  x_het 1990, x_hom_alt 68035  0.029 male
+#   genome.vcf.gz    whole genome  x_het 1990, x_hom_alt 68035  0.029 male
 #   exome.vcf.bz2    exome         x_het   81, x_hom_alt   784  0.103 male
-#   father.vcf.gz                 exome         x_het  246, x_hom_alt  1226  0.201 male
-#   daughter.vcf.gz                 exome         x_het 1514, x_hom_alt   912  1.660 female
-#   mother.vcf.gz                 exome         x_het 1563, x_hom_alt   913  1.712 female
+#   father.vcf.gz    exome         x_het  246, x_hom_alt  1226  0.201 male
+#   daughter.vcf.gz  exome         x_het 1514, x_hom_alt   912  1.660 female
+#   mother.vcf.gz    exome         x_het 1563, x_hom_alt   913  1.712 female
 
 my $dir = tempdir(CLEANUP => 1);
 # sex_check prints its report to STDOUT, which TAP is on too; Test::More has

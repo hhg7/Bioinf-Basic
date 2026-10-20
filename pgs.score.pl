@@ -7,7 +7,7 @@
 # weights is a PGS Catalog scoring file (default PGS000138.txt.gz), which has
 # to be downloaded first, from the link in the catalog's table of scores (such
 # as depression.pgs_scores_data.csv), and vcf a .vcf or .vcf.gz on GRCh37
-# (default the WGZ genome). The table, one row for
+# (default genome.vcf.gz, a whole genome). The table, one row for
 # each of the 26 populations and then each of the 5 super-populations ("all"),
 # is printed and written to pgs.<score>.<vcf>.tsv: n, mean, sd, 5% and 95% of
 # the population's scores, and each sample's z and percentile among them.
@@ -23,7 +23,7 @@
 # where its samples carry an ALT allele. The other positions are then written
 # in as 0/0, with 1000 Genomes' REF and ALT, so that the samples are scored on
 # the same variants as 1000 Genomes; that is right only where the sample was
-# sequenced, as in a whole genome, not an exome. On 2026-10-17 the WGZ genome
+# sequenced, as in a whole genome, not an exome. On 2026-10-17 genome.vcf.gz
 # scored 1.037 on 22,270 of PGS000138's variants this way, as each 1000
 # Genomes sample was, and 1.674 on 12,015 without.
 #

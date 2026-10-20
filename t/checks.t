@@ -273,6 +273,44 @@ dies_like sub { get_best_alignment_hit(spew('twice.json', qq({"BlastOutput2":[$r
 	}
 }
 
+# ---- concordance ------------------------------------------------------------
+
+# Added with concordance on 2026-10-19; t/concordance.t has the counts
+# themselves, and the errors that come from reading the files. Each case here
+# dies before any file is opened.
+{
+	my $hdr = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT";
+	my $truth = spew('conc.truth.vcf', "$hdr\tS\n1\t5\t.\tA\tG\t.\t.\t.\tGT\t0/1\n");
+	my $test = spew('conc.test.vcf', "$hdr\tS\n1\t5\t.\tA\tG\t.\t.\t.\tGT\t1/1\n");
+	is concordance(truth => $truth, test => $test, report => 0)->{S}{counts}{discordant_het_ref_to_hom_alt}, 1,
+		'concordance: the arguments below differ from these only where they say';
+	my %ok = (truth => $truth, test => $test);
+	my $none = catfile($dir, 'none.vcf');
+	my @cases = (
+		[[], qr/^concordance: needs "test", "truth"/, 'nothing'],
+		[[truth => $truth], qr/^concordance: needs "test"/, 'no test'],
+		[[test => $test], qr/^concordance: needs "truth"/, 'no truth'],
+		[[{ %ok }], qr/^concordance: takes name => value pairs, not a hash ref/, 'a hash ref'],
+		[[%ok, 'report'], qr/^concordance: takes name => value pairs, and was given an odd number of arguments/, 'an option with no value'],
+		[[%ok, depth => 7], qr/^concordance: doesn't know "depth"; it takes discordances, min_depth, report, test, truth/, 'a misspelled option'],
+		[[%ok, truth => [$truth]], qr/^concordance: "truth" must be a file name, not an ARRAY ref/, 'an array ref as "truth"'],
+		[[%ok, test => \'x'], qr/^concordance: "test" must be a file name, not a SCALAR ref/, 'a scalar ref as "test"'],
+		[[%ok, test => $none], qr/^concordance: "test" file "\Q$none\E" doesn't exist or isn't readable/, 'a test that is not there'],
+		[[%ok, truth => $dir], qr/^concordance: "truth" file ".+" doesn't exist or isn't readable/, 'a directory as "truth"'],
+		[[%ok, truth => spew('conc.bcf', '')], qr/^concordance: "truth" file .+conc\.bcf must end in \.vcf, \.vcf\.gz, \.vcf\.bgz or \.vcf\.bz2/, 'a BCF'],
+		[[%ok, min_depth => -1], qr/^concordance: "min_depth" must be a whole number, 0 or more, not "-1"/, 'min_depth -1'],
+		[[%ok, min_depth => 7.5], qr/^concordance: "min_depth" must be a whole number, 0 or more, not "7\.5"/, 'min_depth 7.5'],
+		[[%ok, min_depth => [7]], qr/^concordance: "min_depth" must be a whole number, 0 or more, not an ARRAY ref/, 'min_depth an array ref'],
+		[[%ok, discordances => 2], qr/^concordance: "discordances" must be 0 or 1, not "2"/, 'discordances 2'],
+		[[%ok, discordances => 'yes'], qr/^concordance: "discordances" must be 0 or 1, not "yes"/, 'discordances "yes"'],
+		[[%ok, report => 'yes'], qr/^concordance: "report" must be 0 or 1, not "yes"/, 'report "yes"'],
+	);
+	foreach my $c (@cases) {
+		my ($args, $re, $name) = @{ $c };
+		dies_like sub { concordance(@{ $args }) }, $re, "concordance: $name dies";
+	}
+}
+
 # ---- plot_msa ---------------------------------------------------------------
 
 my %two = (fasta => { a => 'MK', b => 'MV' }, filename => catfile($dir, 'x.png'), query => 'a');

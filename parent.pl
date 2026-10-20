@@ -7,9 +7,9 @@ use autodie ':default';
 use Cn::Bioinf qw(:all);
 use Cn::Util;
 
-my $father = "$ENV{HOME}/Documents/Genomics/father.vcf.gz";
+my $father   = "$ENV{HOME}/Documents/Genomics/father.vcf.gz";
 my $daughter = "$ENV{HOME}/Documents/Genomics/daughter.vcf.gz";
-my $mother  = '/home/con/Documents/Genomics/mother.vcf.gz';
+my $mother   = "$ENV{HOME}/Documents/Genomics/mother.vcf.gz";
 my ($is, $stats) = parent(parent => $father, child => $daughter);
 p $is;
 p $stats;

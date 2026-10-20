@@ -30,16 +30,20 @@
     my $kin = relatedness('mom.vcf.gz', 'dad.vcf.gz', 'kid.vcf.gz');
     print $kin->{'kid'}{'dad'}{category}; # by the sample names in the VCFs
 
+    # how well a test VCF's calls agree with a truth VCF's, sample by sample
+    my $conc = concordance(truth => 'NA12878.truth.vcf.gz', test => 'NA12878.run42.vcf.gz');
+    print $conc->{'NA12878'}{metrics}{genotype_concordance};
+
 # DESCRIPTION
 
 FASTA I/O in XS, BLAST hit ranking, and multiple-sequence-alignment plots and
-LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, and how every two people are related.
+LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, how every two people are related, and how well one VCF's calls agree with another's.
 
 Nothing is exported by default; ask for functions by name or with `:all`.
 Every function dies (via `Carp::croak`) on bad arguments, with a message that
 starts with the name of the function that raised it, as in
 `fasta2hash: couldn't find "four" in x.fa`. `pgs_score`, `sex_check`,
-`parent`, `relatedness`, `plot_msa`, `plot_phylo`, `msa_quality_table` and `clustal_view_residues`
+`parent`, `relatedness`, `concordance`, `plot_msa`, `plot_phylo`, `msa_quality_table` and `clustal_view_residues`
 take `name => value` pairs, not a hash ref.
 
 ## Alien::Bioinf
@@ -311,7 +315,7 @@ prints
 
     sex_check: genome.vcf.gz
     male when het/hom-ALT, over SNVs on X outside its pseudo-autosomal regions, is below 0.6; genotypes of DP below 7 not counted
-    sample              sex   het/hom-ALT  X het  X hom-ALT  X haploid  X missing  Y called
+    sample  sex   het/hom-ALT  X het  X hom-ALT  X haploid  X missing  Y called
     genome  male        0.029   1990      68035          0          0      2746
 
 with one row for each sample, in the VCF's order, and a last line counting
@@ -553,16 +557,16 @@ several VCFs, as a sequencing company delivers them:
 
 The second prints
 
-    relatedness: mother.vcf.gz, father.vcf.gz, daughter.vcf.gz
+    relatedness: mom.vcf.gz, dad.vcf.gz, kid.vcf.gz
     KING-robust kinship over autosomal biallelic SNVs where either carries the ALT, genotypes of DP below 10 not counted; first-degree from 0.177 to 0.354, and of those, parent and child when the IBS0 rate is below 0.012; male when het/hom-ALT on X outside its pseudo-autosomal regions is below 0.6
-    sample   sex     X het/hom-ALT  VCF
-    mother  female          1.690  mother.vcf.gz
-    father  male            0.206  father.vcf.gz
-    daughter  female          1.698  daughter.vcf.gz
-    sample   sample    sites  IBS0 rate  kinship  relationship
-    mother  father  171033     0.0810   0.0174  unrelated
-    mother  daughter  158616     0.0020   0.2604  mother-daughter (mother the parent)
-    father  daughter  150970     0.0030   0.2587  father-daughter (father the parent)
+    sample  sex     X het/hom-ALT  VCF
+    mom     female          1.690  mom.vcf.gz
+    dad     male            0.206  dad.vcf.gz
+    kid     female          1.698  kid.vcf.gz
+    sample  sample   sites  IBS0 rate  kinship  relationship
+    mom     dad     171033     0.0810   0.0174  unrelated
+    mom     kid     158616     0.0020   0.2604  mother-daughter (mom the parent)
+    dad     kid     150970     0.0030   0.2587  father-daughter (dad the parent)
 
 for the exomes of the family under `parent`, and returns the same. Every
 pair's counts are those `parent` gives for it.
@@ -664,6 +668,157 @@ for any one pair.
 
 The samples' hash has, for each sample, what `sex_check` returns for it
 (`sex`, `het_ratio`, `x_het`, `x_hom_alt` and the rest), and `file`, its VCF.
+
+A BCF is not read; convert it with `bcftools view -Oz`.
+
+## concordance(%args)
+
+Compares the genotype calls of a VCF under test with those of a truth VCF,
+sample by sample, and counts each kind of agreement and disagreement, as
+`x.low_ram_local_concordance.pl` did:
+
+    use Cn::Bioinf 'concordance';
+
+    my $r = concordance(truth => 'truth.vcf.gz', test => 'test.vcf.gz');
+    print $r->{NA12878}{metrics}{genotype_concordance};
+    foreach my $site (@{ $r->{NA12878}{discordances} }) {
+    	print "$site->{chrom}:$site->{pos} $site->{type}: test $site->{test}, truth $site->{truth}\n";
+    }
+
+This is based off of https://link.springer.com/article/10.1186/s12920-022-01199-8
+
+Each of the test's samples is compared with the truth's sample of the same
+name, and a sample in only one of the files is left out. When each file has
+exactly one sample, the two are compared whatever they are called, so a run
+named `run42` can be compared with its truth `NA12878`. When no sample can be
+paired, `concordance` dies and names some of each file's samples.
+
+Every record of the test is compared with the truth's record of the same
+CHROM, POS, REF and ALT. A `chr` prefix on CHROM, in any case, is ignored, and
+so is ID. When the truth has no such record, its call there is a no-call. A
+site that the truth has and the test lacks is not compared at all, so the
+test's sites are the ones measured, as for a genotyping panel against a
+genome. A site whose ALTs are listed in another order, or split over two
+records, is a different site.
+
+On `t/data/concordance.test.vcf` against `t/data/concordance.truth.vcf` it
+prints
+
+    concordance: test concordance.test.vcf against truth concordance.truth.vcf
+    each test site compared with the truth's of the same CHROM, POS, REF and ALT, a site the truth lacks being a no-call there; precision, recall and specificity are of genotypes
+    sample  sites  in truth  concordant  discordant  gained  lost  concordance  precision  recall  specificity
+    B          46        45          34          10       2     0       0.7674     0.9412  0.8889       0.9375
+    A          46        45          11          32       2     1       0.2381     0.4286  0.4286       0.1111
+    1 of the test's 3 samples are not in the truth: D
+
+When the paired samples' names differ, a `truth sample` column follows
+`sample`.
+
+The VCFs are decompressed by perl and compared in XS. The test is read first,
+and its sites are kept with their calls for the samples compared, about 100
+bytes a site for one sample. Then the truth is read a record at a time and
+looked up among them, so memory grows with the test, which is usually the
+smaller file. On 2026-10-19, one exome compared against another (274,879 test
+sites) took 1.9 s and 211 MB, or 1.7 s and 47 MB with `discordances => 0`,
+because most of that memory is the 163,376 discordant and gained sites
+returned. A genome compared with itself (3.5 million sites) took 14 s and 362
+MB, most of the time being gzip.
+
+- `truth`, `test`: the two VCFs, each a `.vcf`, `.vcf.gz`, `.vcf.bgz` or
+  `.vcf.bz2` file, as for `sex_check`.
+- `min_depth`: a genotype whose `DP` is below this is a no-call, in either
+  file. The default, 0, compares every genotype, as the script did. A `DP`
+  that is absent or `.` leaves the genotype compared.
+- `discordances`: 1 (the default) lists each discordant, gained and lost site
+  in `discordances`; 0 only counts them, and leaves `discordances` undef.
+- `report`: 1 (the default) prints the report to STDOUT; 0 prints nothing.
+
+A call is compared by its alleles, in either order and phased or not, so
+`1/0`, `0|1` and `0/1` are the same call. Each call is one of hom-REF
+(`0/0`), het-REF (`0/1`), hom-ALT (`1/1`, `2/2`), het-ALT (`1/2`),
+haploid-REF (`0`), haploid-ALT (`1`), or a no-call. A missing call (`.` or
+`./.`), a partly missing one (`./1`), one of more than two alleles, and one
+where FORMAT has no `GT` are all no-calls. Each comparison, truth first, is one
+of 45 kinds, the script's:
+
+- `concordant_` and the class, when the two calls are the same:
+  `concordant_hom_ref`, `concordant_het_ref`, `concordant_hom_alt`,
+  `concordant_het_alt`, `concordant_haploid_ref`, `concordant_haploid_alt` and
+  `concordant_no_call`.
+- `concordant_diploid_ref_to_haploid_ref` and
+  `concordant_haploid_ref_to_diploid_ref`, for `0/0` against `0` and `0`
+  against `0/0`; `concordant_hom_alt_to_diploid_alt` and
+  `concordant_haploid_alt_to_hom_alt`, for `1/1` against `1` and `1` against
+  `1/1`.
+- `lost_site`, when the truth has a call and the test a no-call, and
+  `gained_site`, when the test has a call and the truth a no-call.
+- `discordant_` and the two classes otherwise, as in
+  `discordant_het_ref_to_hom_alt` (`0/1` in the truth, `1/1` in the test).
+  Two different calls of the same class are discordant too, as in
+  `discordant_het_ref_to_het_ref` (`0/1` against `0/2`).
+
+`concordance` returns a hash keyed by the test's name for each sample
+compared. Each sample's hash has these fields on every return:
+
+- `test_sample`, `truth_sample`: the sample's name in each file.
+- `sites`: the test's records, every one compared; `in_truth`: how many of them
+  the truth has.
+- `counts`: a hash of the 45 kinds, each with its count, 0 included.
+- `metrics`: a hash of the script's metrics, taken from `counts`:
+  - `tp_site`: the matched calls that carry an ALT: `concordant_het_ref`,
+    `concordant_het_alt`, `concordant_hom_alt`, `concordant_haploid_alt`,
+    `concordant_hom_alt_to_diploid_alt` and
+    `concordant_haploid_alt_to_hom_alt`. `tp_genotype` is the same number.
+  - `fp_site`: `gained_site`; `fn_site`: `lost_site`.
+  - `tn_site`: the matched reference calls: `concordant_hom_ref`,
+    `concordant_haploid_ref`, `concordant_diploid_ref_to_haploid_ref` and
+    `concordant_haploid_ref_to_diploid_ref`. `tn_genotype` is the same
+    number.
+  - `fp_genotype`: the discordances where the test's call carries an ALT,
+    whether the truth's is a reference call or another ALT-carrying call;
+    `fn_genotype`: those where the truth's call carries an ALT, whether the
+    test's is a reference call or another ALT-carrying call. A discordance of
+    two ALT-carrying calls, such as `0/1` against `1/1`, is thus counted in
+    both, since the test's call is wrong and the truth's is missed.
+  - `genotype_concordance`: the concordant comparisons, less
+    `concordant_no_call`, over every comparison but `concordant_no_call`,
+    `gained_site` and `lost_site`.
+  - `precision_site`: `tp_site / (tp_site + fp_site)`; `recall_site`:
+    `tp_site / (tp_site + fn_site)`; `precision_genotype`:
+    `tp_genotype / (tp_genotype + fp_genotype)`; `recall_genotype`:
+    `tp_genotype / (tp_genotype + fn_genotype)`; `specificity_genotype`:
+    `tn_genotype` over `tn_genotype` and those of `fp_genotype` where the
+    truth is a reference call, since only those truths are negatives. Each
+    ratio is undef when its
+    denominator is 0, where the script gave the string `undefined`.
+- `discordances`: an array ref of the discordant, gained and lost sites, in the
+  test's order, each a hash of `chrom`, `pos`, `id`, `ref` and `alt` as the
+  test has them, `type` (the kind), and `test` and `truth`, the two calls as
+  GT writes them, or `.` for a no-call; or undef with `discordances => 0`.
+
+Four of the metrics are corrected from the script's. Its `tp_site` pattern,
+`/^conc\w+(?:alt|hom)/`, matched the `hom` in `concordant_hom_ref`, so a
+hom-REF site was a true positive as well as a true negative, and it missed
+`concordant_het_ref`, the commonest true positive. Its `tn_site` missed
+`concordant_diploid_ref_to_haploid_ref`, though it took the reverse. And its
+`tn_genotype` was `concordant_hom_ref` alone, though its false positives
+counted a haploid-REF truth called wrong, so `specificity_genotype` gave no
+credit for one called right, as on a male's X. And it counted a discordance
+of two ALT-carrying calls in neither `fp_genotype` nor `fn_genotype`, so that
+a wrong genotype at a variant site changed neither `precision_genotype` nor
+`recall_genotype`.
+
+`concordance` departs from the script where the script failed. The script
+took ID as part of a site, and dropped `chr` from the truth's CHROM alone, so
+two files that both had it shared no site. It compared GT strings, and so died
+on `1/0`, `0|1`, `./1` and calls of three alleles. And it made a no-call
+against `.` `discordant_no_call_to_no_call`, outside its own 45 kinds. Its XLSX workbook,
+JSON files and ACMG59 column are left to the caller, who has everything they
+were made from.
+
+`concordance` warns when the test has no records, and when none of the test's
+sites is in the truth, which usually means two genome builds, or two naming
+schemes for the chromosomes other than `chr`.
 
 A BCF is not read; convert it with `bcftools view -Oz`.
 
