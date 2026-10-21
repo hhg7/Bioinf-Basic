@@ -37,9 +37,11 @@ ap.add_argument('--p', help='JSON array of further provenance clauses to end the
 ap.add_argument('--quiet', action='store_true', help="don't print 'wrote' and the output file; the caller prints its own")
 ap.add_argument('--argfile', help='a JSON array of every other argument, in place of them on the command line')
 a = ap.parse_args()
-# Cn::Bioinf passes everything through --argfile, because perl's system(LIST)
-# on Windows does not escape a '"' inside an argument, and the JSON options and
-# the Creator ("... called using \"plot_msa\" ...") are full of them.
+# msa_quality_table passes everything through --argfile, because perl's
+# system(LIST) on Windows does not escape a '"' inside an argument, and the JSON
+# options and the Creator ("... called using \"plot_msa\" ...") are full of
+# them. plot_msa and plot_phylo run this with runpy, from a script that sets
+# sys.argv itself, so they need no command line at all.
 if a.argfile:
 	with open(a.argfile, encoding='utf-8') as fh:
 		a = ap.parse_args(json.load(fh))
@@ -73,6 +75,8 @@ def save(fig, title, also=(), notes=()):
 	fmt = a.o.rsplit('.', 1)[-1].lower()
 	md = {'Creator': creator} if fmt in ('svg', 'png', 'pdf', 'ps', 'eps') else None
 	fig.savefig(a.o, bbox_inches='tight', pad_inches=0.1, metadata=md)
+	# closed, since a script given as "fh" can draw many images in one process
+	plt.close(fig)
 	if not a.quiet:
 		print('wrote ' + a.o)
 

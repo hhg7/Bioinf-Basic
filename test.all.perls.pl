@@ -17,8 +17,8 @@
 #     so those axes have little to catch here.
 #
 # Automates the manual loop of:
-#     perlbrew use perl-5.10.1 && ./compile.sh
 #     perlbrew use perl-5.12.5 && ./compile.sh
+#     perlbrew use perl-5.16.3 && ./compile.sh
 #     perlbrew use perl-5.44.0 && ./compile.sh
 #
 # Each version is built in its own environment (no `perlbrew use` needed: the
@@ -143,9 +143,10 @@ Python into ~/.cache/alien-bioinf the first time; installs are run one at a
 time, even under -P, because the perls share that cache.
 
 options:
-  -p, --perl VERSION   only this perl (repeatable); accepts "5.10.1",
-                       "perl-5.10.1" or an exact directory name such as
+  -p, --perl VERSION   only this perl (repeatable); accepts "5.12.5",
+                       "perl-5.12.5" or an exact directory name such as
                        "5.44.0-quadmath".  default: every installed perl
+                       at least as new as dist.ini's minimum
   -l, --list           list the perls that would be tested, in run order, with
                        each one's NV width and threading, then exit
       --no-install     skip "make install" (build + test only)
@@ -153,7 +154,8 @@ options:
       --deps           cpanm any missing CONFIGURE_REQUIRES, PREREQ_PM or
                        TEST_REQUIRES for that perl first
       --no-alien       do not install Alien::Bioinf where it is missing
-                       (t/blast.t and t/msa.t will then fail on that perl)
+                       (t/msa.t and t/pgs.t then skip on that perl, as on a
+                       CPAN smoker)
       --stop-on-fail   abort at the first version that fails (with -P: launch
                        no more perls; the running ones finish)
   -P, --parallel [N]   build and test N perls at once, each in a private copy of
@@ -200,7 +202,27 @@ sub vkey {
 }
 @installed = sort { vkey($a) cmp vkey($b) } @installed;
 
-my @targets = @installed;
+# The distribution's minimum perl, from the "perl = 5.012" line under
+# [Prereqs] in dist.ini, as a vkey() of its own, so that a perl older than the
+# distribution supports is left out rather than failing at "require 5.012".
+sub min_perl_key {
+	open my $fh, '<', 'dist.ini' or die "$0: cannot read dist.ini: $!\n";
+	my $section = '';
+	while (my $line = <$fh>) {
+		$section = $1 if $line =~ /^\s*\[\s*(.*?)\s*\]/;
+		next unless $section eq 'Prereqs' && $line =~ /^\s*perl\s*=\s*(\d+)\.(\d{3})(\d{3})?\s*$/;
+		close $fh;
+		return (sprintf('%05d%05d%05d', $1, $2, $3 // 0), "$1." . ($2 + 0) . '.' . ($3 // 0));
+	}
+	die "$0: no \"perl = <version>\" under [Prereqs] in dist.ini\n";
+}
+my ($min_key, $min_perl) = min_perl_key();
+sub too_old { substr(vkey(shift), 0, 15) lt $min_key }
+
+my @targets = grep { !too_old($_) } @installed;
+if (my @old = grep { too_old($_) } @installed) {
+	print "-- skipping @old: older than perl $min_perl, the minimum in dist.ini\n" unless @only;
+}
 if (@only) {
 	my %have = map { $_ => 1 } @installed;
 	my (@want, @missing);
@@ -212,6 +234,8 @@ if (@only) {
 		else                { push @missing, $arg }
 	}
 	die "$0: not installed under perlbrew: @missing\n(installed: @installed)\n" if @missing;
+	my @old = grep { too_old($_) } @want;
+	die "$0: @old older than perl $min_perl, the minimum in dist.ini\n" if @old;
 	my %seen;
 	@targets = sort { vkey($a) cmp vkey($b) } grep { !$seen{$_}++ } @want;
 }
@@ -375,6 +399,17 @@ sub prereqs {
 }
 my @prereqs = prereqs();
 
+# Module => minimum version, from the CONFIGURE_REQUIRES of
+# alien/Alien-Bioinf/Makefile.PL, so this stays in sync with it.
+sub alien_configure_requires {
+	open my $fh, '<', File::Spec->catfile($alien_src, 'Makefile.PL') or return ();
+	local $/;
+	my $src = <$fh>;
+	close $fh;
+	my ($block) = $src =~ /\bCONFIGURE_REQUIRES\s*=>\s*\{(.*?)\}/s or return ();
+	return $block =~ /['"]([\w:]+)['"]\s*=>\s*['"]?([\d._]*)['"]?/g;
+}
+
 sub cpanm_for {
 	my $bin = shift;
 	my $own = File::Spec->catfile($bin, 'cpanm');
@@ -444,7 +479,19 @@ sub install_alien {
 		print $logfh "-- waiting for another perl's Alien::Bioinf install\n";
 		flock $lock, LOCK_EX or die "$0: flock $alien_lock: $!\n";
 	}
-	my ($code) = run_cmd([$perl, cpanm_for($bin), $work], $logfh);
+	# Makefile.PL there loads Alien::Build::MM before it can write a MYMETA, and
+	# the tree has no META, so cpanm cannot learn the configure prerequisites
+	# from it and dies at "use Alien::Build::MM" on a perl without them (every
+	# perl but perl-5.44.0, 2026-10-21).  So the missing ones are installed
+	# first, at the versions Makefile.PL asks for.
+	my @missing;
+	my %need = alien_configure_requires();
+	for my $mod (sort keys %need) {
+		my ($c) = run_cmd([$perl, '-e', "use $mod $need{$mod}"], $logfh);
+		push @missing, $need{$mod} ? "$mod~$need{$mod}" : $mod if $c != 0;
+	}
+	my ($code) = @missing ? run_cmd([$perl, cpanm_for($bin), '--notest', @missing], $logfh) : 0;
+	($code) = run_cmd([$perl, cpanm_for($bin), $work], $logfh) if $code == 0;
 	close $lock;   # releases the lock
 
 	if ($code == 0 && !$keep_work) { remove_tree($work) }

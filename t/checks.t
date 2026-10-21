@@ -1,4 +1,4 @@
-require 5.010;
+require 5.012;
 use strict;
 use warnings FATAL => 'all';
 use Test::More;
@@ -28,13 +28,8 @@ sub dies_like {
 sub slurp { open my $fh, '<', $_[0] or die "$_[0]: $!"; local $/; <$fh> }
 my @inc = map { "-I$_" } grep { !ref } @INC;
 
-# ---- loading ----------------------------------------------------------------
+#  loading
 
-{
-	package Plain;
-	Cn::Bioinf->import;
-	::ok !defined &Plain::fasta2hash && !defined &Plain::plot_msa, 'nothing is exported by default';
-}
 is system($^X, @inc, '-e', 'BEGIN { $0 = q{/no/such/script.pl} } require Cn::Bioinf'), 0,
 	'the module loads when $0 is not a file, which FindBin would croak on';
 # Alien::Bioinf hidden from require, as on a machine that could not install it
@@ -70,7 +65,7 @@ like slurp($err), qr/^_alien: plot_msa needs Alien::Bioinf, for Clustal Omega, B
 		"the Creator names the script's own path, not the working directory's";
 }
 
-# ---- _run -------------------------------------------------------------------
+#  _run
 
 # Up to 2026-10-07 _run read only the exit code, the high byte of $?, so a
 # program killed by a signal was reported as "exit 0".
@@ -82,7 +77,7 @@ SKIP: {
 		qr/^_run: .+ failed: killed by signal 15/, 'a death by signal is reported as one, not as "exit 0"';
 }
 
-# ---- undef file names -------------------------------------------------------
+#  undef file names
 
 # Up to 2026-10-07 the message interpolated the undef, which warned
 # "uninitialized value" -- fatally, under a caller's FATAL warnings, which then
@@ -98,7 +93,7 @@ foreach my $case (
 	is "@w", '', 'and with no warning';
 }
 
-# ---- hash2fasta_file --------------------------------------------------------
+#  hash2fasta_file 
 
 # Up to 2026-10-07 the width went straight to the XS as a UV: -1 wrapped round
 # to one line per sequence, and 'x' warned with no function name.
@@ -107,13 +102,13 @@ foreach my $w (-1, 1.5, 'x') {
 		qr/^hash2fasta_file: 4th argument must be a whole number, 0 or more, or undef, not "\Q$w\E"/, "width $w dies";
 }
 
-# ---- get_best_alignment_hit -------------------------------------------------
+#  get_best_alignment_hit 
 
 my $report = '{"report":{"results":{"search":{"query_title":"q","hits":[]}}}}';
 dies_like sub { get_best_alignment_hit(spew('twice.json', qq({"BlastOutput2":[$report,$report]}))) },
 	qr/^get_best_alignment_hit: two queries in .+twice\.json are both titled "q"/, 'two queries of one title die rather than one being lost';
 
-# ---- pgs_score --------------------------------------------------------------
+#  pgs_score 
 
 # Added with pgs_score on 2026-10-17; t/pgs.t has the scores themselves. Every
 # case that dies does so before PLINK 2 starts; the ones that score need it.
@@ -187,7 +182,7 @@ dies_like sub { get_best_alignment_hit(spew('twice.json', qq({"BlastOutput2":[$r
 	}
 }
 
-# ---- sex_check --------------------------------------------------------------
+#  sex_check 
 
 # Added with sex_check on 2026-10-18; t/sex.t has the counts themselves, and the
 # errors that come from reading the file.
@@ -227,7 +222,7 @@ dies_like sub { get_best_alignment_hit(spew('twice.json', qq({"BlastOutput2":[$r
 	}
 }
 
-# ---- relatedness ------------------------------------------------------------
+#  relatedness 
 
 # Added with relatedness on 2026-10-19; t/relatedness.t has the counts
 # themselves, and the errors that come from reading the files. Each case here
@@ -273,7 +268,7 @@ dies_like sub { get_best_alignment_hit(spew('twice.json', qq({"BlastOutput2":[$r
 	}
 }
 
-# ---- concordance ------------------------------------------------------------
+#  concordance 
 
 # Added with concordance on 2026-10-19; t/concordance.t has the counts
 # themselves, and the errors that come from reading the files. Each case here
@@ -311,7 +306,7 @@ dies_like sub { get_best_alignment_hit(spew('twice.json', qq({"BlastOutput2":[$r
 	}
 }
 
-# ---- plot_msa ---------------------------------------------------------------
+#  plot_msa 
 
 my %two = (fasta => { a => 'MK', b => 'MV' }, filename => catfile($dir, 'x.png'), query => 'a');
 foreach my $n (0, -1, 1.5, 'two') {
@@ -333,7 +328,24 @@ foreach my $case (
 	dies_like $case->[0], $case->[1], "dies: $case->[1]";
 }
 
-# ---- msa_quality_table ------------------------------------------------------
+# "fh" and "execute", as Matplotlib::Simple's plt takes them, are checked
+# before clustalo would run.
+open my $plain, '>', catfile($dir, 'plain.py') or die $!;
+foreach my $f ([\&plot_msa, 'plot_msa', %two_noq], [\&plot_phylo, 'plot_phylo', fasta => $two_noq{fasta}]) {
+	my ($code, $name, @args) = @{ $f };
+	foreach my $case (
+		[[execute => 'yes'], qr/^$name: "execute" must be 0 or 1, not "yes"/],
+		[[execute => 2],     qr/^$name: "execute" must be 0 or 1, not "2"/],
+		[[execute => []],    qr/^$name: "execute" must be 0 or 1, not an ARRAY ref/],
+		[[fh => $plain],     qr/^$name: "fh" must be a File::Temp object, as for Matplotlib::Simple, not a GLOB ref/],
+		[[fh => 'x.py'],     qr/^$name: "fh" must be a File::Temp object, as for Matplotlib::Simple, not "x\.py"/],
+	) {
+		dies_like sub { $code->(@args, @{ $case->[0] }) }, $case->[1], "dies: $case->[1]";
+	}
+}
+close $plain;
+
+#  msa_quality_table 
 
 # Two sequences, every pair with an e-value of 0, as BLAST reports strong hits
 my $hit = sub { { description => [{ title => $_[0] }], hsps => [{ evalue => 0 }] } };
@@ -350,7 +362,7 @@ dies_like sub { msa_quality_table(%q, 'alignment_json' => []) },
 dies_like sub { msa_quality_table(%q, order => ['E.f']) },
 	qr/^msa_quality_table: no pair of the sequences in "order" has a "evalue" value/, 'an order with nothing to draw dies';
 
-# ---- clustal_view_residues --------------------------------------------------
+#  clustal_view_residues 
 
 my $ab = hash2fasta_file({ 'a_b^c~d' => 'MK-LV', 'e{f}' => 'M-QLV' }, catfile($dir, 'ab.aln.fa'));
 my $tex = catfile($dir, 'r.tex');
@@ -381,5 +393,119 @@ is slurp(catfile($dir, 'out.txt')), "wrote $tex\n", 'the "wrote" line has no col
 my $body = slurp($tex);
 like $body, qr/^\\textit\{a\\_b\\textasciicircum\{\}c\\textasciitilde\{\}d\} & /m, 'a name\'s _, ^ and ~ print as themselves';
 like $body, qr/^\\textit\{e\\\{f\\\}\} & /m, 'and so do its braces';
+
+# ---- hirisplex_genotypes and trait_predict
+#
+# Neither needs any of Alien::Bioinf's programs, so every one of these runs
+# wherever the module builds. The VCF below is a well-formed one that holds
+# none of the panel's markers; what is being checked is the arguments, which
+# are refused before it is opened.
+{
+	my $vcf = spew('checks.vcf', "##fileformat=VCFv4.2\n##contig=<ID=1,length=249250621>\n"
+		. join("\t", '#CHROM', qw(POS ID REF ALT QUAL FILTER INFO FORMAT S)) . "\n"
+		. join("\t", 1, 100, 'rs1', 'A', 'G', '.', '.', '.', 'GT', '0/1') . "\n");
+	my $bam = spew('checks.bam', "not a VCF\n");
+	my $model = spew('checks_model.tsv', "trait\tcategory\tmarker\tbeta\neye\tblue\t(intercept)\t1\neye\tbrown\t(intercept)\t0\n");
+	my @bad = (
+		[['nowhere.vcf'], qr/^hirisplex_genotypes: "vcf" file "nowhere\.vcf" doesn't exist or isn't readable/, 'a missing file'],
+		[[vcf => $vcf, match => 'rsid'], qr/^hirisplex_genotypes: "match" must be "position" or "id", not "rsid"/, 'an unknown match'],
+		[[vcf => $vcf, build => 'hg18'], qr/^hirisplex_genotypes: "build" must be hg19, b37, hg38 or b38, not "hg18"/, 'an unknown build'],
+		[[vcf => $vcf, min_depth => -1], qr/^hirisplex_genotypes: "min_depth" must be a whole number, 0 or more, not "-1"/, 'a negative min_depth'],
+		[[vcf => $vcf, min_depth => '7.5'], qr/^hirisplex_genotypes: "min_depth" must be a whole number, 0 or more, not "7\.5"/, 'a fractional min_depth'],
+		[[vcf => $vcf, report => 2], qr/^hirisplex_genotypes: "report" must be 0 or 1, not "2"/, 'a report of 2'],
+		[[vcf => $vcf, file => []], qr/^hirisplex_genotypes: "file" must be a file name, not an ARRAY ref/, 'a file that is a ref'],
+		[[vcf => $vcf, colour => 1], qr/^hirisplex_genotypes: doesn't know "colour"; it takes build, file, match, min_depth, report, vcf/, 'an unknown option'],
+		[[vcf => $bam], qr/^hirisplex_genotypes: "vcf" file \Q$bam\E must end in \.vcf, \.vcf\.gz, \.vcf\.bgz or \.vcf\.bz2/, 'a file whose name says it is not a VCF'],
+	);
+	foreach my $case (@bad) {
+		my ($args, $re, $name) = @{ $case };
+		dies_like sub { hirisplex_genotypes(@{ $args }) }, $re, "hirisplex_genotypes: $name dies";
+	}
+	# A VCF whose header gives a length for none of the chromosomes the build
+	# is told by, and one whose lengths are neither build's.
+	my $nolen = spew('nolen.vcf', "##fileformat=VCFv4.2\n" . join("\t", '#CHROM', qw(POS ID REF ALT QUAL FILTER INFO FORMAT S)) . "\n");
+	dies_like sub { hirisplex_genotypes(vcf => $nolen, report => 0) },
+		qr/^hirisplex_genotypes: "vcf" .* has no ##contig line giving a length for chromosome 1, 15, 16, 20/,
+		'hirisplex_genotypes: a header with no length to tell the build by dies';
+	my $odd = spew('oddlen.vcf', "##fileformat=VCFv4.2\n##contig=<ID=1,length=1000>\n"
+		. join("\t", '#CHROM', qw(POS ID REF ALT QUAL FILTER INFO FORMAT S)) . "\n");
+	dies_like sub { hirisplex_genotypes(vcf => $odd, report => 0) },
+		qr/^hirisplex_genotypes: "vcf" .* gives chromosome lengths that are neither GRCh37's nor GRCh38's \(1 is 1000\)/,
+		'hirisplex_genotypes: a header whose lengths are neither build\'s dies';
+	# Matching by rs number needs no build, so a header with no lengths is
+	# enough for it; the file holds no marker, so every one is missing.
+	{
+		my $g;
+		my $warned = '';
+		local $SIG{__WARN__} = sub { $warned .= $_[0] };
+		$g = hirisplex_genotypes(vcf => $vcf, match => 'id', report => 0);
+		is $g->{S}{called}, 0, 'hirisplex_genotypes: a VCF with none of the markers calls none of them';
+		is $g->{S}{markers}, 41, 'hirisplex_genotypes: and still counts the whole panel';
+		is $g->{S}{eye}, 0, 'hirisplex_genotypes: with no HERC2 marker, no eye prediction is allowed';
+		like $warned, qr/^hirisplex_genotypes: "vcf" .* holds none of the 41 HIrisPlex-S markers/,
+			'hirisplex_genotypes: and it says so, rather than returning an empty answer quietly';
+	}
+
+	my @bad_model = (
+		[[genotypes => 'x', model => $model], qr/^trait_predict: "genotypes" must be a hash ref of sample => genotypes, as hirisplex_genotypes returns, not "x"/, 'genotypes that are a string'],
+		[[genotypes => {}, model => $model], qr/^trait_predict: "genotypes" has no samples/, 'no samples'],
+		[[genotypes => { S => 'x' }, model => $model], qr/^trait_predict: "genotypes" sample "S" must be a hash ref, not "x"/, 'a sample that is a string'],
+		[[genotypes => { S => {} }, model => 'nowhere.tsv'], qr/^trait_predict: "model" file "nowhere\.tsv" doesn't exist or isn't readable/, 'a missing model'],
+		[[genotypes => { S => {} }, model => [{ trait => 'eye' }]], qr/^trait_predict: "model" has no "category", "marker", "beta" columns; a model table has trait, category, marker and beta/, 'a model missing columns'],
+		[[genotypes => { S => {} }, model => [{ trait => 'eye', category => 'blue', marker => 'm', beta => 'x' }]],
+			qr/^trait_predict: row 1 of "model" has beta "x", which isn't a number/, 'a beta that is not a number'],
+		[[genotypes => { S => {} }, model => [{ trait => 'eye', category => 'blue', marker => '', beta => 1 }]],
+			qr/^trait_predict: row 1 of "model" has no marker/, 'a row with no marker'],
+		[[genotypes => { S => {} }, model => [{ trait => 'eye', category => 'blue', marker => 'm', beta => 1 },
+			{ trait => 'eye', category => 'blue', marker => 'm', beta => 2 }]],
+			qr/^trait_predict: row 2 of "model" gives eye category "blue" a second beta for m/, 'a marker given two betas'],
+		[[genotypes => { S => {} }, model => $model, force => 2], qr/^trait_predict: "force" must be 0 or 1, not "2"/, 'a force of 2'],
+		[[genotypes => { S => {} }, model => $model, shade => 1], qr/^trait_predict: doesn't know "shade"; it takes force, genotypes, model, report/, 'an unknown option'],
+	);
+	foreach my $case (@bad_model) {
+		my ($args, $re, $name) = @{ $case };
+		dies_like sub { trait_predict(@{ $args }) }, $re, "trait_predict: $name dies";
+	}
+	# A model of one category is still a model: its probability is 1.
+	my $one = trait_predict(genotypes => { S => { m => 2 } },
+		model => [{ trait => 't', category => 'only', marker => '(intercept)', beta => '-3' }], report => 0);
+	is $one->{S}{t}{p}{only}, 1, 'trait_predict: a model of one category gives it a probability of 1';
+	is $one->{S}{t}{call}, 'only', 'trait_predict: and calls it';
+}
+
+# ---- pdb_search
+#
+# Each of these is refused before RCSB is asked, so _rcsb_post is replaced by
+# one that dies, which would show in the message if it were reached.
+{
+	no warnings 'redefine';
+	local *Cn::Bioinf::_rcsb_post = sub { die "the network was used\n" };
+	my $seq = 'MVLSPADKTNVKAAWGKV';
+	my @bad = (
+		[[], qr/^pdb_search: needs "seq"/, 'no sequence'],
+		[[seq => ['MK']], qr/^pdb_search: "seq" must be a sequence, as a string, not an ARRAY ref/, 'a sequence that is a ref'],
+		[[seq => " \n*"], qr/^pdb_search: "seq" has no residues/, 'a sequence of only whitespace and a stop'],
+		[[seq => 'MVLS-PADK'], qr/^pdb_search: "seq" has "-" at residue 5, which isn't a residue letter/, 'a gap in the sequence'],
+		[[seq => 'MV*LSPADK'], qr/^pdb_search: "seq" has "\*" at residue 3, which isn't a residue letter/, 'a stop that is not at the end'],
+		[[seq => $seq, evalue => 0], qr/^pdb_search: "evalue" must be a number above 0, not "0"/, 'an evalue of 0'],
+		[[seq => $seq, evalue => 'x'], qr/^pdb_search: "evalue" must be a number above 0, not "x"/, 'an evalue that is not a number'],
+		[[seq => $seq, identity => 101], qr/^pdb_search: "identity" must be a percentage, from 0 to 100, not "101"/, 'an identity above 100'],
+		[[seq => $seq, identity => -1], qr/^pdb_search: "identity" must be a percentage, from 0 to 100, not "-1"/, 'a negative identity'],
+		[[seq => $seq, max_hits => 0], qr/^pdb_search: "max_hits" must be a whole number from 1 to 10000, RCSB's limit, not "0"/, 'a max_hits of 0'],
+		[[seq => $seq, max_hits => 10001], qr/^pdb_search: "max_hits" must be a whole number from 1 to 10000, RCSB's limit, not "10001"/, 'a max_hits past RCSB\'s limit'],
+		[[seq => $seq, max_hits => 2.5], qr/^pdb_search: "max_hits" must be a whole number from 1 to 10000, RCSB's limit, not "2\.5"/, 'a fractional max_hits'],
+		[[seq => $seq, computed => 'yes'], qr/^pdb_search: "computed" must be 0 or 1, not "yes"/, 'a computed of "yes"'],
+		[[seq => $seq, type => 'DNA'], qr/^pdb_search: "type" must be protein, dna or rna, not "DNA"/, 'an unknown type'],
+		[[seq => $seq, report => 2], qr/^pdb_search: "report" must be 0 or 1, not "2"/, 'a report of 2'],
+		[[seq => $seq, timeout => 0], qr/^pdb_search: "timeout" must be a number of seconds above 0, not "0"/, 'a timeout of 0'],
+		[[seq => $seq, fasta => 'x.fa'], qr/^pdb_search: doesn't know "fasta"; it takes computed, evalue, identity, max_hits, report, seq, timeout, type/, 'an unknown option'],
+	);
+	foreach my $case (@bad) {
+		my ($args, $re, $name) = @{ $case };
+		dies_like sub { pdb_search(@{ $args }) }, $re, "pdb_search: $name dies";
+	}
+	# the positive sentinel: a good call does get as far as asking RCSB
+	dies_like sub { pdb_search(seq => $seq) }, qr/^the network was used/, 'pdb_search: a good call reaches RCSB';
+}
 
 done_testing;

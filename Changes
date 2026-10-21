@@ -91,3 +91,54 @@ Revision history for Cn-Bioinf
    is a false positive and a false negative, where the script counted it
    as neither. XS compares them, holding only the test's sites: two exomes
    took 1.9 s, and a genome against itself 14 s.
+ - concordance dies, before reading any records, when the two VCFs'
+   ##contig lines give one contig two lengths, as GRCh37 and GRCh38 do,
+   and names the contigs and each header's build. Two such files used to
+   be compared position by position, which matched few sites, and those
+   by chance.
+ - hirisplex_genotypes reads the 41 markers of the HIrisPlex-S eye, hair
+   and skin colour panel out of a VCF and counts, for each sample, how
+   many copies of each marker's model allele it carries, writing them as
+   the CSV the HIrisPlex-S webtool uploads. The panel ships as
+   share/hirisplex_s_panel.tsv, written by share/make_hirisplex_panel.pl
+   from the webtool's own input form and Ensembl; no prediction model
+   ships, because HIrisPlex-S's coefficients are not published and part of
+   the knowledge behind them is covered by European patent EP2195448.
+   Markers are matched by position on GRCh37 or GRCh38, read from the
+   VCF's ##contig lengths unless "build" says, or by rs number. The panel
+   records the forward-strand allele to count, so nothing is guessed: 14
+   of the 41 are the complement of the allele the webtool names, ASIP
+   rs6119471 carries the named allele on the forward strand and still has
+   to be flipped, as the HIrisPlex-S manual says, and MC1R rs312262906 is
+   the 86insA frameshift, merged into rs796296176, which is counted as the
+   allele longer than REF. XS reads the file in one pass, keeping one byte
+   per sample per marker. Each sample is returned with which predictions
+   the manual's rules allow at all: no eye colour without HERC2
+   rs12913832, no hair colour when all 11 MC1R markers are missing.
+ - trait_predict applies a multinomial logistic regression, which is what
+   the IrisPlex, HIrisPlex and HIrisPlex-S models are, to those genotypes
+   and a model table the caller supplies, and returns a probability for
+   each category of each trait. A marker with no genotype drops out of the
+   sum, which counts it as 0 copies, and the markers used and missing are
+   returned with every prediction so that one made from few markers can be
+   reported as such. A trait that hirisplex_genotypes says cannot be
+   predicted is not, unless "force" is 1.
+ - pdb_search searches the RCSB PDB's structures for a sequence, and
+   returns the matching polymer entities best first, each with how well it
+   aligns (E-value, bit score, identity, coverage, gaps and the aligned
+   sequences, under get_best_alignment_hit's names) and what kind of
+   structure it is: method, resolution or a computed model's pLDDT,
+   oligomeric state and symmetry, chains, organism, UniProt, Pfam and
+   InterPro entries, and ligands. It prints a table of them. RCSB aligns
+   with MMseqs2, so the scores are MMseqs2's, not blastp's. It needs the
+   network and HTTPS, so IO::Socket::SSL and Net::SSLeay are recommended,
+   and HTTP::Tiny 0.056 is now required.
+ - plot_msa and plot_phylo take "fh" and "execute", as Matplotlib::Simple's
+   plt does. Each image is drawn by a Python script that stands alone,
+   appended to "fh", a File::Temp, when one is given; "execute => 0"
+   writes the script without running it, so several images, theirs and
+   Matplotlib::Simple's, can be drawn by one run of Python. The script
+   carries the alignment or tree it draws, so it still runs after perl's
+   temporary files are gone. Both functions now return "python_file", the
+   script's name, and print "will write" rather than "wrote" for an image
+   not drawn yet.

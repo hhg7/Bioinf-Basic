@@ -13,8 +13,28 @@ parent and child (`parent`), how every two people are related
 (`relatedness`), and how well a test VCF's calls agree with a truth VCF's
 (`concordance`) from VCFs, counted in XS by one shared VCF reader, the `vcf_*`
 functions (`sex_check` and `parent` since 2026-10-18, `relatedness` and
-`concordance` since 2026-10-19). It is meant for CPAN, so it has to work on
-perls and platforms that are not this one.
+`concordance` since 2026-10-19), and the genotypes of the HIrisPlex-S eye,
+hair and skin colour panel (`hirisplex_genotypes`, read by the same VCF
+reader) with a predictor for any multinomial logistic model the caller
+supplies (`trait_predict`), both since 2026-10-20, and a search of the RCSB
+PDB's structures for a sequence (`pdb_search`, since 2026-10-21), which asks
+RCSB's search and data APIs over HTTPS with HTTP::Tiny and is tested offline
+by replaying `t/data/pdb_search.json`. It is meant for CPAN, so it has to work
+on perls and platforms that are not this one.
+
+## No prediction model ships
+
+`hirisplex_genotypes` prepares the HIrisPlex-S webtool's input and makes no
+prediction, and `trait_predict` applies only a model the caller supplies.
+That is deliberate and must stay so: the HIrisPlex-S coefficients are not
+published (Chaitanya et al. 2018 cites them by reference; the webtool offers
+no download and says no part of it may be reproduced without consent), and
+part of the knowledge behind them is covered by European patent EP2195448. Do
+not add a coefficient table to this distribution, and never write one from
+memory -- an unsourced number here would be a defect twice over. What is
+public, and what `share/hirisplex_s_panel.tsv` holds, is the panel itself,
+taken from the webtool's own input form by
+`share/make_hirisplex_panel.pl`.
 
 On 2026-10-07 the rules below were merged in from the `CLAUDE.md` of three
 sibling distributions: `~/Scripts/stats` (Stats::LikeR, XS),
@@ -66,7 +86,7 @@ belongs in both copies.
   `git diff lib/Cn/Bioinf.pm` after a run that nothing was lost.
 - `md2pod.pl` is an author-only helper that `[PruneFiles]` keeps out of the
   tarball. Like the helper scripts in `~/Scripts/stats`, it may use modern perl
-  (`use 5.044`), whereas the module and `t/` are held to 5.10.
+  (`use 5.044`), whereas the module and `t/` are held to 5.12.
 
 ### Other build output
 
@@ -123,7 +143,7 @@ release note. These rules are taken from `~/Scripts/stats/CLAUDE.md` and
   caller's own string.
 - Prefer a core module to a new dependency. `_wrote` writes its ANSI escapes
   itself rather than loading `Term::ANSIColor`. A new prereq must be justified,
-  added to `dist.ini`, and installable on `perl-5.10.1`.
+  added to `dist.ini`, and installable on `perl-5.12.5`.
 
 ### Callers run under `use warnings FATAL => 'all'`
 
@@ -281,7 +301,7 @@ while writing; no test run here will catch it.
   module gets the plain one, which put Stats::LikeR 0.316's `srand` out of step.
 - If a Solaris or POSIX declaration ever goes missing under strict C99, add
   the `_GNU_SOURCE`/`__EXTENSIONS__` block from the top of `LikeR.xs`. If a
-  perl API newer than 5.10 is used, add `ppport.h`; `Bioinf.xs` has needed
+  perl API newer than 5.12 is used, add `ppport.h`; `Bioinf.xs` has needed
   neither so far.
 - The C99 flag is probed by the `[MakeMaker::Awesome]` header in `dist.ini`.
   Change the probe there, not only in the hand-kept `Makefile.PL`.
@@ -359,12 +379,10 @@ The rules in this section come from SimpleFlow.
 
 ### Leak tests and old perls
 
-`t/fasta.t` uses `Test::LeakTrace` where it is installed. Two perls' own bugs
-broke Stats::LikeR's leak tests, and nothing in the local matrix reproduces
-the first:
+`t/fasta.t` uses `Test::LeakTrace` where it is installed. A perl's own bug
+broke Stats::LikeR's leak tests (another, on 5.10.0, is below this module's
+minimum):
 
-- On 5.10.0, every evaluation of a `qr//` leaks one SV. Compile a pattern into
-  a lexical before the `no_leaks_ok` block and pass that lexical in.
 - On 5.32, regcomp leaks on every run-time-compiled pattern. Never interpolate
   a variable into a match that runs more than once per value in a leak-tested
   function; cache the compiled `qr//` instead.
@@ -379,16 +397,20 @@ genuinely slow cases behind `EXTENDED_TESTING` rather than dropping them.
 
 ## Every change must hold across the support matrix
 
-`dist.ini` declares `perl = 5.010`, and `lib/Cn/Bioinf.pm` says
-`require 5.010`.
+`dist.ini` declares `perl = 5.012`, the Makefile.PL's `MIN_PERL_VERSION` is
+`5.012`, and `lib/Cn/Bioinf.pm` says `require 5.012`. The minimum was 5.10
+until 2026-10-21, when the maintainer raised it to match Alien::Bioinf, which
+cannot be installed on 5.10 (see below). `test.all.perls.pl` reads it from
+`dist.ini` and leaves older perls out.
 
-### Back to perl 5.10
+### Back to perl 5.12
 
-- 5.10 syntax only: no signatures, no postfix dereference, no `s///r`, no
+- 5.12 syntax only: no signatures, no postfix dereference, no `s///r`, no
   `package NAME BLOCK`, no `keys`/`values`/`each` on a reference, no `__SUB__`,
-  `fc`, `isa` or lexical subs. `//` and `state` are 5.10, but `say` needs
-  `use feature 'say'`.
-- Tests keep the existing header: `require 5.010; use strict; use warnings
+  `fc`, `isa` or lexical subs. `//` and `state` are 5.10, and `package NAME
+  VERSION`, `...` and `keys`/`values`/`each` on an array are 5.12, but `say`
+  needs `use feature 'say'`.
+- Tests keep the existing header: `require 5.012; use strict; use warnings
   FATAL => 'all';`. `md2pod.pl`, `test.all.perls.pl`, `xs.check.pl` and the
   other helpers do not ship and may use modern perl.
 - Raising the minimum is the maintainer's decision, never a way to make an
@@ -406,12 +428,32 @@ default), `perl-5.42.3` (threaded), `perl-5.32.1`, `perl-5.12.5` (long double),
 Alien::Bioinf into any perl that lacks it, and with `-p` against chosen ones.
 Run it for anything that touches `Bioinf.xs` or `lib/Cn/Bioinf.pm`.
 
-On 2026-10-07 only `perl-5.44.0` had Alien::Bioinf. Every other perl failed at
-the script's `alien` step, because Alien::Build was not installed on it, and
-all of them but `perl-5.10.1` also lacked File::ShareDir::Install, which
-`Makefile.PL` needs. Until those are installed, test a copy of the tree on each
-perl directly, with any missing pure-perl prereqs on `PERL5LIB`; `t/msa.t` then
-skips, as it does on a CPAN smoker.
+On 2026-10-21 every perl had Alien::Build, File::ShareDir::Install and the
+rest of the CPAN prereqs (installed by `--deps`), and six had Alien::Bioinf:
+`perl-5.44.0`, `perl-5.42.3`, `perl-5.32.1`, `5.44.0-quadmath`, `perl-5.12.5`
+and `5.16.3-thr-ld`. The last two needed Alien::Bioinf's Makefile.PL to ask for
+HTTP::Tiny 0.018 (5.16.3's core 0.017 got "599 SSL connection failed" from
+GitHub) and IO::Uncompress::Unzip 2.030 (5.12.5's core 2.024 never ended the
+loop over the plink2 zip, and the install was killed after 30 minutes); its
+comment there gives the details. The other two cannot install it here:
+
+- `perl-5.10.1`: Alien::CPython3 needs File::Copy::Recursive, whose tests need
+  Test::Deep, and Test::Deep 1.205 requires perl 5.12. So since 2026-10-21
+  Alien::Bioinf requires 5.012 (`use 5.012` heads its Makefile.PL, so a 5.10
+  smoker reports NA), and so does Cn::Bioinf. `test.all.perls.pl` skips this
+  perl, which stays installed only as a perl below the minimum.
+- `5.44.0-i686`: Net::SSLeay does not compile, since this machine has no
+  32-bit OpenSSL headers (`openssl/opensslconf.h`).
+
+Test `5.44.0-i686` with `./test.all.perls.pl --no-alien`; `t/msa.t` and
+`t/pgs.t` then skip, as on a CPAN smoker.
+
+A failed Alien::Bioinf install keeps its build tree in `.build/multiperl/work/`,
+and one that got as far as its venv holds symlinks to the same `python3`.
+MakeMaker's kit check walks the whole tree and dies on them, silently, with
+exit 255, so every later `perl Makefile.PL` in the root fails, on every perl,
+until that tree is removed. The parallel mode builds in private copies that
+leave `.build/` out, and is not affected.
 
 Because the IV width and the NV width are independent, any cast from a size or
 an `NV` to `IV` must be gated on `IV_MAX`, and `5.44.0-i686` is the perl that

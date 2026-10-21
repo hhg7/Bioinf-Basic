@@ -8,6 +8,10 @@
 
     my $hits = get_best_alignment_hit('blast.json', 'bit_score');
 
+    # the PDB structures that match a sequence, how well, and what kind they are
+    my $pdb = pdb_search(seq => $one);
+    print "$pdb->[0]{id} $pdb->[0]{pident}% $pdb->[0]{method} $pdb->[0]{resolution}\n";
+
     # one clustalo run: plot_msa keeps the guide tree, and plot_phylo draws it
     plot_msa(
     	fasta       => 'orthologs.fa',     # or { name => sequence }
@@ -34,16 +38,23 @@
     my $conc = concordance(truth => 'NA12878.truth.vcf.gz', test => 'NA12878.run42.vcf.gz');
     print $conc->{'NA12878'}{metrics}{genotype_concordance};
 
+    # the 41 HIrisPlex-S markers, as the webtool's CSV wants them
+    my $g = hirisplex_genotypes(vcf => 'genome.vcf.gz', file => 'hirisplexs.csv');
+
+    # ... and a prediction from a multinomial logistic model you supply
+    my $p = trait_predict(genotypes => $g, model => 'my_model.tsv');
+    print $p->{'NA12878'}{eye}{call};
+
 # DESCRIPTION
 
-FASTA I/O in XS, BLAST hit ranking, and multiple-sequence-alignment plots and
-LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, how every two people are related, and how well one VCF's calls agree with another's.
+FASTA I/O in XS, BLAST hit ranking, a search of the PDB's structures for a
+sequence, and multiple-sequence-alignment plots and LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, how every two people are related, how well one VCF's calls agree with another's, and the genotypes of the HIrisPlex-S eye, hair and skin colour panel, with a trait predictor for any multinomial logistic model you supply.
 
 Nothing is exported by default; ask for functions by name or with `:all`.
 Every function dies (via `Carp::croak`) on bad arguments, with a message that
 starts with the name of the function that raised it, as in
-`fasta2hash: couldn't find "four" in x.fa`. `pgs_score`, `sex_check`,
-`parent`, `relatedness`, `concordance`, `plot_msa`, `plot_phylo`, `msa_quality_table` and `clustal_view_residues`
+`fasta2hash: couldn't find "four" in x.fa`. `pdb_search`, `pgs_score`, `sex_check`,
+`parent`, `relatedness`, `concordance`, `hirisplex_genotypes`, `trait_predict`, `plot_msa`, `plot_phylo`, `msa_quality_table` and `clustal_view_residues`
 take `name => value` pairs, not a hash ref.
 
 ## Alien::Bioinf
@@ -53,8 +64,9 @@ Clustal Omega, BLAST+, PLINK 2 and the Python that draws the plots come from
 is recommended rather than required, because it can only be installed where
 NCBI builds BLAST+ (Linux and macOS on x86\_64 and aarch64, and Windows on
 x86\_64) and it needs the network; PLINK 2 has no build for Linux on aarch64,
-so there it installs the rest. `fasta2hash`, `hash2fasta_file` and
-`get_best_alignment_hit` work without it; `pgs_score`, `plot_msa`,
+so there it installs the rest. `fasta2hash`, `hash2fasta_file`,
+`get_best_alignment_hit`, `sex_check`, `parent`, `relatedness`, `concordance`,
+`hirisplex_genotypes` and `trait_predict` work without it; `pgs_score`, `plot_msa`,
 `plot_phylo`, `msa_quality_table`, and `clustal_view_residues` given an
 unaligned file, die saying that they need it. A CPAN client does not install a recommended module
 unless asked, so install it first:
@@ -157,6 +169,109 @@ nr has one for each accession of the same sequence; `accession`, `id` and
 `positive` or `score`. Ties are broken on the bit score, then on BLAST's
 order. A report with two queries of one title dies, since only one of them
 could be returned.
+
+## pdb_search(%args)
+
+Searches the structures of the [RCSB PDB](https://www.rcsb.org/) for a
+sequence, and returns the matching ones, best first, each with how well it
+aligns and what kind of structure it is:
+
+    use Cn::Bioinf qw(pdb_search);
+
+    my $hits = pdb_search(seq => 'MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMF...');
+    my $best = $hits->[0];
+    print "$best->{id}: $best->{pident}% identical over $best->{query_cover}% of the query, ",
+    	"$best->{method} at $best->{resolution} A, $best->{oligomeric_state}\n";
+    # 1BZ1_1: 100% identical over 100% of the query, X-ray at 1.59 A, Hetero 4-mer
+
+    my ($hits, $total) = pdb_search(seq => $seq, max_hits => 10); # and how many RCSB found
+
+It needs the network, and HTTPS, which HTTP::Tiny gets from `IO::Socket::SSL`
+and `Net::SSLeay`; without them it dies saying which is missing. It asks two
+of RCSB's APIs: the [search API](https://search.rcsb.org/) finds the polymer
+entities (one distinct chain of a structure) whose sequence matches, and the
+[data API](https://data.rcsb.org/) says what each one's structure is.
+
+RCSB aligns with MMseqs2, not BLAST, so the numbers are MMseqs2's: its E-value
+and bit score are on BLAST's scale but are not what `blastp` would give for the
+same pair. They are returned under the names `get_best_alignment_hit` gives a
+BLAST hsp.
+
+### Arguments
+
+- `seq` (required): the sequence, as a string. Whitespace is removed, lower
+  case is made upper case, and a final `*` (a stop) is dropped, so a sequence
+  pasted from a FASTA file can be given as it is; any other character that is
+  not a letter dies. RCSB itself refuses a sequence shorter than 10 residues.
+- `type`: `protein` (the default), `dna` or `rna`.
+- `evalue`: hits with this E-value or above are left out. The default is 0.1,
+  not BLAST's 10, which in a search of the whole PDB lets in hits expected 10
+  times over by chance.
+- `identity`: hits with less identity than this percentage are left out
+  (default 0).
+- `max_hits`: the most hits returned (default 100). RCSB allows up to 10000.
+- `computed`: 0 (the default) searches experimental structures only; 1 also
+  searches the computed structure models RCSB holds, from AlphaFold DB and
+  ModelArchive.
+- `report`: 1 (the default) prints a table of the hits to STDOUT; 0 returns
+  them only.
+- `timeout`: seconds to wait for each request to RCSB (default 60).
+
+### What it returns
+
+An array ref of hits, best first: by E-value, then bit score, then RCSB's own
+order, as `get_best_alignment_hit` sorts by `evalue`. Many hits tie: every
+structure of the query's own protein aligns the same way. In list context, the
+number of hits RCSB found is returned as well, which can be more than
+`max_hits`. Nothing matching is an empty array ref, not an error.
+
+Each hit is a hash ref with every one of these keys, `undef` or an empty array
+ref where RCSB has no value:
+
+What it is:
+
+- `id`: the polymer entity, as `1BZ1_1`: entry `1BZ1`, entity `1`.
+- `entry`, `entity`: the two halves of `id`. A computed model's entry is like
+  `AF_AFP69905F1`.
+- `url`: the entry's page at RCSB.
+
+How well it aligns:
+
+- `evalue`, `bit_score`: MMseqs2's.
+- `align_len`: the length of the alignment, gaps included.
+- `identity`: the number of aligned columns where the two agree, and `pident`,
+  that as a percentage of `align_len`. These are counted from the aligned
+  sequences, since RCSB gives the identity only truncated to 3 places.
+- `mismatches`, `gaps` (gap columns), `gap_opens`.
+- `query_from`, `query_to`, `query_len` and `query_cover`, the percentage of
+  the query in the alignment.
+- `hit_from`, `hit_to`, `hit_len`: the same for the hit's sequence.
+- `qseq`, `hseq`: the aligned query and hit, with `-` for gaps.
+
+What kind of structure it is:
+
+- `title`: the entry's title, and `description`, the entity's name.
+- `method`: how the structure was determined: `X-ray`, `EM`, `NMR`,
+  `Neutron`, `Integrative`, `Multiple methods` or `Other`; `undef` for a
+  computed model.
+- `methodology`: `experimental`, `computational` or `integrative`.
+- `resolution`: in Å, for X-ray and EM structures.
+- `plddt`: a computed model's mean pLDDT, 0 to 100.
+- `polymer_type`: `Protein`, `DNA`, `RNA`, `NA-hybrid` or `Other`.
+- `polymer_composition`: the entry as a whole, such as `homomeric protein`,
+  `heteromeric protein` or `protein/NA`.
+- `oligomeric_state`, `stoichiometry` and `symmetry`: the global symmetry of
+  the first biological assembly, such as `Hetero 4-mer`, `A2B2` and `C2`.
+- `chains`: an array ref of the chains that are this entity.
+- `organisms`: an array ref of `{ name, taxonomy_id }`.
+- `uniprot`: an array ref of UniProt accessions.
+- `pfam`, `interpro`: array refs of `{ id, name }`.
+- `ligands`: an array ref of `{ id, name }`, one for each kind of small
+  molecule in the entry, such as `HEM`.
+- `deposited`, `released`: dates, as `YYYY-MM-DD`.
+
+A hit that the data API has no record of (one so new that RCSB's search index
+has it first) is warned of, and is returned with its alignment and no structure.
 
 ## pgs_score(%args)
 
@@ -701,6 +816,16 @@ test's sites are the ones measured, as for a genotyping panel against a
 genome. A site whose ALTs are listed in another order, or split over two
 records, is a different site.
 
+The two files have to be on the same genome build, since a site's POS in
+GRCh37 (hg19) is not the same place in GRCh38 (hg38). Before either file is
+read, `concordance` compares the lengths that their headers' `##contig` lines
+give, matching contigs by name without `chr`, as sites are matched. It dies if
+any contig that both give a length for has different lengths, and names the
+contigs and the build each header gives (its `assembly`, or else its
+`##reference`). hg19 and b37, whose chromosomes are the same lengths, pass. A
+header with no `##contig` lengths cannot be checked this way. When none of the
+test's sites is in the truth, `concordance` warns that the builds may differ.
+
 On `t/data/concordance.test.vcf` against `t/data/concordance.truth.vcf` it
 prints
 
@@ -822,12 +947,189 @@ schemes for the chromosomes other than `chr`.
 
 A BCF is not read; convert it with `bcftools view -Oz`.
 
+## hirisplex_genotypes(%args)
+
+Reads the 41 markers of the HIrisPlex-S eye, hair and skin colour panel out of
+a VCF, counting for each sample how many copies of each marker's model allele
+it carries, and can write them as the CSV the HIrisPlex-S webtool uploads:
+
+    use Cn::Bioinf 'hirisplex_genotypes';
+
+    my $g = hirisplex_genotypes(vcf => 'genome.vcf.gz', file => 'hirisplexs.csv');
+    print $g->{NA12878}{genotype}{'rs12913832_T'};  # 0, 1, 2, or undef
+    print scalar @{ $g->{NA12878}{missing} }, " markers missing\n";
+
+**This distribution ships no prediction model, and `hirisplex_genotypes` makes
+no prediction.** The HIrisPlex-S regression coefficients are not published:
+Chaitanya et al. (2018) cite them by reference rather than tabulating them,
+the webtool offers no download and says that no part of it may be reproduced
+without consent, and part of the knowledge behind it is covered by European
+patent EP2195448. What is public, and what this function uses, is the panel
+itself -- which markers, in which order, and which allele each model counts --
+taken from the webtool's own input form. So `hirisplex_genotypes` prepares the
+input, and the prediction is made either at
+[the webtool](https://hirisplex.erasmusmc.nl/) or by `trait_predict` from a
+model table you hold yourself.
+
+### The panel
+
+`share/hirisplex_s_panel.tsv` holds the panel: each marker's rs number, gene,
+the allele the model counts, its positions on GRCh37 and GRCh38, and whether
+it belongs to the 6-marker IrisPlex and 24-marker HIrisPlex subsets.
+`share/make_hirisplex_panel.pl` writes that file from the webtool's form and
+Ensembl, and its header comment says how to re-run it; the committed file is
+what is used, and the generator is never run by the module.
+
+The webtool asks for a count of the allele on the assay's strand, which is not
+always the strand a VCF is written on, and the panel records the forward-strand
+allele to count for each marker so that nothing has to be guessed at run time.
+Fourteen of the 41 are counted as the complement of the allele the webtool
+names. One, ASIP `rs6119471`, carries the named allele on the forward strand
+*and* still has to be flipped -- the HIrisPlex-S manual singles it out as "the
+only SNP that may cause confusion and therefore must be converted (from NCBI's
+forward orientation)" -- so a tool that simply matched the named allele would
+silently count the wrong one. MC1R `rs312262906` is not a SNP but the 86insA
+frameshift, merged in dbSNP into `rs796296176`; it is counted as the allele
+longer than REF, and matching by rs number looks for both numbers.
+
+### Arguments
+
+- `vcf` (required): a `.vcf`, `.vcf.gz`, `.vcf.bgz` or `.vcf.bz2` file. As
+  `sex_check` does, it may be given first and on its own:
+  `hirisplex_genotypes('genome.vcf.gz')`.
+- `match`: `position` (the default) matches CHROM and POS against the panel's
+  coordinates; `id` matches the ID column against the markers' rs numbers,
+  which finds nothing in a VCF whose ID column is `.`.
+- `build`: `hg19`, `b37`, `hg38` or `b38`, saying which of the panel's two sets
+  of coordinates to match on. By default it is read from the VCF's `##contig`
+  lengths, and `hirisplex_genotypes` dies asking for it when the header gives
+  no length it knows, or lengths that are neither build's.
+- `min_depth`: a genotype whose FORMAT `DP` is below this is not counted.
+  Defaults to 7, `sex_check`'s default; 0 counts every call whatever its depth.
+  A genotype with no `DP` is always counted.
+- `file`: write the webtool's CSV here. Its header is that of the webtool's own
+  template, column for column, and a marker with no genotype is written `NA`.
+- `report`: 1 (the default) prints a table of the samples to STDOUT; 0 returns
+  them only.
+
+### What it returns
+
+A hash ref keyed by sample name, each holding:
+
+- `genotype`: a hash ref keyed as the webtool's CSV heads its columns,
+  `<rs number>_<input allele>`, holding 0, 1 or 2 copies of that allele, or
+  `undef` where the sample has no usable call.
+- `missing`: an array ref of the rs numbers with no genotype, in the panel's
+  order.
+- `markers` and `called`: how many markers the panel holds, and how many this
+  sample has a genotype for.
+- `eye`, `hair`, `skin`: 1 or 0, whether the HIrisPlex-S rules allow that
+  prediction from these markers at all. The manual refuses an eye prediction
+  without HERC2 `rs12913832`, a hair prediction when all 11 MC1R markers are
+  missing, and both when HERC2, SLC45A2 and IRF4 are all missing, because the
+  loss in AUC is too great. It sets no such rule for skin, so `skin` is 0 only
+  when nothing at all was called. `trait_predict` honours these.
+
+A genotype is counted only when the call is diploid and complete: a `./.`, a
+`./1`, a haploid call (the panel is autosomal) or one below `min_depth` leaves
+the marker without a genotype. A site split into one record per ALT is counted
+from whichever record carries the counted allele, in either order, and a record
+at a marker's position whose REF is longer than one base is some other variant
+and is passed over.
+
+`hirisplex_genotypes` warns when the file holds none of the 41 markers, which
+usually means the wrong build or an ID column of `.`.
+
+Reading the markers is done in XS, in one pass, keeping one byte per sample per
+marker, so a whole-genome VCF costs no more memory than a small one. A
+275,879-record exome of 22 MB gzipped took 0.86 s (perl 5.44.0, 2026-10-20).
+
+Most of the panel is intronic or intergenic, so an exome carries little of it:
+that same exome held 9 of the 41 markers. A whole-genome VCF, a genotyping
+array that covers the panel, or the SNaPshot assay the panel was designed for
+is what the prediction expects, and `missing` and `called` are returned so that
+a prediction made from a handful of markers can be seen for what it is.
+
+## trait_predict(%args)
+
+Applies a multinomial logistic regression -- which is what the HIrisPlex-S,
+HIrisPlex and IrisPlex models are -- to genotypes, and returns a probability
+for each category of each trait:
+
+    use Cn::Bioinf qw(hirisplex_genotypes trait_predict);
+
+    my $g = hirisplex_genotypes(vcf => 'genome.vcf.gz', report => 0);
+    my $p = trait_predict(genotypes => $g, model => 'my_model.tsv');
+    print $p->{NA12878}{eye}{call};          # the most probable category
+    print $p->{NA12878}{eye}{p}{blue};       # its probability
+
+The model is yours to supply: see `hirisplex_genotypes` above for why this
+distribution ships none. Any model written in the form below works, so this is
+not limited to pigmentation.
+
+### The model table
+
+A tab-separated file (optionally gzipped), or a data frame as
+`Stats::LikeR`'s `read_table` returns, with four columns:
+
+    trait	category	marker	beta
+    eye	blue	(intercept)	3.94
+    eye	blue	rs12913832_T	-4.81
+    eye	brown	(intercept)	0
+
+`marker` is a key of the `genotype` hash `hirisplex_genotypes` returns, which
+is `<rs number>_<input allele>`, or the literal `(intercept)` for the
+category's intercept. A category whose only row is an intercept of 0 is the
+reference category, which is how a model of *k* categories is written with
+*k* - 1 sets of betas; every category that should appear in the result needs at
+least one row. Traits and their categories come out in the order the table
+first names them.
+
+For each category the linear predictor is its intercept plus the sum of its
+betas times the genotypes, and the probabilities are `exp` of those over their
+sum. The largest is taken out before `exp`, so a linear predictor large enough
+to overflow gives 1 rather than a NaN.
+
+### Arguments
+
+- `genotypes` (required): what `hirisplex_genotypes` returned, or a plain hash
+  ref of sample => { marker => 0, 1 or 2 }.
+- `model` (required): the table above, as a file name or a data frame.
+- `force`: 0 (the default) makes no prediction for a trait that the genotypes
+  say cannot be predicted -- that is, where `hirisplex_genotypes` set `eye`,
+  `hair` or `skin` to 0; 1 predicts it anyway. A trait the genotypes say
+  nothing about is always predicted.
+- `report`: 1 (the default) prints a table of the samples to STDOUT; 0 returns
+  them only.
+
+### What it returns
+
+A hash ref keyed by sample and then by trait, each holding:
+
+- `p`: a hash ref of category => probability, which sum to 1; empty when the
+  prediction was refused.
+- `call`: the most probable category, or `undef` when it was refused. A tie is
+  broken by the category's name, so the answer does not depend on hash order.
+- `markers` and `called`: how many markers the trait's categories use between
+  them, and how many this sample has a genotype for.
+- `missing`: an array ref of the markers the model names and the sample has no
+  genotype for.
+- `refused`: `undef`, or why no prediction was made.
+
+A marker the sample has no genotype for drops out of the sum, which is the same
+as counting it 0 copies of the counted allele. That is a choice, not something
+the HIrisPlex-S authors specify, and it biases the result towards whatever 0
+copies means for that marker; `missing` and `called` are returned so that a
+prediction made from few markers can be reported as such. The webtool reports a
+loss in AUC for exactly this reason.
+
 ## plot_msa(%args)
 
 Aligns sequences with Clustal Omega and draws the alignment. Returns a hash ref
-of the files made: `filename`, `msa_file`, and `tree_file` if it was given.
-Once the image is written it prints `wrote` and its file name to STDOUT, the
-name in black on yellow when STDOUT is a terminal.
+of the files made: `filename`, `msa_file`, `python_file` (see `fh` and
+`execute` below), and `tree_file` if it was given. Once the image is written it
+prints `wrote` and its file name to STDOUT, the name in black on yellow when
+STDOUT is a terminal; with `execute => 0` it prints `will write` instead.
 
     plot_msa(
     	fasta      => 't/data/DEG20010421.fa',
@@ -855,6 +1157,21 @@ name in black on yellow when STDOUT is a terminal.
 - `title`, `xlabel`, `ylabel`, `threads`, `clustal_args`: the plot title; the
   axis labels (default "Amino Acid Residue" and "Protein & Species");
   clustalo threads (default 1); and an array ref of extra clustalo arguments.
+- `fh`, `execute`: as for Matplotlib::Simple's `plt`. The image is drawn by a
+  Python script, and `fh` is a `File::Temp` object to append that script to;
+  without it, the script goes in a new temporary file. `execute` is 1 (the
+  default) to run the script now, under Alien::Bioinf's Python, or 0 only to
+  write it. So several calls with one `fh` and `execute => 0`, then a last one
+  with `execute => 1`, draw every image in one run of Python. The `fh` may be
+  one that Matplotlib::Simple's `plt` also writes to, since the Python each
+  function appends stands alone. Clustal Omega runs either way; only the
+  drawing waits.
+
+  `python_file` is the script's file name: `fh`'s, or the temporary file's,
+  which is kept after perl exits only when `execute` is 0. The script carries
+  the alignment and everything else it reads, so it can be run later, with
+  `perl -MAlien::Bioinf -e 'print Alien::Bioinf->python'` giving the Python to
+  run it with, after perl's own temporary files have gone.
 
 With fewer than two sequences it warns and returns an empty hash ref.
 
@@ -862,13 +1179,13 @@ With fewer than two sequences it warns and returns an empty hash ref.
 
 Draws a guide tree, with Biopython's `Bio.Phylo`, from a FASTA (aligned with
 Clustal Omega first) or from a newick file that `plot_msa` kept. Returns a
-hash ref of the files made or used: `output_file`, and `tree_file` and
-`msa_file` as below.
+hash ref of the files made or used: `output_file`, `python_file`, and
+`tree_file` and `msa_file` as below.
 
     plot_phylo(fasta => 't/data/DEG20010421.fa');   # writes phylo.svg
     plot_phylo(
-    	'tree_file'   => 'DEG20010421.newick',
-    	'output_file' => 'DEG20010421.tree.png',
+    	tree_file   => 'DEG20010421.newick',
+    	output_file => 'DEG20010421.tree.png',
     );
 
 - `output_file`: the image to draw (default `phylo.svg`, in the working
@@ -881,6 +1198,9 @@ hash ref of the files made or used: `output_file`, and `tree_file` and
   is made.
 - `labels`, `title`: a hash ref of name => label for the tips, as for
   `plot_msa`; and the plot title.
+- `fh`, `execute`: as for `plot_msa`, which can share an `fh` with this; the
+  script carries the newick tree it draws. `python_file` is the script's file
+  name.
 
 With `fasta` of fewer than two sequences it warns and returns an empty hash
 ref.

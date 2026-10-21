@@ -21,7 +21,7 @@ package Cn::Bioinf;
 # metrics are counted in Bioinf.xs, whose comments above CONC_NAME and CONC_TP
 # say where it departs from that script; its XLSX, JSON and ACMG59 output are
 # not made.
-require 5.010;
+require 5.012;
 use strict;
 use warnings;
 use Carp qw(croak carp);
@@ -30,7 +30,8 @@ use Sys::Hostname 'hostname';
 use Exporter 'import';
 use XSLoader;
 our $VERSION = '0.01';
-our @EXPORT_OK = qw(clustal_view_residues concordance fasta2hash get_best_alignment_hit hash2fasta_file msa_quality_table parent pgs_score plot_msa plot_phylo relatedness sex_check);
+our @EXPORT_OK = qw(clustal_view_residues concordance fasta2hash get_best_alignment_hit hash2fasta_file hirisplex_genotypes msa_quality_table parent pdb_search pgs_score plot_msa plot_phylo relatedness sex_check trait_predict);
+our @EXPORT = @EXPORT_OK;
 our %EXPORT_TAGS = (all => \@EXPORT_OK);
 XSLoader::load('Cn::Bioinf', $VERSION);
 # The calling script's full path, for _creator. It is looked up at load time,
@@ -190,16 +191,104 @@ sub _json_text {
 # colour is left out when STDOUT is not a terminal, where the escapes would
 # only be noise in a log or a test harness.
 sub _wrote {
-	my ($file, $bg) = @_;
-	print STDOUT -t STDOUT ? "wrote \e[30;${bg}m$file\e[0m\n" : "wrote $file\n";
+	my ($file, $bg, $verb) = @_;
+	$verb //= 'wrote'; # or 'will write', for an image whose script has not run yet
+	print STDOUT -t STDOUT ? "$verb \e[30;${bg}m$file\e[0m\n" : "$verb $file\n";
 }
 
+# A new temporary file's name, with $suffix. It is removed when perl exits
+# unless $keep is true.
 sub _tmp {
-	my ($suffix) = @_;
+	my ($suffix, $keep) = @_;
 	require File::Temp;
-	my ($fh, $name) = File::Temp::tempfile(SUFFIX => $suffix, UNLINK => 1, TMPDIR => 1);
+	my ($fh, $name) = File::Temp::tempfile(SUFFIX => $suffix, UNLINK => $keep ? 0 : 1, TMPDIR => 1);
 	close $fh;
 	$name;
+}
+
+# "fh" and "execute" of $sub's $args, resolved and checked before anything
+# runs, as Matplotlib::Simple's plt takes them: "fh" is a File::Temp that the
+# Python drawing the image is appended to, so that one script, run once, can
+# draw several images (and those of Matplotlib::Simple, which takes the same
+# File::Temp); "execute" says whether to run that script now.
+sub _drawing {
+	my ($sub, $args) = @_;
+	my %r = (fh => $args->{fh});
+	$r{execute} = $args->{execute} // 1; # 1 = run the script now; 0 = only write it
+	croak "$sub: \"execute\" must be 0 or 1, not " . _what($r{execute})
+		unless !ref $r{execute} && ($r{execute} eq '0' || $r{execute} eq '1');
+	if (defined $r{fh}) {
+		require Scalar::Util;
+		croak "$sub: \"fh\" must be a File::Temp object, as for Matplotlib::Simple, not " . _what($r{fh})
+			unless Scalar::Util::blessed($r{fh}) && $r{fh}->isa('File::Temp');
+	}
+	\%r;
+}
+
+# share/msa_plot.py run with @args for $sub, as Python appended to the script
+# that $drawing (from _drawing) names, or to a new temporary one; the script is
+# run under Alien::Bioinf's Python if $drawing->{execute}. Returns the script's
+# file name. A new script is kept after perl exits only when it is not run
+# here, since only then is it of use afterwards.
+#
+# The script is the whole of what it needs, so that it can be run later, after
+# perl has removed its temporary files: each file passed with --f, --tree or
+# --table is carried in it, and written out again, to a temporary directory,
+# as the script runs. Nothing perl was given is pasted into the Python source:
+# the arguments, the files and msa_plot.py's path are one JSON object, base64
+# encoded, as Matplotlib::Simple's write_data passes data, since a Windows
+# path's "\b" is a backspace in a Python literal and an apostrophe would close
+# it. msa_plot.py is run by runpy in a namespace of its own, so that its
+# globals meet neither those of another image in the script nor those of
+# Matplotlib::Simple's code. -I keeps PYTHONPATH, PYTHONHOME and the user's own
+# site-packages out, as for _python.
+sub _draw {
+	my ($sub, $drawing, @args) = @_;
+	require JSON::MaybeXS;
+	require MIME::Base64;
+	my %file = map { $_ => 1 } qw(--f --tree --table); # the options whose value is a file msa_plot.py reads
+	my @json;
+	for (my $i = 0; $i < @args; $i++) {
+		push @json, _chars($args[$i]);
+		next unless $file{ $args[$i] } && $i < $#args;
+		my $in = $args[++$i];
+		open my $fh, '<:raw', $in or croak "_draw: can't read $in: $!";
+		my $bytes = do { local $/; <$fh> };
+		close $fh or croak "_draw: can't read $in: $!";
+		# named by its place, so that no two collide, and with its own suffix
+		push @json, { name => 'input' . scalar(@json) . ($in =~ /(\.[A-Za-z]+)\z/ ? $1 : ''), b64 => MIME::Base64::encode_base64($bytes // '', '') };
+	}
+	my $b64 = MIME::Base64::encode_base64(JSON::MaybeXS::encode_json({ script => _chars(_script()), args => \@json }), '');
+	my $py = <<"PYTHON";
+# $sub, from Cn::Bioinf $VERSION: msa_plot.py run on the arguments below
+import base64, json, os, runpy, sys, tempfile
+cn_bioinf = json.loads(base64.b64decode('$b64').decode('utf-8'))
+with tempfile.TemporaryDirectory() as cn_bioinf_dir:
+	cn_bioinf_argv = []
+	for cn_bioinf_arg in cn_bioinf['args']:
+		if isinstance(cn_bioinf_arg, dict):
+			cn_bioinf_path = os.path.join(cn_bioinf_dir, cn_bioinf_arg['name'])
+			with open(cn_bioinf_path, 'wb') as cn_bioinf_fh:
+				cn_bioinf_fh.write(base64.b64decode(cn_bioinf_arg['b64']))
+			cn_bioinf_arg = cn_bioinf_path
+		cn_bioinf_argv.append(cn_bioinf_arg)
+	sys.argv = [cn_bioinf['script']] + cn_bioinf_argv
+	runpy.run_path(cn_bioinf['script'], run_name='__main__')
+PYTHON
+	my $script;
+	if (defined $drawing->{fh}) {
+		my $fh = $drawing->{fh};
+		$script = $fh->filename;
+		print {$fh} $py or croak "$sub: can't write to \"fh\", $script: $!";
+		$fh->flush or croak "$sub: can't write to \"fh\", $script: $!";
+	} else {
+		$script = _tmp('.py', !$drawing->{execute});
+		open my $fh, '>:raw', $script or croak "$sub: can't write $script: $!";
+		print {$fh} $py or croak "$sub: can't write $script: $!";
+		close $fh or croak "$sub: can't write $script: $!";
+	}
+	_run(_alien($sub)->python, '-I', $script) if $drawing->{execute};
+	$script;
 }
 
 sub _script {
@@ -451,19 +540,21 @@ sub _chrom {
 # the same non-number.
 my $Number = qr/\A[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?\z/;
 
-# The rows of "weights" one at a time, each a hash ref with how a message names
-# it, and the column names: from a data frame (see _frame_rows), or read from a
-# scoring file a line at a time, so that a score of millions of variants is
-# never held whole. An empty field of a file is '', where read_table gives
+# The rows of the option $what ("weights" for pgs_score, "model" for
+# trait_predict) one at a time, each a hash ref with how a message names it,
+# and the column names: from a data frame (see _frame_rows), or read from a
+# tab-separated file a line at a time, so that a score of millions of variants
+# is never held whole. An empty field of a file is '', where read_table gives
 # undef; every check below treats the two alike.
 sub _weight_rows {
-	my ($sub, $weights) = @_;
+	my ($sub, $weights, $what) = @_;
+	$what //= 'weights';
 	if (ref $weights) {
-		my ($rows, $labels) = _frame_rows($sub, 'weights', $weights, 1);
+		my ($rows, $labels) = _frame_rows($sub, $what, $weights, 1);
 		my $i = 0;
 		return (sub { $i < @{ $rows } ? ($rows->[$i], $labels->[$i++]) : () }, [keys %{ $rows->[0] }]);
 	}
-	croak "$sub: \"weights\" file \"$weights\" doesn't exist or isn't readable" unless -f $weights && -r _;
+	croak "$sub: \"$what\" file \"$weights\" doesn't exist or isn't readable" unless -f $weights && -r _;
 	my $fh;
 	if ($weights =~ /\.gz\z/i) {
 		require IO::Uncompress::Gunzip;
@@ -479,7 +570,7 @@ sub _weight_rows {
 		$head = $line;
 		last;
 	}
-	croak "$sub: \"weights\" file $weights has no header line" unless defined $head;
+	croak "$sub: \"$what\" file $weights has no header line" unless defined $head;
 	my @cols = split /\t/, $head, -1;
 	my $n = 0;
 	my $next = sub {
@@ -907,6 +998,87 @@ sub _vcf_open {
 	};
 	my $close = sub { close $fh or croak "$sub: can't read $file: " . $error->() };
 	($next, $close);
+}
+
+# The header of the VCF $file, given to $sub as its option $key, read as far as
+# its first line that does not start with "##": a hash ref whose "contig" is an
+# array ref of the ##contig lines' [ID, length, assembly], in the header's
+# order, and whose "reference" is the first ##reference line's value, or
+# undef. An ID loses its "chr" prefix, in any case, as Bioinf.xs's
+# conc_chrom() drops it from CHROM; a length or an assembly that the line
+# lacks is undef. Whatever is wrong with the file beyond its ## lines is left
+# for Bioinf.xs to find, as it reads it.
+sub _vcf_meta {
+	my ($sub, $key, $file) = @_;
+	my ($next, $close) = _vcf_open($sub, $key, $file);
+	my %meta = (contig => [], reference => undef);
+	my $carry = ''; # the start of a line that the last block ended inside
+	my $done = 0;   # 1 = a line not starting with "##" has been read
+	while (!$done && defined(my $block = $next->())) {
+		$carry .= $block;
+		my $end = rindex $carry, "\n";
+		next if $end < 0;
+		foreach my $line (split /\n/, substr($carry, 0, $end)) {
+			$line =~ s/\r\z//;
+			if (substr($line, 0, 2) ne '##') {
+				$done = 1;
+				last;
+			}
+			if ($line =~ /\A##contig=<(.*)>\z/) {
+				my $attr = $1;
+				my ($id) = $attr =~ /(?:\A|,)ID=([^,]+)/;
+				next unless defined $id;
+				$id =~ s/\Achr(?=.)//i;
+				my ($length) = $attr =~ /(?:\A|,)length=([0-9]+)/;
+				my ($assembly) = $attr =~ /(?:\A|,)assembly="?([^,"]+)/;
+				push @{ $meta{contig} }, [$id, $length, $assembly];
+			} elsif ($line =~ /\A##reference=(.+)\z/) {
+				$meta{reference} //= $1;
+			}
+		}
+		$carry = substr($carry, $end + 1);
+	}
+	$close->();
+	\%meta;
+}
+
+# Dies unless the VCFs $test and $truth, given to $sub, can be on one genome
+# build: every contig that both headers give a length for must have the same
+# length in each. A chromosome's length differs from one build to the next, and
+# so does a site's POS, so that two builds share few sites, and only by chance.
+# A header with no lengths cannot be checked, and is not. Contigs are matched by
+# name less "chr", as sites are, so hg19 and b37 (chr1 and 1, both 249,250,621
+# bases by the headers of ~/Documents/Genomics/3025181.vcf.gz and of 1000
+# Genomes' hs37d5 BCF, read 2026-10-20) pass.
+sub _same_build {
+	my ($sub, $test, $truth) = @_;
+	my %meta = (test => _vcf_meta($sub, 'test', $test), truth => _vcf_meta($sub, 'truth', $truth));
+	my %truth_length; # contig => its length in the truth, for those that have one
+	foreach my $c (@{ $meta{truth}{contig} }) {
+		$truth_length{ $c->[0] } //= $c->[1] if defined $c->[1];
+	}
+	my ($shared, @differ) = (0); # @differ: [contig, test length, truth length], in the test's order
+	my %seen;
+	foreach my $c (@{ $meta{test}{contig} }) {
+		my ($id, $length) = @{ $c };
+		next if !defined $length || !defined $truth_length{$id} || $seen{$id}++;
+		$shared++;
+		push @differ, [$id, $length, $truth_length{$id}] if $length != $truth_length{$id};
+	}
+	return unless @differ;
+	# what each header says its build is: the assembly of a ##contig line that
+	# differs, or else its ##reference
+	my %says;
+	foreach my $key (qw(test truth)) {
+		my ($asm) = map { $_->[2] } grep { defined $_->[2] && defined $_->[1] && $_->[0] eq $differ[0][0] } @{ $meta{$key}{contig} };
+		$says{$key} = $asm // $meta{$key}{reference};
+	}
+	my $listed = 3; # contigs named in the message; the rest are counted
+	my @named = map { "$_->[0] as $_->[1] bases long in the test and $_->[2] in the truth" } @differ[0 .. ($#differ < $listed - 1 ? $#differ : $listed - 1)];
+	croak "$sub: \"test\" $test and \"truth\" $truth are on different genome builds: their ##contig lines give " . join(', ', @named)
+		. (@differ > $listed ? ', and ' . (@differ - $listed) . ' more' : '') . ' (' . scalar(@differ) . " of the $shared contigs that both give a length for differ)"
+		. (defined $says{test} && defined $says{truth} ? "; the test's header says \"$says{test}\" and the truth's \"$says{truth}\"" : '')
+		. ', so a POS in one is not the same place in the other. Lift one over to the other\'s build first';
 }
 
 # sex_check's report on $vcf: what was counted and the rule, then a table of
@@ -1419,6 +1591,7 @@ sub concordance {
 	# both checked before either is read, which can take minutes
 	_vcf_check($sub, 'test', $test);
 	_vcf_check($sub, 'truth', $truth);
+	_same_build($sub, $test, $truth); # reads only the headers
 	# the truth's samples first, so that the test's reading keeps the calls of
 	# only those samples it will compare
 	my ($next, $close) = _vcf_open($sub, 'truth', $truth);
@@ -1438,6 +1611,706 @@ sub concordance {
 		. ' check that the two are of the same genome build'
 		if $any->{sites} && !$any->{in_truth};
 	$out;
+}
+
+# ---- trait prediction
+
+# GRCh37's and GRCh38's lengths for four of the chromosomes the HIrisPlex-S
+# panel sits on, which _hirisplex_build tells one build from the other by.
+# From Ensembl's /info/assembly/homo_sapiens, rest.ensembl.org for GRCh38 and
+# grch37.rest.ensembl.org for GRCh37, read 2026-10-20. hg19 and b37 differ
+# only in what they call their chromosomes, and hg38 and b38 likewise, so a
+# length separates the two pairs but not the two within a pair, which the
+# panel's positions do not depend on.
+my %Build_length = (
+	b37 => { 1 => 249250621, 15 => 102531392, 16 => 90354753, 20 => 63025520 },
+	b38 => { 1 => 248956422, 15 => 101991189, 16 => 90338345, 20 => 64444167 },
+);
+
+# The HIrisPlex-S marker panel, share/hirisplex_s_panel.tsv, read once into an
+# array ref of hash refs in the panel's own order. share/make_hirisplex_panel.pl
+# writes that file and its header comment says where every column comes from.
+my $Panel; # undef until the file has been read
+
+sub _hirisplex_panel {
+	my ($sub) = @_;
+	return $Panel if $Panel;
+	my $name = 'hirisplex_s_panel.tsv';
+	# Installed, the panel is in the distribution's share directory, which is
+	# what File::ShareDir finds. Two fallbacks follow it: the same layout looked
+	# for in @INC, which is where blib puts the file under "make test" and keeps
+	# this working on a perl that has not got File::ShareDir, and the share
+	# directory beside lib/, which is what lets a working copy be used before
+	# the module is installed.
+	my $file = eval { require File::ShareDir; File::ShareDir::dist_file('Cn-Bioinf', $name) };
+	unless (defined $file && -f $file) {
+		my @try = map { File::Spec->catfile($_, 'auto', 'share', 'dist', 'Cn-Bioinf', $name) } grep { !ref } @INC;
+		my (undef, $dir) = File::Spec->splitpath($INC{'Cn/Bioinf.pm'} // '');
+		push @try, File::Spec->catfile($dir, File::Spec->updir, File::Spec->updir, 'share', $name) if length $dir;
+		($file) = grep { -f $_ && -r _ } @try;
+	}
+	croak "$sub: can't find the marker panel $name, which this distribution installs in its share directory"
+		unless defined $file && -f $file && -r _;
+	open my $fh, '<', $file or croak "$sub: can't read $file: $!";
+	my $head = <$fh>;
+	croak "$sub: marker panel $file is empty" unless defined $head;
+	$head =~ s/\r?\n\z//;
+	$head =~ s/\A#//;
+	my @cols = split /\t/, $head, -1;
+	my @panel;
+	while (defined(my $line = <$fh>)) {
+		$line =~ s/\r?\n\z//;
+		next if $line eq '';
+		my %m;
+		@m{@cols} = split /\t/, $line, -1;
+		push @panel, \%m;
+	}
+	close $fh or croak "$sub: can't read $file: $!";
+	croak "$sub: marker panel $file has no markers" unless @panel;
+	foreach my $m (@panel) {
+		foreach my $c (qw(rsid gene input_allele count_allele kind)) {
+			croak "$sub: marker " . ($m->{rsid} // '?') . " of $file has no $c" unless defined $m->{$c} && length $m->{$c};
+		}
+		# Every marker of this panel is autosomal, and the reader counts a
+		# diploid call only, so a sex chromosome here would be counted wrongly
+		# rather than refused.
+		foreach my $b (qw(b37 b38)) {
+			my ($c, $p) = @{ $m }{"${b}_chrom", "${b}_pos"};
+			next unless defined $c && length $c;
+			croak "$sub: marker $m->{rsid} of $file is on $b chromosome \"$c\", and the panel is autosomal"
+				unless $c =~ /\A(?:[1-9]|1[0-9]|2[0-2])\z/;
+			croak "$sub: marker $m->{rsid} of $file has $b position " . _what($p) . ", which isn't a position"
+				unless defined $p && $p =~ /\A[1-9][0-9]*\z/;
+		}
+	}
+	$Panel = \@panel;
+}
+
+# Which build's coordinates the panel is matched on, read from the ##contig
+# lines of the VCF $file, given to $sub as "vcf": "b37" or "b38". A header
+# that gives no length for any of the chromosomes above, or lengths that are
+# neither build's, cannot be told apart and dies asking for "build".
+sub _hirisplex_build {
+	my ($sub, $file) = @_;
+	my $meta = _vcf_meta($sub, 'vcf', $file);
+	my %length; # contig => the first length its header gives
+	foreach my $c (@{ $meta->{contig} }) {
+		$length{ $c->[0] } //= $c->[1] if defined $c->[1];
+	}
+	my @named = grep { defined $length{$_} } sort { $a <=> $b } keys %{ $Build_length{b37} };
+	croak "$sub: \"vcf\" $file has no ##contig line giving a length for chromosome "
+		. join(', ', sort { $a <=> $b } keys %{ $Build_length{b37} }) . ', so its genome build can\'t be told from its header;'
+		. ' give "build" as hg19, b37, hg38 or b38' unless @named;
+	my @fits = grep { my $b = $_; !grep { $length{$_} != $Build_length{$b}{$_} } @named } sort keys %Build_length;
+	croak "$sub: \"vcf\" $file gives chromosome lengths that are neither GRCh37's nor GRCh38's ("
+		. join(', ', map { "$_ is $length{$_}" } @named) . '), so its genome build can\'t be told from its header;'
+		. ' give "build" as hg19, b37, hg38 or b38' unless @fits == 1;
+	$fits[0];
+}
+
+# Whether each prediction can be made at all from $d, one genotype for each
+# marker of $panel and undef where the sample had no call. The webtool refuses
+# some outright, whatever the genotypes say, because the loss in AUC is too
+# great; from the HIrisPlex-S user manual (version 2.0, 2018,
+# https://hirisplex.erasmusmc.nl/pdf/hirisplex.erasmusmc.nl.pdf, read
+# 2026-10-20), page 2: "Inputs missing the HERC2 SNP (rs12913832 = NA) will
+# not provide an eye colour prediction result, as the loss in AUC is too
+# great. Inputs missing all 11 MC1R SNPs will not provide a hair colour
+# prediction result. Inputs missing a combination of HERC2-SLC45A2-IRF4 will
+# not produce and eye or hair prediction result." The manual gives no such
+# rule for skin, and says only that missing any marker "is not advised", so
+# skin is refused here only when nothing at all was called.
+sub _hirisplex_possible {
+	my ($panel, $d) = @_;
+	my %called; # rs number => 1 for each marker the sample has a genotype at
+	my ($mc1r, $any) = (0, 0);
+	foreach my $k (0 .. $#{ $panel }) {
+		next unless defined $d->[$k];
+		$called{ $panel->[$k]{rsid} } = 1;
+		$mc1r++ if $panel->[$k]{gene} eq 'MC1R';
+		$any++;
+	}
+	# HERC2 rs12913832, SLC45A2 rs16891982 and IRF4 rs12203592: eye needs the
+	# first, so it needs one of the three already, and hair needs one of them
+	my $three = grep { $called{$_} } qw(rs12913832 rs16891982 rs12203592);
+	{
+		eye  => $called{rs12913832} ? 1 : 0,
+		hair => $mc1r && $three ? 1 : 0,
+		skin => $any ? 1 : 0,
+	};
+}
+
+# The genotypes of $out written to $file as the CSV the HIrisPlex-S webtool
+# takes: a sampleid column and one for each marker, headed
+# "<rs number>_<input allele>" as the webtool's own template heads it, holding
+# the count of that allele or NA. The samples are written in $order, the VCF's.
+sub _hirisplex_csv {
+	my ($sub, $file, $panel, $out, $order) = @_;
+	my @head = map { "$_->{rsid}_$_->{input_allele}" } @{ $panel };
+	# The webtool reads the file as plain CSV, so a sample whose name holds a
+	# comma, a quote or a newline would move or split its row rather than
+	# being quoted into it.
+	my @bad = grep { /[",\r\n]/ } @{ $order };
+	croak "$sub: can't write $file: sample" . (@bad > 1 ? 's ' : ' ') . join(', ', map { "\"$_\"" } @bad)
+		. (@bad > 1 ? ' have' : ' has') . ' a comma, a quote or a newline in the name, which a CSV column can\'t hold' if @bad;
+	open my $fh, '>', $file or croak "$sub: can't write $file: $!";
+	print {$fh} join(',', 'sampleid', @head), "\n" or croak "$sub: can't write $file: $!";
+	foreach my $s (@{ $order }) {
+		my $g = $out->{$s}{genotype};
+		print {$fh} join(',', $s, map { defined $g->{$_} ? $g->{$_} : 'NA' } @head), "\n" or croak "$sub: can't write $file: $!";
+	}
+	close $fh or croak "$sub: can't write $file: $!";
+}
+
+# hirisplex_genotypes's report on $vcf: what was read and how, then a table of
+# the samples in $order, the VCF's, each with how many markers were called and
+# which predictions its genotypes allow.
+sub _hirisplex_report {
+	my ($vcf, $r, $panel, $out, $order, $absent) = @_;
+	my @head = ('sample', 'called', 'missing', 'eye', 'hair', 'skin');
+	my @rows = map {
+		my $s = $out->{$_};
+		[$_, $s->{called}, scalar @{ $s->{missing} }, map { $s->{$_} ? 'yes' : 'no' } qw(eye hair skin)]
+	} @{ $order };
+	my @w = map { length $head[$_] } 0 .. $#head;
+	foreach my $row (@rows) {
+		foreach my $i (0 .. $#head) {
+			$w[$i] = length $row->[$i] if length $row->[$i] > $w[$i];
+		}
+	}
+	my $line = sub { join('  ', map { $_ == 0 ? sprintf('%-*s', $w[$_], $_[$_]) : sprintf('%*s', $w[$_], $_[$_]) } 0 .. $#head) . "\n" };
+	"hirisplex_genotypes: $vcf\n"
+		. scalar(@{ $panel }) . ' HIrisPlex-S markers, matched by '
+		. ($r->{match} eq 'id' ? 'rs number' : "position on $r->{build}")
+		. "; genotypes of DP below $r->{min_depth} not counted\n"
+		. (@{ $absent } ? scalar(@{ $absent }) . ' marker' . (@{ $absent } > 1 ? 's' : '') . ' not in the file at all: '
+			. join(', ', @{ $absent }) . "\n" : '')
+		. $line->(@head) . join('', map { $line->(@{ $_ }) } @rows)
+		. "\"eye\", \"hair\" and \"skin\" are whether the HIrisPlex-S manual's rules allow that prediction from these markers\n";
+}
+
+sub hirisplex_genotypes {
+	my $sub = 'hirisplex_genotypes';
+	# hirisplex_genotypes($file) and hirisplex_genotypes($file, %options) take
+	# the file first, as sex_check does; an odd count whose first is an
+	# option's name is left for _args to refuse
+	unshift @_, 'vcf' if @_ % 2 && defined $_[0] && !ref $_[0] && $_[0] !~ /\A(?:vcf|build|file|match|min_depth|report)\z/;
+	croak "$sub: \"$_[0]\" is the file, so the options after it must be name => value pairs, and are an odd number"
+		if @_ && $_[0] ne 'vcf' && defined $_[0] && !ref $_[0] && -f $_[0];
+	my $args = _args(\@_, $sub, ['vcf'], [qw(build file match min_depth report)]);
+	my %r;
+	$r{match} = $args->{match} // 'position'; # 'position' = CHROM and POS against the panel's coordinates; 'id' = the ID column against its rs numbers
+	croak "$sub: \"match\" must be \"position\" or \"id\", not " . _what($r{match})
+		unless !ref $r{match} && ($r{match} eq 'position' || $r{match} eq 'id');
+	$r{min_depth} = $args->{min_depth} // 7; # 0 = count every genotype, whatever its DP; 7 is sex_check's, for sex_check's reasons
+	croak "$sub: \"min_depth\" must be a whole number, 0 or more, not " . _what($r{min_depth})
+		unless !ref $r{min_depth} && $r{min_depth} =~ /\A[0-9]+\z/;
+	$r{report} = $args->{report} // 1; # 1 = print a table of the samples to STDOUT; 0 = only return them
+	croak "$sub: \"report\" must be 0 or 1, not " . _what($r{report}) unless !ref $r{report} && ($r{report} eq '0' || $r{report} eq '1');
+	$r{file} = $args->{file}; # undef = no CSV is written
+	croak "$sub: \"file\" must be a file name, not " . _what($r{file}) if defined $r{file} && ref $r{file};
+	croak "$sub: \"build\" must be hg19, b37, hg38 or b38, not " . _what($args->{build})
+		if defined $args->{build} && (ref $args->{build} || $args->{build} !~ /\A(?:hg19|b37|hg38|b38)\z/);
+	my $vcf = $args->{vcf};
+	_vcf_check($sub, 'vcf', $vcf);
+	my $panel = _hirisplex_panel($sub);
+	# which of the panel's two sets of coordinates the markers are looked for
+	# at; undef when matching by rs number, which needs neither
+	$r{build} = $r{match} eq 'id' ? undef
+		: defined $args->{build} ? ($args->{build} =~ /\A(?:hg19|b37)\z/ ? 'b37' : 'b38')
+		: _hirisplex_build($sub, $vcf);
+
+	# What the reader searches for: one entry for each marker, and for matching
+	# by rs number a second under the number that marker's has been merged
+	# into, since a VCF annotated from either dbSNP release should match.
+	my @entries;
+	foreach my $k (0 .. $#{ $panel }) {
+		my $m = $panel->[$k];
+		my $insertion = $m->{kind} eq 'insertion' ? 1 : 0; # 1 = count the ALT longer than REF, 0 = count count_allele
+		if ($r{match} eq 'id') {
+			my %seen;
+			foreach my $id (grep { defined $_ && length $_ && !$seen{$_}++ } $m->{rsid}, $m->{current_rsid}) {
+				push @entries, [0, 0, $m->{count_allele}, $insertion, $id, $k];
+			}
+		} else {
+			my ($c, $p) = @{ $m }{"$r{build}_chrom", "$r{build}_pos"};
+			# a marker the panel could not place on this build is searched for
+			# nowhere, and comes back as one the file did not hold
+			next unless defined $c && length $c;
+			push @entries, [$c, $p, $m->{count_allele}, $insertion, $m->{rsid}, $k];
+		}
+	}
+	croak "$sub: no marker of the panel has a " . ($r{build} // 'known') . ' position' unless @entries;
+
+	my ($next, $close) = _vcf_open($sub, 'vcf', $vcf);
+	my ($dose, $names, $seen) = _hirisplex_dosage($next, $vcf, $r{min_depth}, \@entries, scalar @{ $panel }, $r{match} eq 'id' ? 1 : 0);
+	$close->();
+
+	my @column = map { "$_->{rsid}_$_->{input_allele}" } @{ $panel };
+	my @absent = map { $panel->[$_]{rsid} } grep { !$seen->[$_] } 0 .. $#{ $panel };
+	my %out;
+	foreach my $s (keys %{ $dose }) {
+		my $d = $dose->{$s};
+		my (%genotype, @missing);
+		foreach my $k (0 .. $#{ $panel }) {
+			$genotype{ $column[$k] } = $d->[$k];
+			push @missing, $panel->[$k]{rsid} unless defined $d->[$k];
+		}
+		my $can = _hirisplex_possible($panel, $d);
+		$out{$s} = {
+			genotype => \%genotype,
+			missing  => \@missing,
+			markers  => scalar @{ $panel },
+			called   => scalar(@{ $panel }) - scalar(@missing),
+			%{ $can },
+		};
+	}
+	_hirisplex_csv($sub, $r{file}, $panel, \%out, $names) if defined $r{file};
+	if ($r{report}) {
+		print STDOUT _hirisplex_report($vcf, \%r, $panel, \%out, $names, \@absent) or croak "$sub: can't print the report: $!";
+	}
+	carp "$sub: \"vcf\" $vcf holds none of the " . scalar(@{ $panel }) . ' HIrisPlex-S markers'
+		. ($r{match} eq 'id' ? '; it was matched by rs number, and a VCF whose ID column is "." matches nothing that way'
+			: ", matched by position on $r{build}; check that it is the build the file is on")
+		if @absent == @{ $panel };
+	\%out;
+}
+
+# The marker that carries a category's intercept, in place of an rs number, in
+# a "model" table. A marker can't be called this, so nothing is ambiguous.
+my $Intercept = '(intercept)';
+
+# The rows of "model" read into trait => category => { marker => beta }, with
+# the intercept under $Intercept, and the traits and their categories in the
+# order the table first names them, which is the order the report prints.
+sub _trait_model {
+	my ($sub, $model) = @_;
+	my ($next, $cols) = _weight_rows($sub, $model, 'model');
+	my %have = map { $_ => 1 } @{ $cols };
+	my @absent = grep { !$have{$_} } qw(trait category marker beta);
+	croak "$sub: \"model\" has no " . join(', ', map { "\"$_\"" } @absent) . ' column' . (@absent > 1 ? 's' : '')
+		. '; a model table has trait, category, marker and beta' if @absent;
+	my (%beta, @traits, %category);
+	while (my ($row, $label) = $next->()) {
+		my ($t, $c, $m, $b) = @{ $row }{qw(trait category marker beta)};
+		foreach my $f (['trait', $t], ['category', $c], ['marker', $m]) {
+			croak "$sub: $label of \"model\" has no $f->[0]" unless defined $f->[1] && length $f->[1];
+		}
+		croak "$sub: $label of \"model\" has beta " . _what($b) . ", which isn't a number"
+			unless defined $b && !ref $b && $b =~ $Number;
+		push @traits, $t unless $beta{$t};
+		push @{ $category{$t} }, $c unless $beta{$t} && $beta{$t}{$c};
+		croak "$sub: $label of \"model\" gives $t category \"$c\" a second beta for $m"
+			if exists $beta{$t}{$c}{$m};
+		$beta{$t}{$c}{$m} = $b;
+	}
+	croak "$sub: \"model\" has no rows" unless @traits;
+	(\%beta, \@traits, \%category);
+}
+
+# exp() of each of @$eta, divided by their sum: the probabilities a multinomial
+# logistic regression gives its categories. The largest is taken out first, so
+# that a linear predictor big enough to overflow exp() (about 710 on an IEEE
+# double, and larger on a long-double or quadmath perl) gives 1 and the rest 0
+# rather than inf/inf, which is NaN.
+sub _softmax {
+	my ($eta) = @_;
+	my $max = $eta->[0];
+	foreach my $e (@{ $eta }) { $max = $e if $e > $max }
+	my @exp = map { exp($_ - $max) } @{ $eta };
+	my $sum = 0;
+	$sum += $_ foreach @exp;
+	[map { $_ / $sum } @exp];
+}
+
+# trait_predict's report on $out: a table of each sample's probabilities, one
+# block for each trait, the categories in the model's order.
+sub _trait_report {
+	my ($r, $out, $order, $traits, $category) = @_;
+	my $text = "trait_predict: " . scalar(@{ $order }) . ' sample' . (@{ $order } > 1 ? 's' : '')
+		. ', ' . scalar(@{ $traits }) . ' trait' . (@{ $traits } > 1 ? 's' : '')
+		. "; a marker the sample has no genotype for counts as 0 copies"
+		. ($r->{force} ? ', and a prediction the HIrisPlex-S rules refuse is made anyway ("force")' : '') . "\n";
+	foreach my $t (@{ $traits }) {
+		my @head = ('sample', 'call', @{ $category->{$t} }, 'called');
+		my @rows = map {
+			my $p = $out->{$_}{$t};
+			[$_, $p->{call} // '-', (map { defined $p->{p}{$_} ? sprintf('%.3f', $p->{p}{$_}) : '-' } @{ $category->{$t} }),
+				"$p->{called}/$p->{markers}"]
+		} @{ $order };
+		my @w = map { length $head[$_] } 0 .. $#head;
+		foreach my $row (@rows) {
+			foreach my $i (0 .. $#head) {
+				$w[$i] = length $row->[$i] if length $row->[$i] > $w[$i];
+			}
+		}
+		my $line = sub { join('  ', map { $_ == 0 ? sprintf('%-*s', $w[$_], $_[$_]) : sprintf('%*s', $w[$_], $_[$_]) } 0 .. $#head) . "\n" };
+		$text .= "\n$t\n" . $line->(@head) . join('', map { $line->(@{ $_ }) } @rows);
+		my @refused = grep { defined $out->{$_}{$t}{refused} } @{ $order };
+		$text .= join '', map { "  $_: no $t prediction: $out->{$_}{$t}{refused}\n" } @refused;
+	}
+	$text;
+}
+
+sub trait_predict {
+	my $sub = 'trait_predict';
+	my $args = _args(\@_, $sub, [qw(genotypes model)], [qw(force report)]);
+	my %r;
+	$r{force} = $args->{force} // 0; # 0 = a trait the genotypes say can't be predicted isn't; 1 = predict it anyway
+	croak "$sub: \"force\" must be 0 or 1, not " . _what($r{force}) unless !ref $r{force} && ($r{force} eq '0' || $r{force} eq '1');
+	$r{report} = $args->{report} // 1; # 1 = print a table of the samples to STDOUT; 0 = only return them
+	croak "$sub: \"report\" must be 0 or 1, not " . _what($r{report}) unless !ref $r{report} && ($r{report} eq '0' || $r{report} eq '1');
+	my $g = $args->{genotypes};
+	croak "$sub: \"genotypes\" must be a hash ref of sample => genotypes, as hirisplex_genotypes returns, not " . _what($g)
+		unless ref $g eq 'HASH';
+	croak "$sub: \"genotypes\" has no samples" unless keys %{ $g };
+	my ($beta, $traits, $category) = _trait_model($sub, $args->{model});
+
+	# Which markers each trait's categories use between them: the same for every
+	# sample, so it is worked out once rather than once per sample.
+	my %uses;
+	foreach my $t (@{ $traits }) {
+		foreach my $c (@{ $category->{$t} }) {
+			$uses{$t}{$_} = 1 foreach grep { $_ ne $Intercept } keys %{ $beta->{$t}{$c} };
+		}
+	}
+
+	my %out;
+	foreach my $s (sort keys %{ $g }) {
+		my $rec = $g->{$s};
+		croak "$sub: \"genotypes\" sample \"$s\" must be a hash ref, not " . _what($rec) unless ref $rec eq 'HASH';
+		# Either what hirisplex_genotypes returns, whose genotypes are under
+		# "genotype" and which also says which predictions its markers allow,
+		# or a plain hash of marker => dosage.
+		my $dose = ref $rec->{genotype} eq 'HASH' ? $rec->{genotype} : $rec;
+		foreach my $t (@{ $traits }) {
+			my (@eta, @missing);
+			my $called = 0;
+			my $marker = $uses{$t};
+			foreach my $m (sort keys %{ $marker }) {
+				if (defined $dose->{$m}) { $called++ } else { push @missing, $m }
+			}
+			foreach my $c (@{ $category->{$t} }) {
+				my $eta = $beta->{$t}{$c}{$Intercept} // 0;
+				foreach my $m (keys %{ $beta->{$t}{$c} }) {
+					next if $m eq $Intercept;
+					# A marker with no genotype drops out of the sum, which is
+					# the same as counting it 0 copies of the counted allele.
+					$eta += $beta->{$t}{$c}{$m} * $dose->{$m} if defined $dose->{$m};
+				}
+				push @eta, $eta;
+			}
+			# hirisplex_genotypes sets eye, hair and skin to 0 where the
+			# HIrisPlex-S manual refuses the prediction outright; a model whose
+			# trait it says nothing about is predicted whatever it holds.
+			my $refused = !$r{force} && defined $rec->{$t} && !ref $rec->{$t} && $rec->{$t} eq '0'
+				? 'the markers it needs are missing, and the HIrisPlex-S rules refuse it' : undef;
+			my $p = $refused ? {} : do {
+				my $soft = _softmax(\@eta);
+				my %p;
+				@p{ @{ $category->{$t} } } = @{ $soft };
+				\%p;
+			};
+			my ($call) = $refused ? () : sort { $p->{$b} <=> $p->{$a} || $a cmp $b } keys %{ $p };
+			$out{$s}{$t} = {
+				p       => $p,
+				call    => $call,
+				markers => scalar keys %{ $marker },
+				called  => $called,
+				missing => \@missing,
+				refused => $refused,
+			};
+		}
+	}
+	if ($r{report}) {
+		print STDOUT _trait_report(\%r, \%out, [sort keys %out], $traits, $category) or croak "$sub: can't print the report: $!";
+	}
+	\%out;
+}
+
+# ---- PDB structures
+#
+# pdb_search asks two RCSB APIs, as their documentation at
+# https://search.rcsb.org/ and https://data.rcsb.org/ described them on
+# 2026-10-21: the search API finds the polymer entities whose sequence
+# matches, by MMseqs2, and the data API's GraphQL says what each one's
+# structure is.
+
+my $Rcsb_search = 'https://search.rcsb.org/rcsbsearch/v2/query';
+my $Rcsb_data   = 'https://data.rcsb.org/graphql';
+# The search API's own limit on "rows", which it refuses past with "numeric
+# instance is greater than the required maximum (maximum: 10000" (2026-10-21).
+my $Rcsb_rows = 10000;
+# How many entities each GraphQL request asks about. 500 came back in one
+# request in 2.45 s, 1.6 MB of JSON, on 2026-10-21, so 200 leaves headroom
+# for entities with more annotations than those had.
+my $Rcsb_batch = 200;
+my $Rcsb_entities = <<'GRAPHQL';
+query ($ids: [String!]!) { polymer_entities(entity_ids: $ids) {
+	rcsb_id
+	entity_poly { rcsb_entity_polymer_type pdbx_strand_id }
+	rcsb_polymer_entity { pdbx_description }
+	rcsb_entity_source_organism { scientific_name ncbi_taxonomy_id }
+	rcsb_polymer_entity_container_identifiers { reference_sequence_identifiers { database_name database_accession } }
+	rcsb_polymer_entity_annotation { type annotation_id name }
+	entry {
+		struct { title }
+		rcsb_entry_info { experimental_method resolution_combined polymer_composition structure_determination_methodology }
+		rcsb_accession_info { deposit_date initial_release_date }
+		rcsb_ma_qa_metric_global { ma_qa_metric_global { type value } }
+		assemblies { rcsb_struct_symmetry { kind oligomeric_state stoichiometry symbol } }
+		nonpolymer_entities { nonpolymer_comp { chem_comp { id name } } }
+	}
+} }
+GRAPHQL
+
+# $body POSTed to $url as JSON, for $sub, and the JSON it answers with,
+# decoded; undef when it answers 204, which is how the search API says that
+# nothing matched. A failure dies with RCSB's own "message" where it sent one.
+# The tests replace this sub, so that they run with no network.
+sub _rcsb_post {
+	my ($sub, $url, $body, $timeout) = @_;
+	require HTTP::Tiny;
+	require JSON::MaybeXS;
+	# verify_SSL is given, since it is the default only from HTTP::Tiny 0.083
+	my $http = HTTP::Tiny->new(agent => "Cn-Bioinf/$VERSION ", timeout => $timeout, verify_SSL => 1);
+	my ($ssl, $why) = $http->can_ssl;
+	unless ($ssl) {
+		$why =~ s/\s+\z//;
+		croak "$sub: can't reach RCSB, which needs HTTPS: $why";
+	}
+	my $res = $http->post($url, {
+		headers => { 'Content-Type' => 'application/json', Accept => 'application/json' },
+		content => JSON::MaybeXS::encode_json($body),
+	});
+	return undef if $res->{status} == 204;
+	my $json = eval { JSON::MaybeXS::decode_json($res->{content}) };
+	unless ($res->{success}) {
+		# 599 is HTTP::Tiny's own status, for a request that got no answer at
+		# all, and its content says why
+		my $msg = $res->{status} == 599 ? $res->{content}
+			: ref $json eq 'HASH' && defined $json->{message} ? $json->{message} : $res->{reason};
+		$msg =~ s/\s+\z//;
+		croak "$sub: $url answered $res->{status}: $msg";
+	}
+	croak "$sub: $url answered with something that isn't JSON: " . substr($res->{content}, 0, 200) unless ref $json;
+	$json;
+}
+
+# The alignment of one search hit, from the "match_context" RCSB gave it,
+# under the names get_best_alignment_hit gives a BLAST hsp. RCSB's
+# sequence_identity is truncated to 3 places, so the identity is counted from
+# the aligned sequences instead, which is how BLAST counts it.
+sub _pdb_alignment {
+	my ($m) = @_;
+	my ($q, $h) = @{ $m }{qw(query_aligned_seq subject_aligned_seq)};
+	my ($identity, $gaps) = (0, 0);
+	foreach my $i (0 .. length($q) - 1) {
+		my ($x, $y) = (substr($q, $i, 1), substr($h, $i, 1));
+		if ($x eq '-' || $y eq '-') { $gaps++ } elsif ($x eq $y) { $identity++ }
+	}
+	return {
+		evalue      => $m->{evalue},
+		bit_score   => $m->{bitscore},
+		align_len   => $m->{alignment_length},
+		identity    => $identity,
+		pident      => 100 * $identity / $m->{alignment_length},
+		mismatches  => $m->{mismatches},
+		gaps        => $gaps,
+		gap_opens   => $m->{gaps_opened},
+		query_from  => $m->{query_beg},
+		query_to    => $m->{query_end},
+		query_len   => $m->{query_length},
+		query_cover => 100 * ($m->{query_end} - $m->{query_beg} + 1) / $m->{query_length},
+		hit_from    => $m->{subject_beg},
+		hit_to      => $m->{subject_end},
+		hit_len     => $m->{subject_length},
+		qseq        => $q,
+		hseq        => $h,
+	};
+}
+
+# What the data API said of one polymer entity, $e, which is undef when it
+# said nothing, as the fields pdb_search returns: every key is there either
+# way, undef or an empty array when RCSB has no value.
+sub _pdb_structure {
+	my ($e) = @_;
+	$e //= {};
+	my $entry = $e->{entry} // {};
+	my $info = $entry->{rcsb_entry_info} // {};
+	my $dates = $entry->{rcsb_accession_info} // {};
+	# The global symmetry of the first assembly, which is the one the
+	# depositors gave first, and the one RCSB's own page shows.
+	my ($sym) = grep { ($_->{kind} // '') eq 'Global Symmetry' }
+		map { @{ $_->{rcsb_struct_symmetry} // [] } } grep { ref $_ eq 'HASH' } @{ $entry->{assemblies} // [] }[0];
+	$sym //= {};
+	my ($plddt) = map { $_->{value} } grep { ($_->{type} // '') eq 'pLDDT' }
+		map { @{ $_->{ma_qa_metric_global} // [] } } @{ $entry->{rcsb_ma_qa_metric_global} // [] };
+	my @annotation = @{ $e->{rcsb_polymer_entity_annotation} // [] };
+	my (%seen, @ligands);
+	foreach my $c (map { $_->{nonpolymer_comp}{chem_comp} // () } @{ $entry->{nonpolymer_entities} // [] }) {
+		push @ligands, { id => $c->{id}, name => $c->{name} } unless $seen{ $c->{id} }++;
+	}
+	my $chains = ($e->{entity_poly} // {})->{pdbx_strand_id};
+	return {
+		title               => ($entry->{struct} // {})->{title},
+		description         => ($e->{rcsb_polymer_entity} // {})->{pdbx_description},
+		method              => $info->{experimental_method},
+		methodology         => $info->{structure_determination_methodology},
+		resolution          => ($info->{resolution_combined} // [])->[0],
+		plddt               => $plddt,
+		polymer_type        => ($e->{entity_poly} // {})->{rcsb_entity_polymer_type},
+		polymer_composition => $info->{polymer_composition},
+		oligomeric_state    => $sym->{oligomeric_state},
+		stoichiometry       => $sym->{stoichiometry} ? join('', @{ $sym->{stoichiometry} }) : undef,
+		symmetry            => $sym->{symbol},
+		chains              => [defined $chains ? split(/,/, $chains) : ()],
+		organisms           => [map { +{ name => $_->{scientific_name}, taxonomy_id => $_->{ncbi_taxonomy_id} } } @{ $e->{rcsb_entity_source_organism} // [] }],
+		uniprot             => [map { $_->{database_accession} } grep { ($_->{database_name} // '') eq 'UniProt' }
+			@{ ($e->{rcsb_polymer_entity_container_identifiers} // {})->{reference_sequence_identifiers} // [] }],
+		pfam                => [map { +{ id => $_->{annotation_id}, name => $_->{name} } } grep { ($_->{type} // '') eq 'Pfam' } @annotation],
+		interpro            => [map { +{ id => $_->{annotation_id}, name => $_->{name} } } grep { ($_->{type} // '') eq 'InterPro' } @annotation],
+		ligands             => \@ligands,
+		deposited           => defined $dates->{deposit_date} ? substr($dates->{deposit_date}, 0, 10) : undef,
+		released            => defined $dates->{initial_release_date} ? substr($dates->{initial_release_date}, 0, 10) : undef,
+	};
+}
+
+# How a hit's structure was determined, as the report shows it: RCSB's
+# experimental method, which a computed model has none of. Its values, and
+# those of the methodology, are the enums of rcsb_entry_info in
+# https://data.rcsb.org/rest/v1/schema/entry (checked 2026-10-21).
+sub _pdb_method {
+	my ($h) = @_;
+	return $h->{method} if defined $h->{method};
+	($h->{methodology} // '') eq 'computational' ? 'model' : '-';
+}
+
+# pdb_search's report on @$hits, $total of which RCSB found: one line a hit,
+# best first.
+sub _pdb_report {
+	my ($r, $hits, $total) = @_;
+	my $text = "pdb_search: " . ($total == 0 ? 'no hits' : scalar(@{ $hits }) . " of $total hit" . ($total > 1 ? 's' : ''))
+		. " in RCSB's " . ($r->{computed} ? 'PDB and computed models' : 'PDB')
+		. " for a $r->{len}-residue $r->{type} sequence, at an E-value below $r->{evalue}"
+		. ($r->{identity} > 0 ? " and $r->{identity}% identity or more" : '') . "\n";
+	return $text unless @{ $hits };
+	my @head = ('id', 'method', 'resolution', 'identity', 'cover', 'evalue', 'bits', 'oligomer', 'description');
+	my @rows = map {
+		[$_->{id}, _pdb_method($_),
+			defined $_->{resolution} ? sprintf('%.2f A', $_->{resolution}) : defined $_->{plddt} ? "pLDDT $_->{plddt}" : '-',
+			sprintf('%.1f%%', $_->{pident}), sprintf('%.0f%%', $_->{query_cover}), sprintf('%.2g', $_->{evalue}), $_->{bit_score},
+			$_->{oligomeric_state} // '-', $_->{description} // '-']
+	} @{ $hits };
+	my @w = map { length $head[$_] } 0 .. $#head;
+	foreach my $row (@rows) {
+		foreach my $i (0 .. $#head) {
+			$w[$i] = length $row->[$i] if length $row->[$i] > $w[$i];
+		}
+	}
+	# left-aligned text, right-aligned numbers; the last column is not padded
+	my %left = map { $_ => 1 } 0, 1, 7, 8;
+	my $line = sub { join('  ', map { $_ == $#head ? $_[$_] : $left{$_} ? sprintf('%-*s', $w[$_], $_[$_]) : sprintf('%*s', $w[$_], $_[$_]) } 0 .. $#head) . "\n" };
+	$text . $line->(@head) . join('', map { $line->(@{ $_ }) } @rows);
+}
+
+sub pdb_search {
+	my $sub = 'pdb_search';
+	my $args = _args(\@_, $sub, [qw(seq)], [qw(computed evalue identity max_hits report timeout type)]);
+	my %r;
+	# The cutoffs are made numbers with 0 +, since JSON::XS writes a string as
+	# a string, and RCSB refuses a string where its schema wants a number.
+	$r{evalue} = $args->{evalue} // 0.1; # hits at this E-value or above are left out; BLAST's default of 10 would let in hits expected 10 times by chance
+	croak "$sub: \"evalue\" must be a number above 0, not " . _what($r{evalue})
+		unless !ref $r{evalue} && $r{evalue} =~ $Number && $r{evalue} > 0;
+	$r{evalue} = 0 + $r{evalue};
+	$r{identity} = $args->{identity} // 0; # percent; hits with less identity than this are left out
+	croak "$sub: \"identity\" must be a percentage, from 0 to 100, not " . _what($r{identity})
+		unless !ref $r{identity} && $r{identity} =~ $Number && $r{identity} >= 0 && $r{identity} <= 100;
+	$r{identity} = 0 + $r{identity};
+	$r{max_hits} = $args->{max_hits} // 100; # the most hits returned, best first
+	croak "$sub: \"max_hits\" must be a whole number from 1 to $Rcsb_rows, RCSB's limit, not " . _what($r{max_hits})
+		unless !ref $r{max_hits} && $r{max_hits} =~ /\A[0-9]+\z/ && $r{max_hits} >= 1 && $r{max_hits} <= $Rcsb_rows;
+	$r{max_hits} = 0 + $r{max_hits};
+	$r{computed} = $args->{computed} // 0; # 0 = experimental structures only; 1 = also computed models (AlphaFold DB, ModelArchive)
+	croak "$sub: \"computed\" must be 0 or 1, not " . _what($r{computed}) unless !ref $r{computed} && ($r{computed} eq '0' || $r{computed} eq '1');
+	$r{type} = $args->{type} // 'protein'; # protein, dna or rna: which of RCSB's sequence databases to search
+	croak "$sub: \"type\" must be protein, dna or rna, not " . _what($r{type}) unless !ref $r{type} && $r{type} =~ /\A(?:protein|dna|rna)\z/;
+	$r{report} = $args->{report} // 1; # 1 = print a table of the hits to STDOUT; 0 = only return them
+	croak "$sub: \"report\" must be 0 or 1, not " . _what($r{report}) unless !ref $r{report} && ($r{report} eq '0' || $r{report} eq '1');
+	$r{timeout} = $args->{timeout} // 60; # seconds for each request, HTTP::Tiny's own default
+	croak "$sub: \"timeout\" must be a number of seconds above 0, not " . _what($r{timeout})
+		unless !ref $r{timeout} && $r{timeout} =~ $Number && $r{timeout} > 0;
+
+	my $seq = $args->{seq};
+	croak "$sub: \"seq\" must be a sequence, as a string, not " . _what($seq) if ref $seq;
+	# A sequence copied out of a FASTA file keeps its line breaks, and one
+	# translated from DNA can end in a stop; RCSB refuses both, and lower case.
+	$seq =~ s/\s+//g;
+	$seq = uc $seq;
+	$seq =~ s/\*\z//;
+	croak "$sub: \"seq\" has no residues" unless length $seq;
+	croak "$sub: \"seq\" has \"$1\" at residue " . ($-[0] + 1) . ', which isn\'t a residue letter' if $seq =~ /([^A-Z])/;
+	$r{len} = length $seq;
+
+	my $found = _rcsb_post($sub, $Rcsb_search, {
+		query => { type => 'terminal', service => 'sequence', parameters => {
+			evalue_cutoff => $r{evalue}, identity_cutoff => $r{identity} / 100, sequence_type => $r{type}, value => $seq,
+		} },
+		request_options => {
+			results_verbosity    => 'verbose', # which gives each hit's alignment
+			results_content_type => [$r{computed} ? ('experimental', 'computational') : 'experimental'],
+			scoring_strategy     => 'sequence',
+			paginate             => { start => 0, rows => $r{max_hits} },
+		},
+		return_type => 'polymer_entity',
+	}, $r{timeout});
+	my $total = $found ? $found->{total_count} : 0;
+	my @hits;
+	foreach my $res (@{ $found ? $found->{result_set} : [] }) {
+		my $best; # undef until a match is seen
+		foreach my $m (map { @{ $_->{match_context} // [] } } map { @{ $_->{nodes} // [] } } @{ $res->{services} // [] }) {
+			# none of the 1382 hits for human haemoglobin alpha had more than
+			# one match on 2026-10-21, but the format allows it
+			$best = $m if !defined $best || $m->{bitscore} > $best->{bitscore};
+		}
+		croak "$sub: RCSB gave no alignment for $res->{identifier}" unless defined $best;
+		# An identifier is entry_entity: 1BZ1_1, or AF_AFP69905F1_1 for a computed model
+		my ($entry, $entity) = $res->{identifier} =~ /\A(.+)_([^_]+)\z/
+			or croak "$sub: RCSB returned \"$res->{identifier}\", which isn't an entry_entity identifier";
+		push @hits, { id => $res->{identifier}, entry => $entry, entity => $entity,
+			url => "https://www.rcsb.org/structure/$entry", %{ _pdb_alignment($best) } };
+	}
+
+	my %entity;
+	for (my $i = 0; $i < @hits; $i += $Rcsb_batch) {
+		my @ids = map { $_->{id} } @hits[$i .. ($i + $Rcsb_batch > @hits ? $#hits : $i + $Rcsb_batch - 1)];
+		my $data = _rcsb_post($sub, $Rcsb_data, { query => $Rcsb_entities, variables => { ids => \@ids } }, $r{timeout});
+		my $list = ref $data eq 'HASH' && ref $data->{data} eq 'HASH' ? $data->{data}{polymer_entities} : undef;
+		unless (ref $list eq 'ARRAY') {
+			my @why = map { $_->{message} // () } @{ ref $data eq 'HASH' && ref $data->{errors} eq 'ARRAY' ? $data->{errors} : [] };
+			croak "$sub: $Rcsb_data said nothing of $ids[0]" . (@ids > 1 ? ' and the rest' : '') . (@why ? ': ' . join('; ', @why) : '');
+		}
+		$entity{ $_->{rcsb_id} } = $_ foreach grep { ref $_ eq 'HASH' } @{ $list };
+	}
+	foreach my $h (@hits) {
+		# the search index can be ahead of the data API for a new release
+		carp "$sub: $Rcsb_data had nothing on $h->{id}, so its structure fields are empty" unless $entity{ $h->{id} };
+		%{ $h } = (%{ $h }, %{ _pdb_structure($entity{ $h->{id} }) });
+	}
+	# Best first, as get_best_alignment_hit sorts on "evalue": RCSB rounds a
+	# strong E-value to 0, so the bit score breaks ties, and then RCSB's order.
+	my @order = sort { $hits[$a]{evalue} <=> $hits[$b]{evalue} || $hits[$b]{bit_score} <=> $hits[$a]{bit_score} || $a <=> $b } 0 .. $#hits;
+	@hits = @hits[@order];
+	if ($r{report}) {
+		my $text = _pdb_report(\%r, \@hits, $total);
+		# RCSB's text is characters, and can hold some above 255 (a Greek
+		# letter in a title), which print would warn of as a "Wide character",
+		# fatally in a caller under FATAL warnings, unless STDOUT encodes.
+		utf8::encode($text) unless grep { /\A(?:utf8|encoding)/ } PerlIO::get_layers(*STDOUT);
+		print STDOUT $text or croak "$sub: can't print the report: $!";
+	}
+	wantarray ? (\@hits, $total) : \@hits;
 }
 
 # ---- alignment plots and tables
@@ -1553,10 +2426,11 @@ sub _align {
 
 sub plot_msa {
 	my $sub = 'plot_msa';
-	my $args = _args(\@_, $sub, [qw(fasta filename)], [qw(active_site_aa clustal_args labels msa_file order query threads title
+	my $args = _args(\@_, $sub, [qw(fasta filename)], [qw(active_site_aa clustal_args execute fh labels msa_file order query threads title
 		tree_file xlabel ylabel)]);
 	_refs($sub, $args, 'ARRAY', qw(clustal_args order));
 	_refs($sub, $args, 'HASH', 'labels');
+	my $drawing = _drawing($sub, $args);
 	my $sites = $args->{'active_site_aa'};
 	if (defined $sites) {
 		croak "$sub: \"active_site_aa\" must be a hash ref of label => residue number" unless ref $sites eq 'HASH';
@@ -1596,12 +2470,12 @@ sub plot_msa {
 	}
 	my %shown = map { $shown_as{$_} => $aln->{$_} } @order;
 	my $fa = hash2fasta_file(\%shown, _tmp('.fa'), [@shown_as{@order}], 0);
-	_python($sub, '--f', $fa, '--o', $args->{filename}, '--c', _creator($sub), '--quiet',
+	$r->{'python_file'} = _draw($sub, $drawing, '--f', $fa, '--o', $args->{filename}, '--c', _creator($sub), '--quiet',
 		'--p', _json_text([map { _chars($_) } _align_provenance($args, $sub, $cmd, $names, $r->{'msa_file'}), _kept($args, qw(msa_file tree_file))]),
 		(defined $args->{title} ? ('--t', $args->{title}) : ()),
 		(defined $args->{xlabel} ? ('--x', $args->{xlabel}) : ()),
 		(defined $args->{ylabel} ? ('--y', $args->{ylabel}) : ()), @segments);
-	_wrote($args->{filename}, 43); # yellow
+	_wrote($args->{filename}, 43, $drawing->{execute} ? 'wrote' : 'will write'); # yellow
 	$r->{filename} = $args->{filename};
 	$r;
 }
@@ -1649,9 +2523,10 @@ sub _align_provenance {
 
 sub plot_phylo {
 	my $sub = 'plot_phylo';
-	my $args = _args(\@_, $sub, [], [qw(clustal_args fasta labels msa_file output_file threads title tree_file)]);
+	my $args = _args(\@_, $sub, [], [qw(clustal_args execute fasta fh labels msa_file output_file threads title tree_file)]);
 	_refs($sub, $args, 'ARRAY', 'clustal_args');
 	_refs($sub, $args, 'HASH', 'labels');
+	my $drawing = _drawing($sub, $args);
 	$args->{output_file} //= 'phylo.svg';
 	my ($r, $tree, $names, $cmd);
 	if (defined $args->{fasta}) {
@@ -1670,11 +2545,12 @@ sub plot_phylo {
 			_kept($args, qw(msa_file tree_file)))
 		: ('from the newick file ' . _file_id($tree));
 	# the tips are named in UTF-8 by _unnumber_newick, which msa_plot.py decodes
-	_python($sub, '--tree', $tree, '--o', $args->{'output_file'}, '--c', _creator($sub), '--quiet', '--p', _json_text([map { _chars($_) } @prov]),
+	$r->{'python_file'} = _draw($sub, $drawing, '--tree', $tree, '--o', $args->{'output_file'}, '--c', _creator($sub), '--quiet',
+		'--p', _json_text([map { _chars($_) } @prov]),
 		(defined $args->{title} ? ('--t', $args->{title}) : ()),
 		(%{ $labels } ? ('--l', _json_text({ map { _chars($_) => _chars($labels->{$_}) } keys %{ $labels } })) : ()));
 	$r->{'output_file'} = $args->{'output_file'};
-	_wrote($args->{output_file}, 43); # yellow
+	_wrote($args->{output_file}, 43, $drawing->{execute} ? 'wrote' : 'will write'); # yellow
 	$r;
 }
 
@@ -1918,6 +2794,10 @@ __END__
 
  my $hits = get_best_alignment_hit('blast.json', 'bit_score');
 
+ # the PDB structures that match a sequence, how well, and what kind they are
+ my $pdb = pdb_search(seq => $one);
+ print "$pdb->[0]{id} $pdb->[0]{pident}% $pdb->[0]{method} $pdb->[0]{resolution}\n";
+
  # one clustalo run: plot_msa keeps the guide tree, and plot_phylo draws it
  plot_msa(
      fasta       => 'orthologs.fa',     # or { name => sequence }
@@ -1944,16 +2824,23 @@ __END__
  my $conc = concordance(truth => 'NA12878.truth.vcf.gz', test => 'NA12878.run42.vcf.gz');
  print $conc->{'NA12878'}{metrics}{genotype_concordance};
 
+ # the 41 HIrisPlex-S markers, as the webtool's CSV wants them
+ my $g = hirisplex_genotypes(vcf => 'genome.vcf.gz', file => 'hirisplexs.csv');
+
+ # ... and a prediction from a multinomial logistic model you supply
+ my $p = trait_predict(genotypes => $g, model => 'my_model.tsv');
+ print $p->{'NA12878'}{eye}{call};
+
 =head1 DESCRIPTION
 
-FASTA I/O in XS, BLAST hit ranking, and multiple-sequence-alignment plots and
-LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, how every two people are related, and how well one VCF's calls agree with another's.
+FASTA I/O in XS, BLAST hit ranking, a search of the PDB's structures for a
+sequence, and multiple-sequence-alignment plots and LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, how every two people are related, how well one VCF's calls agree with another's, and the genotypes of the HIrisPlex-S eye, hair and skin colour panel, with a trait predictor for any multinomial logistic model you supply.
 
 Nothing is exported by default; ask for functions by name or with C<:all>.
 Every function dies (via C<Carp::croak>) on bad arguments, with a message that
 starts with the name of the function that raised it, as in
-C<fasta2hash: couldn't find "four" in x.fa>. C<pgs_score>, C<sex_check>,
-C<parent>, C<relatedness>, C<concordance>, C<plot_msa>, C<plot_phylo>, C<msa_quality_table> and C<clustal_view_residues>
+C<fasta2hash: couldn't find "four" in x.fa>. C<pdb_search>, C<pgs_score>, C<sex_check>,
+C<parent>, C<relatedness>, C<concordance>, C<hirisplex_genotypes>, C<trait_predict>, C<plot_msa>, C<plot_phylo>, C<msa_quality_table> and C<clustal_view_residues>
 take C<< name =E<gt> value >> pairs, not a hash ref.
 
 =head2 Alien::Bioinf
@@ -1963,8 +2850,9 @@ C<Alien::Bioinf>, which installs them module-locally and never uses C<PATH>. It
 is recommended rather than required, because it can only be installed where
 NCBI builds BLAST+ (Linux and macOS on x86_64 and aarch64, and Windows on
 x86_64) and it needs the network; PLINK 2 has no build for Linux on aarch64,
-so there it installs the rest. C<fasta2hash>, C<hash2fasta_file> and
-C<get_best_alignment_hit> work without it; C<pgs_score>, C<plot_msa>,
+so there it installs the rest. C<fasta2hash>, C<hash2fasta_file>,
+C<get_best_alignment_hit>, C<sex_check>, C<parent>, C<relatedness>, C<concordance>,
+C<hirisplex_genotypes> and C<trait_predict> work without it; C<pgs_score>, C<plot_msa>,
 C<plot_phylo>, C<msa_quality_table>, and C<clustal_view_residues> given an
 unaligned file, die saying that they need it. A CPAN client does not install a recommended module
 unless asked, so install it first:
@@ -2073,6 +2961,153 @@ C<evalue>): C<align_len>, C<bit_score>, C<evalue>, C<gaps>, C<identity>,
 C<positive> or C<score>. Ties are broken on the bit score, then on BLAST's
 order. A report with two queries of one title dies, since only one of them
 could be returned.
+
+=head2 pdb_search(%args)
+
+Searches the structures of the L<RCSB PDB|https://www.rcsb.org/> for a
+sequence, and returns the matching ones, best first, each with how well it
+aligns and what kind of structure it is:
+
+ use Cn::Bioinf qw(pdb_search);
+
+ my $hits = pdb_search(seq => 'MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMF...');
+ my $best = $hits->[0];
+ print "$best->{id}: $best->{pident}% identical over $best->{query_cover}% of the query, ",
+     "$best->{method} at $best->{resolution} A, $best->{oligomeric_state}\n";
+ # 1BZ1_1: 100% identical over 100% of the query, X-ray at 1.59 A, Hetero 4-mer
+
+ my ($hits, $total) = pdb_search(seq => $seq, max_hits => 10); # and how many RCSB found
+
+It needs the network, and HTTPS, which HTTP::Tiny gets from C<IO::Socket::SSL>
+and C<Net::SSLeay>; without them it dies saying which is missing. It asks two
+of RCSB's APIs: the L<search API|https://search.rcsb.org/> finds the polymer
+entities (one distinct chain of a structure) whose sequence matches, and the
+L<data API|https://data.rcsb.org/> says what each one's structure is.
+
+RCSB aligns with MMseqs2, not BLAST, so the numbers are MMseqs2's: its E-value
+and bit score are on BLAST's scale but are not what C<blastp> would give for the
+same pair. They are returned under the names C<get_best_alignment_hit> gives a
+BLAST hsp.
+
+=head3 Arguments
+
+=over
+
+=item * C<seq> (required): the sequence, as a string. Whitespace is removed, lower
+case is made upper case, and a final C<*> (a stop) is dropped, so a sequence
+pasted from a FASTA file can be given as it is; any other character that is
+not a letter dies. RCSB itself refuses a sequence shorter than 10 residues.
+
+=item * C<type>: C<protein> (the default), C<dna> or C<rna>.
+
+=item * C<evalue>: hits with this E-value or above are left out. The default is 0.1,
+not BLAST's 10, which in a search of the whole PDB lets in hits expected 10
+times over by chance.
+
+=item * C<identity>: hits with less identity than this percentage are left out
+(default 0).
+
+=item * C<max_hits>: the most hits returned (default 100). RCSB allows up to 10000.
+
+=item * C<computed>: 0 (the default) searches experimental structures only; 1 also
+searches the computed structure models RCSB holds, from AlphaFold DB and
+ModelArchive.
+
+=item * C<report>: 1 (the default) prints a table of the hits to STDOUT; 0 returns
+them only.
+
+=item * C<timeout>: seconds to wait for each request to RCSB (default 60).
+
+=back
+
+=head3 What it returns
+
+An array ref of hits, best first: by E-value, then bit score, then RCSB's own
+order, as C<get_best_alignment_hit> sorts by C<evalue>. Many hits tie: every
+structure of the query's own protein aligns the same way. In list context, the
+number of hits RCSB found is returned as well, which can be more than
+C<max_hits>. Nothing matching is an empty array ref, not an error.
+
+Each hit is a hash ref with every one of these keys, C<undef> or an empty array
+ref where RCSB has no value:
+
+What it is:
+
+=over
+
+=item * C<id>: the polymer entity, as C<1BZ1_1>: entry C<1BZ1>, entity C<1>.
+
+=item * C<entry>, C<entity>: the two halves of C<id>. A computed model's entry is like
+C<AF_AFP69905F1>.
+
+=item * C<url>: the entry's page at RCSB.
+
+=back
+
+How well it aligns:
+
+=over
+
+=item * C<evalue>, C<bit_score>: MMseqs2's.
+
+=item * C<align_len>: the length of the alignment, gaps included.
+
+=item * C<identity>: the number of aligned columns where the two agree, and C<pident>,
+that as a percentage of C<align_len>. These are counted from the aligned
+sequences, since RCSB gives the identity only truncated to 3 places.
+
+=item * C<mismatches>, C<gaps> (gap columns), C<gap_opens>.
+
+=item * C<query_from>, C<query_to>, C<query_len> and C<query_cover>, the percentage of
+the query in the alignment.
+
+=item * C<hit_from>, C<hit_to>, C<hit_len>: the same for the hit's sequence.
+
+=item * C<qseq>, C<hseq>: the aligned query and hit, with C<-> for gaps.
+
+=back
+
+What kind of structure it is:
+
+=over
+
+=item * C<title>: the entry's title, and C<description>, the entity's name.
+
+=item * C<method>: how the structure was determined: C<X-ray>, C<EM>, C<NMR>,
+C<Neutron>, C<Integrative>, C<Multiple methods> or C<Other>; C<undef> for a
+computed model.
+
+=item * C<methodology>: C<experimental>, C<computational> or C<integrative>.
+
+=item * C<resolution>: in Å, for X-ray and EM structures.
+
+=item * C<plddt>: a computed model's mean pLDDT, 0 to 100.
+
+=item * C<polymer_type>: C<Protein>, C<DNA>, C<RNA>, C<NA-hybrid> or C<Other>.
+
+=item * C<polymer_composition>: the entry as a whole, such as C<homomeric protein>,
+C<heteromeric protein> or C<protein/NA>.
+
+=item * C<oligomeric_state>, C<stoichiometry> and C<symmetry>: the global symmetry of
+the first biological assembly, such as C<Hetero 4-mer>, C<A2B2> and C<C2>.
+
+=item * C<chains>: an array ref of the chains that are this entity.
+
+=item * C<organisms>: an array ref of C<{ name, taxonomy_id }>.
+
+=item * C<uniprot>: an array ref of UniProt accessions.
+
+=item * C<pfam>, C<interpro>: array refs of C<{ id, name }>.
+
+=item * C<ligands>: an array ref of C<{ id, name }>, one for each kind of small
+molecule in the entry, such as C<HEM>.
+
+=item * C<deposited>, C<released>: dates, as C<YYYY-MM-DD>.
+
+=back
+
+A hit that the data API has no record of (one so new that RCSB's search index
+has it first) is warned of, and is returned with its alignment and no structure.
 
 =head2 pgs_score(%args)
 
@@ -2721,6 +3756,16 @@ test's sites are the ones measured, as for a genotyping panel against a
 genome. A site whose ALTs are listed in another order, or split over two
 records, is a different site.
 
+The two files have to be on the same genome build, since a site's POS in
+GRCh37 (hg19) is not the same place in GRCh38 (hg38). Before either file is
+read, C<concordance> compares the lengths that their headers' C<##contig> lines
+give, matching contigs by name without C<chr>, as sites are matched. It dies if
+any contig that both give a length for has different lengths, and names the
+contigs and the build each header gives (its C<assembly>, or else its
+C<##reference>). hg19 and b37, whose chromosomes are the same lengths, pass. A
+header with no C<##contig> lengths cannot be checked this way. When none of the
+test's sites is in the truth, C<concordance> warns that the builds may differ.
+
 On C<t/data/concordance.test.vcf> against C<t/data/concordance.truth.vcf> it
 prints
 
@@ -2874,12 +3919,220 @@ schemes for the chromosomes other than C<chr>.
 
 A BCF is not read; convert it with C<bcftools view -Oz>.
 
+=head2 hirisplex_genotypes(%args)
+
+Reads the 41 markers of the HIrisPlex-S eye, hair and skin colour panel out of
+a VCF, counting for each sample how many copies of each marker's model allele
+it carries, and can write them as the CSV the HIrisPlex-S webtool uploads:
+
+ use Cn::Bioinf 'hirisplex_genotypes';
+
+ my $g = hirisplex_genotypes(vcf => 'genome.vcf.gz', file => 'hirisplexs.csv');
+ print $g->{NA12878}{genotype}{'rs12913832_T'};  # 0, 1, 2, or undef
+ print scalar @{ $g->{NA12878}{missing} }, " markers missing\n";
+
+B<< This distribution ships no prediction model, and C<hirisplex_genotypes> makes
+no prediction. >> The HIrisPlex-S regression coefficients are not published:
+Chaitanya et al. (2018) cite them by reference rather than tabulating them,
+the webtool offers no download and says that no part of it may be reproduced
+without consent, and part of the knowledge behind it is covered by European
+patent EP2195448. What is public, and what this function uses, is the panel
+itself -- which markers, in which order, and which allele each model counts --
+taken from the webtool's own input form. So C<hirisplex_genotypes> prepares the
+input, and the prediction is made either at
+L<the webtool|https://hirisplex.erasmusmc.nl/> or by C<trait_predict> from a
+model table you hold yourself.
+
+=head3 The panel
+
+C<share/hirisplex_s_panel.tsv> holds the panel: each marker's rs number, gene,
+the allele the model counts, its positions on GRCh37 and GRCh38, and whether
+it belongs to the 6-marker IrisPlex and 24-marker HIrisPlex subsets.
+C<share/make_hirisplex_panel.pl> writes that file from the webtool's form and
+Ensembl, and its header comment says how to re-run it; the committed file is
+what is used, and the generator is never run by the module.
+
+The webtool asks for a count of the allele on the assay's strand, which is not
+always the strand a VCF is written on, and the panel records the forward-strand
+allele to count for each marker so that nothing has to be guessed at run time.
+Fourteen of the 41 are counted as the complement of the allele the webtool
+names. One, ASIP C<rs6119471>, carries the named allele on the forward strand
+I<and> still has to be flipped -- the HIrisPlex-S manual singles it out as "the
+only SNP that may cause confusion and therefore must be converted (from NCBI's
+forward orientation)" -- so a tool that simply matched the named allele would
+silently count the wrong one. MC1R C<rs312262906> is not a SNP but the 86insA
+frameshift, merged in dbSNP into C<rs796296176>; it is counted as the allele
+longer than REF, and matching by rs number looks for both numbers.
+
+=head3 Arguments
+
+=over
+
+=item * C<vcf> (required): a C<.vcf>, C<.vcf.gz>, C<.vcf.bgz> or C<.vcf.bz2> file. As
+C<sex_check> does, it may be given first and on its own:
+C<hirisplex_genotypes('genome.vcf.gz')>.
+
+=item * C<match>: C<position> (the default) matches CHROM and POS against the panel's
+coordinates; C<id> matches the ID column against the markers' rs numbers,
+which finds nothing in a VCF whose ID column is C<.>.
+
+=item * C<build>: C<hg19>, C<b37>, C<hg38> or C<b38>, saying which of the panel's two sets
+of coordinates to match on. By default it is read from the VCF's C<##contig>
+lengths, and C<hirisplex_genotypes> dies asking for it when the header gives
+no length it knows, or lengths that are neither build's.
+
+=item * C<min_depth>: a genotype whose FORMAT C<DP> is below this is not counted.
+Defaults to 7, C<sex_check>'s default; 0 counts every call whatever its depth.
+A genotype with no C<DP> is always counted.
+
+=item * C<file>: write the webtool's CSV here. Its header is that of the webtool's own
+template, column for column, and a marker with no genotype is written C<NA>.
+
+=item * C<report>: 1 (the default) prints a table of the samples to STDOUT; 0 returns
+them only.
+
+=back
+
+=head3 What it returns
+
+A hash ref keyed by sample name, each holding:
+
+=over
+
+=item * C<genotype>: a hash ref keyed as the webtool's CSV heads its columns,
+C<< E<lt>rs numberE<gt>_E<lt>input alleleE<gt> >>, holding 0, 1 or 2 copies of that allele, or
+C<undef> where the sample has no usable call.
+
+=item * C<missing>: an array ref of the rs numbers with no genotype, in the panel's
+order.
+
+=item * C<markers> and C<called>: how many markers the panel holds, and how many this
+sample has a genotype for.
+
+=item * C<eye>, C<hair>, C<skin>: 1 or 0, whether the HIrisPlex-S rules allow that
+prediction from these markers at all. The manual refuses an eye prediction
+without HERC2 C<rs12913832>, a hair prediction when all 11 MC1R markers are
+missing, and both when HERC2, SLC45A2 and IRF4 are all missing, because the
+loss in AUC is too great. It sets no such rule for skin, so C<skin> is 0 only
+when nothing at all was called. C<trait_predict> honours these.
+
+=back
+
+A genotype is counted only when the call is diploid and complete: a C<./.>, a
+C<./1>, a haploid call (the panel is autosomal) or one below C<min_depth> leaves
+the marker without a genotype. A site split into one record per ALT is counted
+from whichever record carries the counted allele, in either order, and a record
+at a marker's position whose REF is longer than one base is some other variant
+and is passed over.
+
+C<hirisplex_genotypes> warns when the file holds none of the 41 markers, which
+usually means the wrong build or an ID column of C<.>.
+
+Reading the markers is done in XS, in one pass, keeping one byte per sample per
+marker, so a whole-genome VCF costs no more memory than a small one. A
+275,879-record exome of 22 MB gzipped took 0.86 s (perl 5.44.0, 2026-10-20).
+
+Most of the panel is intronic or intergenic, so an exome carries little of it:
+that same exome held 9 of the 41 markers. A whole-genome VCF, a genotyping
+array that covers the panel, or the SNaPshot assay the panel was designed for
+is what the prediction expects, and C<missing> and C<called> are returned so that
+a prediction made from a handful of markers can be seen for what it is.
+
+=head2 trait_predict(%args)
+
+Applies a multinomial logistic regression -- which is what the HIrisPlex-S,
+HIrisPlex and IrisPlex models are -- to genotypes, and returns a probability
+for each category of each trait:
+
+ use Cn::Bioinf qw(hirisplex_genotypes trait_predict);
+
+ my $g = hirisplex_genotypes(vcf => 'genome.vcf.gz', report => 0);
+ my $p = trait_predict(genotypes => $g, model => 'my_model.tsv');
+ print $p->{NA12878}{eye}{call};          # the most probable category
+ print $p->{NA12878}{eye}{p}{blue};       # its probability
+
+The model is yours to supply: see C<hirisplex_genotypes> above for why this
+distribution ships none. Any model written in the form below works, so this is
+not limited to pigmentation.
+
+=head3 The model table
+
+A tab-separated file (optionally gzipped), or a data frame as
+C<Stats::LikeR>'s C<read_table> returns, with four columns:
+
+ trait    category    marker    beta
+ eye    blue    (intercept)    3.94
+ eye    blue    rs12913832_T    -4.81
+ eye    brown    (intercept)    0
+
+C<marker> is a key of the C<genotype> hash C<hirisplex_genotypes> returns, which
+is C<< E<lt>rs numberE<gt>_E<lt>input alleleE<gt> >>, or the literal C<(intercept)> for the
+category's intercept. A category whose only row is an intercept of 0 is the
+reference category, which is how a model of I<k> categories is written with
+I<k> - 1 sets of betas; every category that should appear in the result needs at
+least one row. Traits and their categories come out in the order the table
+first names them.
+
+For each category the linear predictor is its intercept plus the sum of its
+betas times the genotypes, and the probabilities are C<exp> of those over their
+sum. The largest is taken out before C<exp>, so a linear predictor large enough
+to overflow gives 1 rather than a NaN.
+
+=head3 Arguments
+
+=over
+
+=item * C<genotypes> (required): what C<hirisplex_genotypes> returned, or a plain hash
+ref of sample => { marker => 0, 1 or 2 }.
+
+=item * C<model> (required): the table above, as a file name or a data frame.
+
+=item * C<force>: 0 (the default) makes no prediction for a trait that the genotypes
+say cannot be predicted -- that is, where C<hirisplex_genotypes> set C<eye>,
+C<hair> or C<skin> to 0; 1 predicts it anyway. A trait the genotypes say
+nothing about is always predicted.
+
+=item * C<report>: 1 (the default) prints a table of the samples to STDOUT; 0 returns
+them only.
+
+=back
+
+=head3 What it returns
+
+A hash ref keyed by sample and then by trait, each holding:
+
+=over
+
+=item * C<p>: a hash ref of category => probability, which sum to 1; empty when the
+prediction was refused.
+
+=item * C<call>: the most probable category, or C<undef> when it was refused. A tie is
+broken by the category's name, so the answer does not depend on hash order.
+
+=item * C<markers> and C<called>: how many markers the trait's categories use between
+them, and how many this sample has a genotype for.
+
+=item * C<missing>: an array ref of the markers the model names and the sample has no
+genotype for.
+
+=item * C<refused>: C<undef>, or why no prediction was made.
+
+=back
+
+A marker the sample has no genotype for drops out of the sum, which is the same
+as counting it 0 copies of the counted allele. That is a choice, not something
+the HIrisPlex-S authors specify, and it biases the result towards whatever 0
+copies means for that marker; C<missing> and C<called> are returned so that a
+prediction made from few markers can be reported as such. The webtool reports a
+loss in AUC for exactly this reason.
+
 =head2 plot_msa(%args)
 
 Aligns sequences with Clustal Omega and draws the alignment. Returns a hash ref
-of the files made: C<filename>, C<msa_file>, and C<tree_file> if it was given.
-Once the image is written it prints C<wrote> and its file name to STDOUT, the
-name in black on yellow when STDOUT is a terminal.
+of the files made: C<filename>, C<msa_file>, C<python_file> (see C<fh> and
+C<execute> below), and C<tree_file> if it was given. Once the image is written it
+prints C<wrote> and its file name to STDOUT, the name in black on yellow when
+STDOUT is a terminal; with C<< execute =E<gt> 0 >> it prints C<will write> instead.
 
  plot_msa(
      fasta      => 't/data/DEG20010421.fa',
@@ -2915,6 +4168,22 @@ A number below 1 dies.
 axis labels (default "Amino Acid Residue" and "Protein & Species");
 clustalo threads (default 1); and an array ref of extra clustalo arguments.
 
+=item * C<fh>, C<execute>: as for Matplotlib::Simple's C<plt>. The image is drawn by a
+Python script, and C<fh> is a C<File::Temp> object to append that script to;
+without it, the script goes in a new temporary file. C<execute> is 1 (the
+default) to run the script now, under Alien::Bioinf's Python, or 0 only to
+write it. So several calls with one C<fh> and C<< execute =E<gt> 0 >>, then a last one
+with C<< execute =E<gt> 1 >>, draw every image in one run of Python. The C<fh> may be
+one that Matplotlib::Simple's C<plt> also writes to, since the Python each
+function appends stands alone. Clustal Omega runs either way; only the
+drawing waits.
+
+C<python_file> is the script's file name: C<fh>'s, or the temporary file's,
+which is kept after perl exits only when C<execute> is 0. The script carries
+the alignment and everything else it reads, so it can be run later, with
+C<< perl -MAlien::Bioinf -e 'print Alien::Bioinf-E<gt>python' >> giving the Python to
+run it with, after perl's own temporary files have gone.
+
 =back
 
 With fewer than two sequences it warns and returns an empty hash ref.
@@ -2923,13 +4192,13 @@ With fewer than two sequences it warns and returns an empty hash ref.
 
 Draws a guide tree, with Biopython's C<Bio.Phylo>, from a FASTA (aligned with
 Clustal Omega first) or from a newick file that C<plot_msa> kept. Returns a
-hash ref of the files made or used: C<output_file>, and C<tree_file> and
-C<msa_file> as below.
+hash ref of the files made or used: C<output_file>, C<python_file>, and
+C<tree_file> and C<msa_file> as below.
 
  plot_phylo(fasta => 't/data/DEG20010421.fa');   # writes phylo.svg
  plot_phylo(
-     'tree_file'   => 'DEG20010421.newick',
-     'output_file' => 'DEG20010421.tree.png',
+     tree_file   => 'DEG20010421.newick',
+     output_file => 'DEG20010421.tree.png',
  );
 
 =over
@@ -2946,6 +4215,10 @@ is made.
 
 =item * C<labels>, C<title>: a hash ref of name => label for the tips, as for
 C<plot_msa>; and the plot title.
+
+=item * C<fh>, C<execute>: as for C<plot_msa>, which can share an C<fh> with this; the
+script carries the newick tree it draws. C<python_file> is the script's file
+name.
 
 =back
 

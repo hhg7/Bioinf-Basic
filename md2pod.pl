@@ -11,7 +11,7 @@
 #
 # This is an author-only helper. dist.ini's [PruneFiles] keeps it and
 # read.me.pod out of the tarball, so like ~/Scripts/stats's helper scripts it
-# may use modern perl rather than the 5.10 the module is held to.
+# may use modern perl rather than the 5.12 the module is held to.
 #
 # Provenance: copied on 2026-09-30 from ~/Scripts/stats/md2pod.pl as of commit
 # fa4ed3a there, which converts Stats::LikeR's README.md the same way. Only

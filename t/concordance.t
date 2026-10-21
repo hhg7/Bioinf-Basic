@@ -1,4 +1,4 @@
-require 5.010;
+require 5.012;
 use strict;
 use warnings FATAL => 'all';
 use Test::More;
@@ -408,6 +408,47 @@ sub small {
 	like $w[0], qr/^concordance: none of the 2 sites of "test" .+elsewhere\.vcf is in "truth" \Q$one\E, so every call of the test is gained or a no-call; check that the two are of the same genome build/, 'saying so';
 	@w = warnings_of(sub { concordance(truth => $truth, test => $test, report => 0) });
 	is scalar(@w), 0, 'and the fixtures, which share sites, do not warn';
+}
+
+# ---- genome builds, by the headers' ##contig lengths
+#
+# The lengths are made up: what is tested is that they agree or not, and a
+# real build's would say no more. The site, which both files have, shows that
+# a call that passes is compared, and that one that dies was not refused for
+# sharing no site.
+{
+	my $site = "1\t5\t.\tA\tG\t.\t.\t.\tGT\t0/1\n";
+	my $vcf = sub {
+		my ($name, @contig) = @_;
+		spew($name, "##fileformat=VCFv4.2\n" . join('', map { "##contig=<$_>\n" } @contig) . "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS\n$site");
+	};
+	my $b1 = $vcf->('b1.vcf', 'ID=chr1,length=1000,assembly=hg19', 'ID=chr2,length=2000,assembly=hg19');
+	my $b2 = $vcf->('b2.vcf', 'ID=1,length=1001,assembly=GRCh38', 'ID=2,length=2000,assembly=GRCh38');
+	dies_like sub { concordance(truth => $b1, test => $b2, report => 0) },
+		qr/^concordance: "test" \Q$b2\E and "truth" \Q$b1\E are on different genome builds: their ##contig lines give 1 as 1001 bases long in the test and 1000 in the truth \(1 of the 2 contigs that both give a length for differ\); the test's header says "GRCh38" and the truth's "hg19", so a POS in one is not the same place in the other/,
+		'two VCFs whose ##contig lengths differ die, naming the contig and both builds, where they were compared as if one build';
+	my ($text, $r) = stdout_of(sub { concordance(truth => $b1, test => $vcf->('b3.vcf', 'ID=CHR1,length=1000', 'ID=chr2,length=2000'), report => 0) });
+	is $r->{S}{counts}{concordant_het_ref}, 1, 'but the same lengths, under "chr" in either case or none, are compared';
+	($text, $r) = stdout_of(sub { concordance(truth => $b1, test => $vcf->('b4.vcf'), report => 0) });
+	is $r->{S}{counts}{concordant_het_ref}, 1, 'and so is a test with no ##contig lines';
+	($text, $r) = stdout_of(sub { concordance(truth => $b1, test => $vcf->('b5.vcf', 'ID=chr1', 'ID=chr3,length=5', 'ID=chr2,length=2000'), report => 0) });
+	is $r->{S}{counts}{concordant_het_ref}, 1, 'and one whose differing contig is in it alone, or has no length';
+	my $ref = spew('b6.vcf', "##fileformat=VCFv4.2\n##reference=file:///ref/hs38.fa\n##contig=<ID=1,length=7>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS\n$site");
+	my $hg19 = spew('b7.vcf', "##fileformat=VCFv4.2\n##reference=file:///ref/ucsc.hg19.fasta\n##contig=<ID=chr1,length=1000>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS\n$site");
+	dies_like sub { concordance(truth => $hg19, test => $ref, report => 0) },
+		qr/; the test's header says "file:\/\/\/ref\/hs38\.fa" and the truth's "file:\/\/\/ref\/ucsc\.hg19\.fasta", so/,
+		'a header with no assembly names its ##reference instead';
+	dies_like sub { concordance(truth => $vcf->('b8.vcf', map { "ID=chr$_,length=$_" } 1 .. 5), test => $vcf->('b9.vcf', map { "ID=chr$_,length=${_}0" } 1 .. 5), report => 0) },
+		qr/give 1 as 10 bases long in the test and 1 in the truth, 2 as 20 bases long in the test and 2 in the truth, 3 as 30 bases long in the test and 3 in the truth, and 2 more \(5 of the 5 contigs/,
+		'and more than 3 differing contigs are counted, not all named';
+	# more ##contig lines than fit in one 64 KiB block, gzipped, with the one that
+	# differs at the end, so that the header is read across blocks
+	my @long = map { "ID=chrUn_$_,length=$_" } 1 .. 4000;
+	my $long = $vcf->('b10.vcf', @long, 'ID=chrY,length=50');
+	gzip $long => "$long.gz" or die $GzipError;
+	cmp_ok -s $long, '>', 2 * 65536, 'the long header spans blocks';
+	dies_like sub { concordance(truth => "$long.gz", test => $vcf->('b11.vcf', 'ID=chrY,length=51'), report => 0) },
+		qr/^concordance: .+ give Y as 51 bases long in the test and 50 in the truth \(1 of the 1 contigs/, 'and a contig 4,000 lines into a gzipped header is found';
 }
 
 # On a 32-bit perl the test's calls for 349,526 samples (12 bytes each a site)

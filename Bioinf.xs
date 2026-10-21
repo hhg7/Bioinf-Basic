@@ -1649,6 +1649,282 @@ static void conc_skip(pTHX_ vcf_reader *r, const char *p, const char *e) {
 	PERL_UNUSED_ARG(e);
 }
 
+/*The genotypes of a marker panel, for hirisplex_genotypes().
+
+The panel is 41 markers and a VCF of a whole genome is tens of millions of
+records, so each record is tested against the panel rather than the panel
+searched for in the file. Matching by position tests the chromosome against a
+bitmap first, which turns away a record on one test, and reads POS and
+searches only when that passes; matching by ID compares the ID column against
+the markers' rs numbers. Either way a record that matches nothing is read no
+further than its first three fields.
+
+Which allele is counted is perl's to say, from share/hirisplex_s_panel.tsv:
+the panel names the allele on the forward strand, so nothing here complements
+anything. The allele is looked for among REF and the ALTs, and its place
+there is what the genotypes are counted against, so that a site written with
+several ALTs, or with the counted allele as its REF, is counted the same way.
+A record whose REF is longer than one base is passed over for every marker but
+the one that is an indel, since it is some other variant that shares the
+position.
+
+What is kept is one byte for each sample at each marker, so a file costs one
+byte times its samples times the panel, however many records it holds.*/
+
+#define HPS_ID 16 // an rs number and its NUL; the longest the panel holds is "rs796296176", 11 characters
+
+//What hps_dose() gives for a sample at a marker; 0, 1 and 2 are counts of the counted allele
+enum {
+	HPS_ABSENT  = 3, // no record of the marker was in the file; set for every sample before reading
+	HPS_NO_CALL = 4  // the marker was in the file, and this sample had no diploid call of it
+};
+
+typedef struct {
+	unsigned short int chrom; // vcf_chrom()'s numbering, 1 to 24; 0 when the panel gives no position
+	UV pos;
+	char allele;              // the base counted, or 0 when insertion is TRUE
+	bool insertion;           // TRUE = count the ALT longer than REF, for the one marker of the panel that is an indel
+	size_t k;                 // the marker's place in the panel perl gave, which its genotypes are stored under
+	char id[HPS_ID];          // the marker's rs number, for matching by ID
+} hps_site;
+
+typedef struct {
+	vcf_reader r;        // first, so that the vcf_reader * hps_header() and hps_record() are given is this
+	hps_site *site;      // what is searched, sorted by chromosome and position, or by rs number when by_id
+	size_t entries;      // how many site's holds, which is more than sites when a marker is searched for under more than one rs number
+	size_t sites;        // markers in the panel, which is what each sample's genotypes are counted into
+	bool by_id;          // TRUE = match the ID column, FALSE = CHROM and POS
+	uint32_t chroms;     // bit c set for each chromosome c the panel uses, tested before POS is read
+	unsigned char *dose; // r.n * sites, sample-major: a count, or one of the codes above
+	bool *seen;          // one per marker: the file held a record for it
+	bool *carried;       // one per marker: a record of it held the counted allele among REF and the ALTs
+} hps_reader;
+
+/*Orders the panel by chromosome and position, for hps_find().*/
+static int hps_cmp_pos(const void *a, const void *b) {
+	const hps_site *x = (const hps_site*)a, *y = (const hps_site*)b;
+	if (x->chrom != y->chrom) return x->chrom < y->chrom ? -1 : 1;
+	if (x->pos != y->pos) return x->pos < y->pos ? -1 : 1;
+	return 0;
+}
+
+/*Orders the panel by rs number, for hps_find_id().*/
+static int hps_cmp_id(const void *a, const void *b) {
+	return strcmp(((const hps_site*)a)->id, ((const hps_site*)b)->id);
+}
+
+/*The marker at chrom and pos, or NULL.*/
+static const hps_site *hps_find(const hps_reader *t, unsigned short int chrom, UV pos) {
+	size_t lo = 0, hi = t->entries;
+	while (lo < hi) {
+		size_t mid = lo + (hi - lo) / 2;
+		const hps_site *s = t->site + mid;
+		if (s->chrom < chrom || (s->chrom == chrom && s->pos < pos)) lo = mid + 1;
+		else if (s->chrom == chrom && s->pos == pos) return s;
+		else hi = mid;
+	}
+	return NULL;
+}
+
+/*The marker whose rs number is the ID field p..f, or NULL. An ID of several
+names, which the VCF specification separates with semicolons, is matched on
+its first.*/
+static const hps_site *hps_find_id(const hps_reader *t, const char *p, const char *f) {
+	const char *semi = (const char*)memchr(p, ';', (size_t)(f - p));
+	if (semi) f = semi;
+	size_t n = (size_t)(f - p);
+	if (n == 0 || n >= HPS_ID) return NULL;
+	size_t lo = 0, hi = t->entries;
+	while (lo < hi) {
+		size_t mid = lo + (hi - lo) / 2;
+		const hps_site *s = t->site + mid;
+		int c = strncmp(s->id, p, n);
+		if (c == 0 && s->id[n] != '\0') c = 1; // s->id runs on where p..f has ended, so it sorts after
+		if (c < 0) lo = mid + 1;
+		else if (c == 0) return s;
+		else hi = mid;
+	}
+	return NULL;
+}
+
+/*Where the marker's counted allele is among REF (0) and the ALTs (1, 2, ...),
+or -1 when the record does not carry it at all, which leaves every call of the
+record 0 copies of it. REF is ref..ref_end and ALT is alt..alt_end.*/
+static short int hps_allele(const hps_site *s, const char *ref, const char *ref_end, const char *alt, const char *alt_end) {
+	size_t ref_len = (size_t)(ref_end - ref);
+	if (!s->insertion && ref_len == 1 && *ref == s->allele) return 0;
+	short int i = 1;
+	for (const char *q = alt; q <= alt_end; i++) {
+		const char *c = (const char*)memchr(q, ',', (size_t)(alt_end - q));
+		const char *ce = c ? c : alt_end;
+		if (s->insertion ? (size_t)(ce - q) > ref_len : (ce - q == 1 && *q == s->allele)) return i;
+		if (i == 127) break; // a short int holds no more, and no record of these markers has so many ALTs
+		q = ce + 1;
+	}
+	return -1;
+}
+
+/*The sample field p..e at a marker whose counted allele is at idx, whose
+FORMAT has GT at gt and DP at dp: how many of the two alleles are idx, or
+HPS_NO_CALL for a genotype that is missing or partly missing, is not diploid,
+or has a DP below min_depth. The panel is autosomal, so a haploid call is not
+a dosage and is not counted as one.*/
+static unsigned char hps_dose(const vcf_reader *r, const char *p, const char *e, size_t gt, size_t dp, short int idx) {
+	const char *s, *sf;
+	if (vcf_shallow(r, p, e, dp)) return HPS_NO_CALL;
+	if (gt == VCF_ABSENT || !vcf_subfield(p, e, gt, &s, &sf) || s == sf) return HPS_NO_CALL;
+	unsigned short int alleles = 0, carried = 0;
+	while (s < sf) {
+		if (*s < '0' || *s > '9') return HPS_NO_CALL; // missing ("."), or a separator where an allele belongs
+		UV a = 0;
+		for (; s < sf && *s >= '0' && *s <= '9'; s++) {
+			if (a > (UV_MAX - 9) / 10) return HPS_NO_CALL;
+			a = a * 10 + (UV)(*s - '0');
+		}
+		if (++alleles > 2) return HPS_NO_CALL;
+		if (idx >= 0 && a == (UV)idx) carried++;
+		if (s < sf) {
+			if (*s != '/' && *s != '|') return HPS_NO_CALL;
+			if (++s == sf) return HPS_NO_CALL; // a separator with no allele after it
+		}
+	}
+	if (alleles != 2) return HPS_NO_CALL;
+	return (unsigned char)carried;
+}
+
+static void hps_header(pTHX_ vcf_reader *r) {
+	hps_reader *t = (hps_reader*)r;
+	Newx(t->dose, r->n * t->sites, unsigned char);
+	SAVEFREEPV(t->dose); // freed at the caller's LEAVE, croak or not; see vcf_read()'s block
+	memset(t->dose, HPS_ABSENT, r->n * t->sites);
+	Newxz(t->seen, t->sites, bool);
+	SAVEFREEPV(t->seen);
+	Newxz(t->carried, t->sites, bool);
+	SAVEFREEPV(t->carried);
+}
+
+static void hps_record(pTHX_ vcf_reader *r, const char *p, const char *e) {
+	hps_reader *t = (hps_reader*)r;
+	const char *f = vcf_field_end(p, e);
+	const hps_site *s;
+	if (t->by_id) {
+		if (f >= e) return;
+		const char *pos = f + 1;
+		const char *pos_end = vcf_field_end(pos, e);
+		if (pos_end >= e) return;
+		const char *id = pos_end + 1;
+		s = hps_find_id(t, id, vcf_field_end(id, e));
+	} else {
+		unsigned short int chrom = vcf_chrom(p, f);
+		if (chrom == 0 || chrom > 31 || !(t->chroms & ((uint32_t)1 << chrom))) return;
+		if (f >= e) return;
+		const char *pos = f + 1;
+		s = hps_find(t, chrom, vcf_pos(aTHX_ r, pos, vcf_field_end(pos, e)));
+	}
+	if (!s) return;
+	const char *col[9];
+	const char *format_end = vcf_columns(aTHX_ r, p, f, e, col);
+	const char *ref = col[3], *ref_end = col[4] - 1;
+	if (!s->insertion && ref_end - ref != 1) return; // some other variant sharing the marker's position
+	short int idx = hps_allele(s, ref, ref_end, col[4], col[5] - 1);
+	// A site split into one record per ALT reaches here once for each, and only
+	// the record that carries the counted allele says anything about it; the
+	// others would count every call 0. So a marker already counted from a record
+	// that carried it is left alone, and one counted from a record that did not
+	// is counted again when a later record does carry it.
+	if (t->seen[s->k] && (t->carried[s->k] || idx < 0)) return;
+	size_t gt, dp;
+	vcf_format(col[8], format_end, &gt, &dp);
+	t->seen[s->k] = TRUE;
+	if (idx >= 0) t->carried[s->k] = TRUE;
+	p = format_end + 1;
+	for (size_t i = 0; i < r->n; i++) {
+		const char *se = vcf_sample(aTHX_ r, p, e, i);
+		t->dose[i * t->sites + s->k] = hps_dose(r, p, se, gt, dp, idx);
+		p = se + 1;
+	}
+	vcf_samples_end(aTHX_ r, p, e);
+}
+
+/*What perl gave to search for, as hps_site's. Each element of panel is
+[chromosome, position, allele, insertion, rs number, marker], the chromosome
+PLINK's number or 0 where no position is given, and marker the 0-based place
+in the panel of markers that the entry's genotypes belong to. There is
+normally one entry for each marker, and more than one where a marker is
+searched for under an rs number that has since been merged into another, which
+the file may use either of; markers says how many markers there are in all.*/
+static void hps_panel(pTHX_ hps_reader *t, AV *panel, size_t markers) {
+	t->entries = (size_t)(av_len(panel) + 1);
+	t->sites = markers;
+	if (!t->entries || !markers) croak("%s: the panel is empty", __func__);
+	Newxz(t->site, t->entries, hps_site);
+	SAVEFREEPV(t->site);
+	for (SSize_t i = 0; i <= av_len(panel); i++) {
+		SV **row = av_fetch(panel, i, 0);
+		if (!row || !SvROK(*row) || SvTYPE(SvRV(*row)) != SVt_PVAV) croak("%s: entry %" IVdf " of the panel isn't an array ref", __func__, (IV)i);
+		AV *m = (AV*)SvRV(*row);
+		if (av_len(m) != 5) croak("%s: entry %" IVdf " of the panel has %" IVdf " fields, and needs 6", __func__, (IV)i, (IV)(av_len(m) + 1));
+		SV **fld[6];
+		for (unsigned short int k = 0; k < 6; k++) {
+			fld[k] = av_fetch(m, (SSize_t)k, 0);
+			if (!fld[k]) croak("%s: field %u of entry %" IVdf " of the panel is missing", __func__, (unsigned)k, (IV)i);
+		}
+		hps_site *s = t->site + i;
+		s->k = (size_t)SvUV(*fld[5]);
+		if (s->k >= markers) croak("%s: entry %" IVdf " of the panel is marker %" UVuf ", and there are %" UVuf, __func__, (IV)i, (UV)s->k, (UV)markers);
+		s->chrom = (unsigned short int)SvUV(*fld[0]);
+		s->pos = SvUV(*fld[1]);
+		s->insertion = SvTRUE(*fld[3]) ? TRUE : FALSE;
+		STRLEN len;
+		const char *allele = SvPV(*fld[2], len);
+		if (!s->insertion && len != 1) croak("%s: entry %" IVdf " of the panel counts \"%.*s\", which isn't one base", __func__, (IV)i, (int)len, allele);
+		s->allele = len ? allele[0] : 0;
+		const char *id = SvPV(*fld[4], len);
+		if (!len || len >= HPS_ID) croak("%s: entry %" IVdf " of the panel is named \"%.*s\", which is %s", __func__, (IV)i, (int)len, id,
+			len ? "longer than an rs number" : "empty");
+		memcpy(s->id, id, len);
+		s->id[len] = '\0';
+		if (s->chrom && s->chrom < 32) t->chroms |= (uint32_t)1 << s->chrom;
+	}
+	qsort(t->site, t->entries, sizeof(hps_site), t->by_id ? hps_cmp_id : hps_cmp_pos);
+}
+
+/*The panel's genotypes for every sample of the VCF name, which next returns a
+block of at a time. Returns sample => an array of one value for each marker of
+the panel, in the panel's order: 0, 1 or 2 copies of the counted allele, or
+undef where the sample had no call. *names is the samples in file order and
+*seen one 0 or 1 for each marker, saying whether the file held a record of it
+at all, which tells a marker nobody was called at from one nobody carries.*/
+static HV *hps_dosage_vcf(pTHX_ SV *next, const char *name, UV min_depth, AV *panel, size_t markers, bool by_id, AV **names, AV **seen) {
+	hps_reader t;
+	Zero(&t, 1, hps_reader);
+	t.r.name = name;
+	t.r.min_depth = min_depth;
+	t.r.on_header = hps_header;
+	t.r.on_record = hps_record;
+	t.by_id = by_id;
+	hps_panel(aTHX_ &t, panel, markers);
+	vcf_read(aTHX_ next, &t.r);
+	HV *out = t.r.samples;
+	for (size_t i = 0; i < t.r.n; i++) {
+		SV **sample = av_fetch(t.r.names, (SSize_t)i, 0);
+		if (!sample) croak("%s: sample %" UVuf " of %s has lost its name", __func__, (UV)i, name); // cannot happen: every sample read was pushed
+		AV *row = newAV();
+		av_extend(row, (SSize_t)t.sites - 1);
+		for (size_t k = 0; k < t.sites; k++) {
+			unsigned char d = t.dose[i * t.sites + k];
+			av_push(row, d <= 2 ? newSVuv(d) : newSV(0));
+		}
+		(void)hv_store_ent(out, *sample, newRV_noinc((SV*)row), 0); // in place of the column vcf_header() stored
+	}
+	AV *was = newAV();
+	av_extend(was, (SSize_t)t.sites - 1);
+	for (size_t k = 0; k < t.sites; k++) av_push(was, newSVuv(t.seen[k] ? 1 : 0));
+	*names = t.r.names;
+	*seen = was;
+	return out;
+}
+
 MODULE = Cn::Bioinf	PACKAGE = Cn::Bioinf
 PROTOTYPES: DISABLE
 
@@ -1837,3 +2113,19 @@ PPCODE:
 	EXTEND(SP, 2);
 	PUSHs(sv_2mortal(newRV_inc((SV*)out)));
 	PUSHs(sv_2mortal(newRV_inc((SV*)test.r.names)));
+
+void
+_hirisplex_dosage(next, name, min_depth, panel, markers, by_id)
+	SV *next
+	const char *name
+	UV min_depth
+	AV *panel
+	UV markers
+	UV by_id
+PPCODE:
+	AV *names, *seen;
+	HV *out = hps_dosage_vcf(aTHX_ next, name, min_depth, panel, (size_t)markers, by_id ? TRUE : FALSE, &names, &seen);
+	EXTEND(SP, 3);
+	PUSHs(sv_2mortal(newRV_inc((SV*)out)));
+	PUSHs(sv_2mortal(newRV_inc((SV*)names)));
+	PUSHs(sv_2mortal(newRV_noinc((SV*)seen)));

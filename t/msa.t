@@ -1,4 +1,4 @@
-require 5.010;
+require 5.012;
 use strict;
 use warnings FATAL => 'all';
 use Test::More;
@@ -43,7 +43,8 @@ my $r = plot_msa(
 	title => 'DEG20010421', 'active_site_aa' => { Lys100 => 100 }, query => 'S.cerevisiae',
 	labels => { 'S.cerevisiae' => '$\it{S. cerevisiae}$' },
 );
-is_deeply $r, { filename => $out{'msa.svg'}, 'msa_file' => $out{'aln.fa'}, 'tree_file' => $out{'t.newick'} },
+like $r->{'python_file'}, qr/\.py\z/, 'plot_msa returns the script that drew the image';
+is_deeply $r, { filename => $out{'msa.svg'}, 'msa_file' => $out{'aln.fa'}, 'tree_file' => $out{'t.newick'}, 'python_file' => $r->{'python_file'} },
 	'plot_msa, a file in: every output named';
 my $aln = fasta2hash($out{'aln.fa'});
 is_deeply [sort keys %{ $aln }], [sort keys %{ $seqs }], 'the alignment has every sequence';
@@ -61,7 +62,8 @@ close $nw;
 
 $r = plot_phylo('tree_file' => $out{'t.newick'}, 'output_file' => $out{'tree.png'}, title => 'DEG20010421',
 	labels => { 'S.cerevisiae' => '$\it{S. cerevisiae}$' });
-is_deeply $r, { 'output_file' => $out{'tree.png'}, 'tree_file' => $out{'t.newick'} }, 'plot_phylo draws the tree plot_msa kept';
+is_deeply $r, { 'output_file' => $out{'tree.png'}, 'tree_file' => $out{'t.newick'}, 'python_file' => $r->{'python_file'} },
+	'plot_phylo draws the tree plot_msa kept';
 is png($out{'tree.png'}), "\x89PNG\r\n\x1a\n", 'a PNG tree image';
 my $tree_png = slurp($out{'tree.png'});
 like $tree_png, creator('plot_phylo', $by_py . qr/, Biopython [\d.]+, NumPy [\d.]+; titled "DEG20010421"; from the newick file \Q$out{'t.newick'}\E $sha/
@@ -70,12 +72,50 @@ like $tree_png, creator('plot_phylo', $by_py . qr/, Biopython [\d.]+, NumPy [\d.
 unlike $tree_png, qr/(?:Source|Description|Title)\0/, 'and no other text chunks of provenance';
 
 $r = plot_msa(fasta => $seqs, filename => catfile($dir, 'h.png'), order => ['S.cerevisiae', 'C.neoformans.JEC21']);
-is_deeply [sort keys %{ $r }], ['filename', 'msa_file'], 'plot_msa, a hash in: the image and a temporary alignment';
+is_deeply [sort keys %{ $r }], ['filename', 'msa_file', 'python_file'], 'plot_msa, a hash in: the image and a temporary alignment';
 is png($r->{filename}), "\x89PNG\r\n\x1a\n", 'a PNG, drawing only the sequences in "order"';
 
 $r = plot_phylo(fasta => $seqs, 'output_file' => catfile($dir, 'p.png'));
-is_deeply [sort keys %{ $r }], ['msa_file', 'output_file'], 'plot_phylo, a hash in: it aligns, and the tree is temporary';
+is_deeply [sort keys %{ $r }], ['msa_file', 'output_file', 'python_file'], 'plot_phylo, a hash in: it aligns, and the tree is temporary';
 is png($r->{'output_file'}), "\x89PNG\r\n\x1a\n", 'a PNG tree image from the sequences';
+
+# "fh" and "execute", as Matplotlib::Simple's plt takes them: plot_msa and
+# plot_phylo append to one File::Temp with "execute => 0", and the last call,
+# which runs it, draws both images.
+{
+	require File::Temp;
+	my $fh = File::Temp->new(DIR => $dir, SUFFIX => '.py');
+	my ($msa, $tree) = map { catfile($dir, $_) } ('fh msa.svg', 'fh tree.png');
+	my $nwk = catfile($dir, 'fh.newick');
+	$r = plot_msa(fasta => $fa, filename => $msa, 'tree_file' => $nwk, fh => $fh, execute => 0);
+	is $r->{'python_file'}, $fh->filename, 'plot_msa with "fh": returns its file name';
+	ok -s $fh->filename && !-e $msa, 'and has written the script, but not run it';
+	like slurp($fh->filename), qr/\A# plot_msa, from Cn::Bioinf \Q$Cn::Bioinf::VERSION\E: msa_plot\.py run/, 'which says where it came from';
+	$r = plot_phylo('tree_file' => $nwk, 'output_file' => $tree, fh => $fh);
+	is $r->{'python_file'}, $fh->filename, 'plot_phylo with the same "fh"';
+	like slurp($msa), qr/<svg/, 'runs the script, which draws plot_msa\'s image';
+	like slurp($msa), creator('plot_msa', $by_py . qr/; untitled/ . aligned(qr/.*--guidetree-out=\Q$nwk\E/)), 'with its Creator';
+	is png($tree), "\x89PNG\r\n\x1a\n", 'and its own';
+	unlike slurp($fh->filename), qr/\Q$dir\E/, 'and no path is pasted into the Python';
+
+	# The script carries its inputs, so that it still draws once perl has
+	# removed the temporary alignment that it was written from.
+	my $later = catfile($dir, 'later.png');
+	my $said = catfile($dir, 'said.txt');
+	{
+		open my $saved, '>&', \*STDOUT or die $!;
+		open STDOUT, '>', $said or die $!;
+		$r = plot_msa(fasta => $seqs, filename => $later, execute => 0);
+		open STDOUT, '>&', $saved or die $!;
+	}
+	is slurp($said), "will write $later\n", 'it says the image will be written, not that it was';
+	my $kept = $r->{'python_file'};
+	ok -s $kept && !-e $later, 'plot_msa with "execute => 0" and no "fh": a script kept, and not run';
+	unlink $r->{'msa_file'} or die "can't remove $r->{'msa_file'}: $!";
+	is system(Alien::Bioinf->python, '-I', $kept), 0, 'which runs on its own, without the alignment it was made from';
+	is png($later), "\x89PNG\r\n\x1a\n", 'and draws the image';
+	unlink $kept;
+}
 
 # "output_file" defaults to phylo.svg, in the working directory
 {
@@ -86,7 +126,7 @@ is png($r->{'output_file'}), "\x89PNG\r\n\x1a\n", 'a PNG tree image from the seq
 	my $keep = catfile($dir, 'kept.newick');
 	$r = plot_phylo(fasta => $fa, 'tree_file' => $keep, title => 'DEG20010421');
 	chdir $was or die "can't chdir back to $was: $!";
-	is_deeply [sort keys %{ $r }], ['msa_file', 'output_file', 'tree_file'], 'plot_phylo with no "output_file"';
+	is_deeply [sort keys %{ $r }], ['msa_file', 'output_file', 'python_file', 'tree_file'], 'plot_phylo with no "output_file"';
 	is $r->{'output_file'}, 'phylo.svg', 'reports phylo.svg';
 	my $svg = slurp(catfile($dir, 'phylo.svg'));
 	like $svg, qr/<svg/, 'and writes it';

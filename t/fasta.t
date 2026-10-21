@@ -1,4 +1,4 @@
-require 5.010;
+require 5.012;
 use strict;
 use warnings FATAL => 'all';
 use Test::More;

@@ -36,13 +36,13 @@ WriteMakefile(
 	ABSTRACT         => 'FASTA I/O in XS, BLAST hit ranking, and alignment plots and tables', # the POD has no NAME section; PodWeaver makes one from '# ABSTRACT:'
 	AUTHOR           => 'David E. Condon <dcondon@uidaho.edu>',
 	LICENSE          => 'perl_5',
-	MIN_PERL_VERSION => '5.010',
+	MIN_PERL_VERSION => '5.012',
 	CCFLAGS          => $Config{ccflags} . $std,
 	CONFIGURE_REQUIRES => { 'ExtUtils::MakeMaker' => '6.64', 'File::ShareDir::Install' => '0.06' },
-	PREREQ_PM        => { 'File::ShareDir' => '1.00', 'JSON::MaybeXS' => '0' },
+	PREREQ_PM        => { 'File::ShareDir' => '1.00', 'HTTP::Tiny' => '0.056', 'JSON::MaybeXS' => '0' },
 	TEST_REQUIRES    => { 'Test::More' => '0.88' },
-	# recommended, not required: see the [Prereqs / RuntimeRecommends] comment in dist.ini
-	META_MERGE       => { 'meta-spec' => { version => 2 }, prereqs => { runtime => { recommends => { 'Alien::Bioinf' => '0' } } } },
+	# recommended, not required: see the [Prereqs / RuntimeRecommends] comments in dist.ini
+	META_MERGE       => { 'meta-spec' => { version => 2 }, prereqs => { runtime => { recommends => { 'Alien::Bioinf' => '0', 'IO::Socket::SSL' => '1.968', 'Net::SSLeay' => '1.49' } } } },
 );
 
 package MY;

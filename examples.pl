@@ -6,6 +6,7 @@ use warnings FATAL => 'all';
 use autodie ':default';
 use Devel::Confess 'color';
 use Cn::Bioinf qw(:all);
+use Time::HiRes 'time';
 
 my $h = fasta2hash('t/data/DEG20010421.fa');
 
@@ -30,8 +31,17 @@ clustal_view_residues(
 	caption   => 'Catalytic residues of \textit{S. cerevisiae}',
 	label     => 'active',
 );
+my $t0 = Time::HiRes::time();
 plot_phylo(
-	fasta       => 't/data/DEG20010421.fa',
+	fasta       => 'DEG20010121.fa',
 	output_file => 'phylo.svg'
 ); # phylo.svg
-
+my $t1 = Time::HiRes::time();
+printf("plot_phylo from fasta ran in %lf seconds.\n", $t1-$t0);
+$t0 = Time::HiRes::time();
+plot_phylo(
+	tree_file   => 'DEG20010121.newick',
+	output_file => '0121.tree.phylo.svg'
+);
+$t1 = Time::HiRes::time();
+printf("plot_phylo from newick ran in %lf seconds.\n", $t1-$t0);
