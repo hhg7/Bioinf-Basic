@@ -130,7 +130,7 @@ is_deeply((parent(vcf => $vcf, child => 'C', parent => 'F', min_depth => 0))[1],
 	'min_depth 0 counts every genotype');
 # t was [133, 68, 2, 51, 103, 55, 4, 64, 154], 501 sites
 dies_like(sub { parent(vcf => $vcf, child => 'C', parent => 'F', min_depth => 30) },
-	qr/^parent: "C" and "F" of \S+ have only 501 autosomal biallelic SNVs of DP 30 or more where either carries the ALT, and 1000 are needed at /,
+	qr/^parent: "C" and "F" of .+? have only 501 autosomal biallelic SNVs of DP 30 or more where either carries the ALT, and 1000 are needed at /,
 	'min_depth 30 leaves 501 sites, too few to decide from');
 is scalar(parent(vcf => $vcf, child => 'C', parent => 'S', max_ibs0 => 0.04)), 1, 'max_ibs0 0.04 takes siblings (IBS0 rate 0.038) for parent and child';
 is scalar(parent(vcf => $vcf, child => 'C', parent => 'F', max_ibs0 => 11 / 1320)), 0, 'and an IBS0 rate equal to max_ibs0 is not below it';
@@ -238,14 +238,14 @@ my $hdr = "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\t
 foreach my $case (
 	[[child => 'C'], qr/^parent: needs "parent"/, 'no parent'],
 	[[child => 'C', parent => 'F', vcf => $vcf, cutoff => 1], qr/^parent: doesn't know "cutoff"/, 'an unknown option'],
-	[[child => 'C', parent => 'X', vcf => $vcf], qr/^parent_header_one: \S+ has no sample "X"; its samples are "F", "M", "C", "S", "U" and 2 more/, 'a sample the VCF lacks'],
+	[[child => 'C', parent => 'X', vcf => $vcf], qr/^parent_header_one: .+? has no sample "X"; its samples are "F", "M", "C", "S", "U" and 2 more/, 'a sample the VCF lacks'],
 	[[child => 'C', parent => 'C', vcf => $vcf], qr/^parent: "child" and "parent" are both "C"/, 'one sample twice'],
 	[[child => $own{C}, parent => $own{C}], qr/^parent: "child" and "parent" are both "\Q$own{C}\E"/, 'one file twice'],
 	[[child => ['C'], parent => 'F', vcf => $vcf], qr/^parent: "child" must be a sample name of "vcf", not an ARRAY ref/, 'a sample name that is a ref'],
 	[[child => '', parent => 'F', vcf => $vcf], qr/^parent: "child" must be a sample name of "vcf", not ""/, 'an empty sample name'],
-	[[child => $vcf, parent => $own{F}], qr/^parent_header_own: \S+ has 7 samples, and a VCF given as "child" or "parent" must have one/, 'a VCF of seven samples as "child"'],
-	[[child => $own{C}, parent => catfile($dir, 'none.vcf')], qr/^parent: "parent" file "\S+none\.vcf" doesn't exist or isn't readable/, 'a parent file that does not exist'],
-	[[child => $own{C}, parent => $own{F} . '.txt'], qr/^parent: "parent" file "\S+" doesn't exist/, 'nor a file name of another suffix'],
+	[[child => $vcf, parent => $own{F}], qr/^parent_header_own: .+? has 7 samples, and a VCF given as "child" or "parent" must have one/, 'a VCF of seven samples as "child"'],
+	[[child => $own{C}, parent => catfile($dir, 'none.vcf')], qr/^parent: "parent" file ".+?none\.vcf" doesn't exist or isn't readable/, 'a parent file that does not exist'],
+	[[child => $own{C}, parent => $own{F} . '.txt'], qr/^parent: "parent" file ".+?" doesn't exist/, 'nor a file name of another suffix'],
 	[[child => 'C', parent => 'F', vcf => $vcf, min_depth => -1], qr/^parent: "min_depth" must be a whole number, 0 or more, not "-1"/, 'a negative min_depth'],
 	[[child => 'C', parent => 'F', vcf => $vcf, max_ibs0 => 0], qr/^parent: "max_ibs0" must be a number above 0, not "0"/, 'max_ibs0 0'],
 	[[child => 'C', parent => 'F', vcf => $vcf, max_ibs0 => 'a'], qr/^parent: "max_ibs0" must be a number above 0, not "a"/, 'max_ibs0 not a number'],
@@ -256,30 +256,30 @@ foreach my $case (
 }
 {
 	my $txt = spew('parent.txt', slurp($own{F}));
-	dies_like(sub { parent(child => $own{C}, parent => $txt) }, qr/^parent: "parent" file \S+parent\.txt must end in \.vcf, \.vcf\.gz, \.vcf\.bgz or \.vcf\.bz2/, 'a VCF named .txt');
-	dies_like(sub { parent(child => $own{C}, parent => spew('no_chrom.vcf', "##fileformat=VCFv4.2\n")) }, qr/^vcf_read: \S+ has no #CHROM line, so it isn't a VCF/, 'a file with no #CHROM line');
+	dies_like(sub { parent(child => $own{C}, parent => $txt) }, qr/^parent: "parent" file .+?parent\.txt must end in \.vcf, \.vcf\.gz, \.vcf\.bgz or \.vcf\.bz2/, 'a VCF named .txt');
+	dies_like(sub { parent(child => $own{C}, parent => spew('no_chrom.vcf', "##fileformat=VCFv4.2\n")) }, qr/^vcf_read: .+? has no #CHROM line, so it isn't a VCF/, 'a file with no #CHROM line');
 	# where a UV is 32 bits (5.44.0-i686 here), vcf_pos refuses it first
 	dies_like(sub { parent(child => $own{C}, parent => spew('big_pos.vcf', "$hdr\tF\n1\t4294967296\t.\tA\tG\t.\t.\t.\tGT\t0/1\n")) },
-		qr/^(?:parent_record_own: \S+ line 3 has POS 4294967296, beyond the 4294967295 that parent can compare|vcf_pos: \S+ line 3 has POS "4294967296", which isn't a position)/,
+		qr/^(?:parent_record_own: .+? line 3 has POS 4294967296, beyond the 4294967295 that parent can compare|vcf_pos: .+? line 3 has POS "4294967296", which isn't a position)/,
 		'a POS beyond 32 bits, in an own VCF');
 	dies_like(sub { parent(child => $own{C}, parent => spew('short.vcf', "$hdr\tF\n1\t5\t.\tA\tG\t.\t.\t.\tGT\n")) },
-		qr/^vcf_sample: \S+ line 3 has 0 samples, and the #CHROM line names 1/, 'a record with no sample, in an own VCF');
+		qr/^vcf_sample: .+? line 3 has 0 samples, and the #CHROM line names 1/, 'a record with no sample, in an own VCF');
 	dies_like(sub { parent(vcf => spew('wide.vcf', "$hdr\tC\tF\n1\t5\t.\tA\tG\t.\t.\t.\tGT\t0/1\t0/1\t0/1\n"), child => 'C', parent => 'F') },
-		qr/^vcf_samples_end: \S+ line 3 has more samples than the 2 its #CHROM line names/, 'a record with a sample too many, in one VCF');
+		qr/^vcf_samples_end: .+? line 3 has more samples than the 2 its #CHROM line names/, 'a record with a sample too many, in one VCF');
 	# 999 sites where either carries the ALT, one short
 	my $few = spew('few.vcf', "$hdr\tC\tF\n" . join '', map { "1\t$_\t.\tA\tG\t.\t.\t.\tGT\t0/1\t0/0\n" } 1 .. 999);
-	dies_like(sub { parent(vcf => $few, child => 'C', parent => 'F') }, qr/^parent: "C" and "F" of \S+ have only 999 autosomal biallelic SNVs of DP 10 or more where either carries the ALT, and 1000 are needed at /,
+	dies_like(sub { parent(vcf => $few, child => 'C', parent => 'F') }, qr/^parent: "C" and "F" of .+? have only 999 autosomal biallelic SNVs of DP 10 or more where either carries the ALT, and 1000 are needed at /,
 		'999 sites');
 	my $few_c = spew('few_c.vcf', "$hdr\tC\n" . join '', map { "1\t$_\t.\tA\tG\t.\t.\t.\tGT\t0/1\n" } 1 .. 999);
 	my $one_f = spew('one_f.vcf', "$hdr\tF\n2\t5\t.\tA\tG\t.\t.\t.\tGT\t0/0\n");
-	dies_like(sub { parent(child => $few_c, parent => $one_f) }, qr/^parent: \S+ and \S+ have only 999 .+ and 1000 are needed; if the files share few sites, check that they are of the same genome build/,
+	dies_like(sub { parent(child => $few_c, parent => $one_f) }, qr/^parent: .+? and .+? have only 999 .+ and 1000 are needed; if the files share few sites, check that they are of the same genome build/,
 		'and with own VCFs, a hint about builds');
 	# as bcftools merge writes VCFs that list only their own variants: "./." for hom-REF
 	(my $merged = slurp($vcf)) =~ s{(?<=[\t:])0/0(?=[:\t\n])}{./.}g;
 	dies_like(sub { parent(vcf => spew('merged.vcf', $merged), child => 'C', parent => 'F') },
-		qr/^parent: neither of "C" and "F" of \S+ has a hom-REF call where the other carries the ALT, so no opposite homozygote can be seen/, 'a VCF with no hom-REF call');
+		qr/^parent: neither of "C" and "F" of .+? has a hom-REF call where the other carries the ALT, so no opposite homozygote can be seen/, 'a VCF with no hom-REF call');
 	my $no_het = spew('no_het.vcf', "$hdr\tC\tF\n" . join '', map { "1\t$_\t.\tA\tG\t.\t.\t.\tGT\t" . ($_ % 2 ? '1/1' : '0/0') . "\t0/1\n" } 1 .. 1000);
-	dies_like(sub { parent(vcf => $no_het, child => 'C', parent => 'F') }, qr/^parent: the child of "C" and "F" of \S+ has no het call at the sites compared, so no kinship can be taken/,
+	dies_like(sub { parent(vcf => $no_het, child => 'C', parent => 'F') }, qr/^parent: the child of "C" and "F" of .+? has no het call at the sites compared, so no kinship can be taken/,
 		'a child with no het call');
 }
 

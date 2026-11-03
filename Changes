@@ -142,3 +142,73 @@ Revision history for Cn-Bioinf
    temporary files are gone. Both functions now return "python_file", the
    script's name, and print "will write" rather than "wrote" for an image
    not drawn yet.
+ - plot_msa takes "tooltips => 1", which gives each residue of an SVG
+   alignment a tooltip that a browser shows on hovering over it, naming
+   the sequence, the residue and its number, and the alignment column, as
+   "S.cerevisiae: Lys100, alignment column 105".
+ - hash2fasta_file prints "wrote" and the file's name to STDOUT, as
+   plot_msa and clustal_view_residues do, where it used to say nothing. The
+   FASTA files that plot_msa and plot_phylo write for themselves are not
+   announced.
+ - sex_check, parent, relatedness, concordance and hirisplex_genotypes
+   could lose their results, or corrupt the heap and die with
+   "realloc(): invalid next size", when perl's stack had to grow while the
+   VCF was being read, by the perl that reads and decompresses it. Their
+   XS now takes the stack back from perl after reading, where it used to
+   push the results through a pointer into the stack as it was before.
+   Found by review on 2026-10-26.
+ - The tests failed when TMPDIR held a space, as a Windows user name can:
+   35 subtests of t/sex.t, t/parent.t, t/relatedness.t and t/msa.t matched
+   a temporary file's name with \S+. They now pass with a space in it.
+   Found by review on 2026-11-02.
+ - pgs_score died with PLINK 2's "All N variant(s) in --vcf file excluded
+   by --chr" (exit 7) when the VCF had none of the score's chromosomes. It
+   now scores every variant missing, as it does when only the positions are
+   absent. When PLINK 2 does not start at all, the message gives the reason
+   system gave, where it gave "Inappropriate ioctl for device". Found by
+   review on 2026-11-02.
+ - hirisplex_genotypes counted any ALT longer than REF as MC1R's 86insA
+   (rs312262906), so an MNV such as AC to GTT, or a symbolic <INS>, at that
+   position was counted as two copies of it. It now counts only an ALT that
+   is REF with one A put in, however the VCF anchors the indel. And bases
+   are compared regardless of case, where a lower-case REF or ALT matched
+   nothing and left the marker 0 copies. Found by review on 2026-11-02.
+ - trait_predict multiplied in whatever a dosage held, so "NA" was a called
+   genotype of 0 copies and 7 was taken as it was. A dosage of a marker the
+   model uses must now be a number from 0 to 2, fractional ones included,
+   or undef for no genotype; anything else dies naming the sample, the
+   marker and the value. Found by review on 2026-11-02.
+ - plot_msa and plot_phylo died, once clustalo had run, when a title or
+   label began with "-" (such as "-log10"), or a file name did: argparse
+   read it as an option. Every option now reaches msa_plot.py joined to its
+   value, as --t=-log10. Found by review on 2026-11-02.
+ - sex_check read a GT cut short, such as "1/", as the haploid call "1",
+   and counted it as haploid hom-ALT on X. It is now missing. Found by
+   review on 2026-11-02.
+ - get_best_alignment_hit and msa_quality_table died with JSON::MaybeXS's
+   message or with perl's "Not a HASH reference", naming no function, for a
+   file that was not JSON or not a BLAST report; get_best_alignment_hit
+   returned no queries for {}, and named a query that had no title "" with
+   an "uninitialized" warning. Each now dies naming the function and what
+   is wrong, and a query with no title is named by its query_id. Found by
+   review on 2026-11-02.
+ - pdb_search died of "Illegal division by zero" for a hit RCSB gave an
+   alignment or query length of 0, and with perl's own messages for an
+   answer that was JSON but not a search result. Such a hit's pident or
+   query_cover is now undef, and shown as "-" in the report; such an answer
+   dies naming pdb_search. Found by review on 2026-11-02.
+ - plot_msa, plot_phylo and msa_quality_table passed a sequence that was
+   undef, a reference or empty on to clustalo or blastp, which failed with
+   messages that named none of them. Each is now refused first, naming the
+   function and the sequence. Found by review on 2026-11-02.
+ - fasta2hash read a file ending in .GZ, or any case but .gz, as plain
+   text. Its warning of a repeated defline printed the whitespace dropped
+   from the defline's end, the CR of a CRLF file included. Found by review
+   on 2026-11-02.
+ - clustal_view_residues left |, < and > in a name as they were, which
+   LaTeX's default fonts print as an em dash and an inverted ! and ?, and
+   did not escape the residues at all. A residue number in the last columns
+   of a block was left off the track row, with every number after it in
+   that block; it now ends at the block's end. A tracked protein that
+   "order" leaves out was counted as having a track row, so a table held
+   fewer blocks than "split" said. Found by review on 2026-11-02.

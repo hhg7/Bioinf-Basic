@@ -135,8 +135,8 @@ in a PNG or PDF.
 
 ## fasta2hash($file, $key)
 
-Reads a FASTA file (gzip-compressed if its name ends in `.gz`, which needs a
-`gzip` program on `PATH`). Returns a hash ref of defline (without the `>`) =>
+Reads a FASTA file (gzip-compressed if its name ends in `.gz`, in any case,
+which needs a `gzip` program on `PATH`). Returns a hash ref of defline (without the `>`) =>
 sequence, or, with `$key`, just the sequence of that defline, reading no
 further than the record after it. A defline that appears twice is warned about
 and its sequences concatenated; with `$key`, only a repeat of `$key` is looked
@@ -152,7 +152,8 @@ a truncated one, dies rather than returning the part that was read.
 
 Writes `$hash` as FASTA: the keys in `@$order` (default: sorted), sequences
 wrapped at `$width` columns (default 80; 0 for one line each). Returns
-`$filename`. Keys and sequences are written as bytes, as `print` to a `:raw`
+`$filename`, and prints `wrote $filename` to STDOUT, with the name in black
+on cyan when STDOUT is a terminal. Keys and sequences are written as bytes, as `print` to a `:raw`
 handle writes them, so a string that perl holds as UTF-8 is written as the
 characters in it. A character above 255 has no single byte and dies; encode
 such a string first, as with `Encode::encode('UTF-8', $name)`.
@@ -242,9 +243,11 @@ How well it aligns:
 - `identity`: the number of aligned columns where the two agree, and `pident`,
   that as a percentage of `align_len`. These are counted from the aligned
   sequences, since RCSB gives the identity only truncated to 3 places.
+  `pident` is `undef` if RCSB gives an `align_len` of 0 or none.
 - `mismatches`, `gaps` (gap columns), `gap_opens`.
 - `query_from`, `query_to`, `query_len` and `query_cover`, the percentage of
-  the query in the alignment.
+  the query in the alignment, which is `undef` if RCSB gives no `query_len`
+  or one of 0.
 - `hit_from`, `hit_to`, `hit_len`: the same for the hit's sequence.
 - `qseq`, `hseq`: the aligned query and hit, with `-` for gaps.
 
@@ -489,9 +492,9 @@ write, with these fields for each sample:
   that lists only the sites where its sample carries an ALT allele has no
   hom-REF calls.
 - `x_haploid`: of those, the haploid calls.
-- `x_missing`: the sample's calls there that were missing (`./.`, `.`, or
-  partly missing, such as `./1`), or not a call of one or two alleles of the
-  record's two. A genotype left out by `min_depth` is in no count.
+- `x_missing`: the sample's calls there that were missing (`./.`, `.`,
+  partly missing, such as `./1`, or cut short, such as `1/`), or not a call of
+  one or two alleles of the record's two. A genotype left out by `min_depth` is in no count.
 - `y_called`, `y_alt`: the sample's calls at SNVs on Y outside its
   pseudo-autosomal regions, and those of them that carry the `ALT`. They
   decide nothing: an exome of a woman had 530 called SNVs on Y, and one of a
@@ -989,8 +992,11 @@ names. One, ASIP `rs6119471`, carries the named allele on the forward strand
 only SNP that may cause confusion and therefore must be converted (from NCBI's
 forward orientation)" -- so a tool that simply matched the named allele would
 silently count the wrong one. MC1R `rs312262906` is not a SNP but the 86insA
-frameshift, merged in dbSNP into `rs796296176`; it is counted as the allele
-longer than REF, and matching by rs number looks for both numbers.
+frameshift, merged in dbSNP into `rs796296176`; it is counted as the `ALT`
+that is `REF` with one `A` put in (`A` to `AA`, or `AA` to `AAA` as GRCh38
+writes it), so that an MNV or a symbolic `<INS>` at that position is not taken
+for it, and matching by rs number looks for both numbers. Bases are compared
+regardless of case.
 
 ### Arguments
 
@@ -1093,7 +1099,10 @@ to overflow gives 1 rather than a NaN.
 ### Arguments
 
 - `genotypes` (required): what `hirisplex_genotypes` returned, or a plain hash
-  ref of sample => { marker => 0, 1 or 2 }.
+  ref of sample => { marker => 0, 1 or 2 }. A dosage may be any number from 0
+  to 2, as imputation gives, and `undef` is no genotype; anything else, `NA`
+  included, dies naming the sample and the marker. Only the markers the model
+  uses are looked at.
 - `model` (required): the table above, as a file name or a data frame.
 - `force`: 0 (the default) makes no prediction for a trait that the genotypes
   say cannot be predicted -- that is, where `hirisplex_genotypes` set `eye`,
@@ -1154,6 +1163,13 @@ STDOUT is a terminal; with `execute => 0` it prints `will write` instead.
 - `active_site_aa`, `query`: `{ His395 => 395, ... }`, a dashed vertical line
   at each of these 1-based residue numbers of the sequence named by `query`.
   A number below 1 dies.
+- `tooltips`: 1 to give each residue a tooltip, which a browser shows when
+  the pointer rests on it, naming the sequence, the residue and its number
+  in that sequence, and the alignment column, as
+  `S.cerevisiae: Lys100, alignment column 105` (default 0). The sequence is
+  named as it was given, not by its label. Only SVG carries tooltips, so
+  `filename` must end in `.svg`. Each residue is an element of the SVG, so a
+  large alignment makes a large file.
 - `title`, `xlabel`, `ylabel`, `threads`, `clustal_args`: the plot title; the
   axis labels (default "Amino Acid Residue" and "Protein & Species");
   clustalo threads (default 1); and an array ref of extra clustalo arguments.
@@ -1241,8 +1257,9 @@ Draws an all-against-all BLAST score table with matplotlib, and returns
 
 Writes an alignment as LaTeX tables with chosen residues coloured, and returns
 `output_tex_file`, printing `wrote` and that file name to STDOUT, the name in
-black on cyan when STDOUT is a terminal. Protein names are written so that
-LaTeX prints them as they are, `_`, `^`, `{` and the like included.
+black on cyan when STDOUT is a terminal. Protein names and residues are
+written so that LaTeX prints them as they are, `_`, `^`, `{`, `|`, `<` and the
+like included.
 
 - `msa_file` (required): a FASTA file. If its sequences are all one length
   (such as the alignment `plot_msa` keeps) it is shown as it is; if not, it is
@@ -1255,7 +1272,10 @@ LaTeX prints them as they are, `_`, `^`, `{` and the like included.
   residue numbers are 1-based and a colour is an xcolor name or
   `[r, g, b]`; a coloured column is coloured in every protein.
 - `track`: a protein that gets a row under it showing its coloured residue
-  numbers.
+  numbers, each starting at its residue's column, or just after the number
+  before it. A number that would run past the end of its block ends at the
+  block's last column instead, and is left out only when it would then
+  overwrite the number before it.
 - `order`: an array ref of the proteins to show, top to bottom (default:
   sorted, ignoring case).
 - `row_width`: alignment columns per block (default 100).

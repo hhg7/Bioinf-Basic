@@ -361,7 +361,7 @@ my %two = ( # first, second => t, in; from parent_reference.py
 	@w = warnings_of(sub { $r = relatedness($own{C}, $more, $own{S}, report => 0) });
 	isnt $r->{C}{F}{relationship}, 'parent-child', 'with 400 more sites in F\'s VCF alone, C and F are no longer parent and child';
 	is scalar(@w), 1, 'and one warning';
-	like $w[0], qr/^relatedness: the VCFs of 2 pairs were probably not sequenced over the same regions .*: \S+F\.more\.vcf against \S+parent\.C\.vcf \(567 to 163\), \S+F\.more\.vcf against \S+parent\.S\.vcf \(576 to 167\);/,
+	like $w[0], qr/^relatedness: the VCFs of 2 pairs were probably not sequenced over the same regions .*: .+?F\.more\.vcf against .+?parent\.C\.vcf \(567 to 163\), .+?F\.more\.vcf against .+?parent\.S\.vcf \(576 to 167\);/,
 		'which names both pairs';
 	@w = warnings_of(sub { $r = relatedness(@own{qw(C F S)}, report => 0) });
 	is $r->{C}{F}{relationship}, 'parent-child', 'own VCFs of one pipeline';
@@ -372,17 +372,17 @@ my %two = ( # first, second => t, in; from parent_reference.py
 
 {
 	my $hdr = "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT";
-	dies_like(sub { relatedness($own{C}) }, qr/^rel_header_one: \S+ has 1 sample, and relatedness compares two or more/, 'a VCF of one sample, alone');
-	dies_like(sub { relatedness($own{C}, $vcf) }, qr/^rel_header_own: \S+parent\.vcf has 7 samples, and each of several VCFs must have one/, 'a VCF of seven among several');
+	dies_like(sub { relatedness($own{C}) }, qr/^rel_header_one: .+? has 1 sample, and relatedness compares two or more/, 'a VCF of one sample, alone');
+	dies_like(sub { relatedness($own{C}, $vcf) }, qr/^rel_header_own: .+?parent\.vcf has 7 samples, and each of several VCFs must have one/, 'a VCF of seven among several');
 	my $again = spew('C.again.vcf', slurp($own{C}));
-	dies_like(sub { relatedness($own{C}, $again) }, qr/^rel_header_own: \S+parent\.C\.vcf and \S+C\.again\.vcf both name their sample "C"/, 'two VCFs of one sample name');
-	dies_like(sub { relatedness($own{C}, spew('no_chrom.vcf', "##fileformat=VCFv4.2\n")) }, qr/^vcf_read: \S+ has no #CHROM line, so it isn't a VCF/, 'a file with no #CHROM line');
+	dies_like(sub { relatedness($own{C}, $again) }, qr/^rel_header_own: .+?parent\.C\.vcf and .+?C\.again\.vcf both name their sample "C"/, 'two VCFs of one sample name');
+	dies_like(sub { relatedness($own{C}, spew('no_chrom.vcf', "##fileformat=VCFv4.2\n")) }, qr/^vcf_read: .+? has no #CHROM line, so it isn't a VCF/, 'a file with no #CHROM line');
 	dies_like(sub { relatedness(spew('wide.vcf', "$hdr\tC\tF\n1\t5\t.\tA\tG\t.\t.\t.\tGT\t0/1\t0/1\t0/1\n")) },
-		qr/^vcf_samples_end: \S+ line 3 has more samples than the 2 its #CHROM line names/, 'a record with a sample too many');
+		qr/^vcf_samples_end: .+? line 3 has more samples than the 2 its #CHROM line names/, 'a record with a sample too many');
 	dies_like(sub { relatedness(spew('narrow.vcf', "$hdr\tC\tF\nchrX\t3000000\t.\tA\tG\t.\t.\t.\tGT\t0/1\n")) },
-		qr/^vcf_sample: \S+ line 3 has 1 samples, and the #CHROM line names 2/, 'a record on X with a sample too few');
+		qr/^vcf_sample: .+? line 3 has 1 samples, and the #CHROM line names 2/, 'a record on X with a sample too few');
 	dies_like(sub { relatedness($own{C}, spew('own_wide.vcf', "$hdr\tF\nchrY\t5000000\t.\tA\tG\t.\t.\t.\tGT\t1\t1\n")) },
-		qr/^vcf_samples_end: \S+ line 3 has more samples than the 1 its #CHROM line names/, 'a record on Y with a sample too many, in an own VCF');
+		qr/^vcf_samples_end: .+? line 3 has more samples than the 1 its #CHROM line names/, 'a record on Y with a sample too many, in an own VCF');
 }
 
 SKIP: {

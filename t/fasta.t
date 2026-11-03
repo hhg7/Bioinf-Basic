@@ -47,6 +47,12 @@ is fasta2hash(spew('tail2.fa', ">x\nAC\n>y"), 'y'), '', 'which can still be aske
 my @w = warnings_of(sub { is_deeply fasta2hash(spew('dup.fa', ">x\nA\n>y\nC\n>x\nG\n")), { x => 'AG', y => 'C' }, 'a repeated defline is concatenated' });
 is scalar @w, 1, 'with one warning';
 like $w[0], qr/"x" appears more than once in .*dup\.fa \(line 5\)/, 'naming the defline and its line';
+# The defline is named as it is keyed, without the whitespace dropped from its
+# end. The warning used to print that whitespace too, the CR of a CRLF file
+# included, as the dropped bytes were still in the buffer the message read.
+@w = warnings_of(sub { is_deeply fasta2hash(spew('dupcr.fa', ">a  \r\nAC GT\r\n>a \t\r\nTT\r\n")), { a => 'ACGTTT' }, 'a repeated CRLF defline with trailing whitespace' });
+is scalar @w, 1, 'with one warning';
+like $w[0], qr/^read_fasta: "a" appears more than once in .*dupcr\.fa \(line 3\)/, 'which names the defline without its trailing whitespace';
 @w = warnings_of(sub { is fasta2hash(spew('dupk.fa', ">x\nA\n>x\nG\n>y\nC\n"), 'x'), 'AG', 'also when only that record is wanted' });
 is scalar @w, 1, 'with one warning there too';
 # Differs from bioinf.pm: with a key, the other deflines are not kept, so a
@@ -111,13 +117,18 @@ sub gzip_file {
 }
 my $gunzip = eval { fasta2hash(gzip_file($plain, catfile($dir, 'probe.fa.gz'))); 1 } ? '' : $@;
 my $no_gzip = $gunzip =~ /^_open_fasta: can't run gzip/ ? $gunzip : '';
-$no_gzip =~ s/ at \S+ line \d+\.\n\z//; # croak's location, which is only noise in a skip
+$no_gzip =~ s/ at .+ line \d+\.\n\z//; # croak's location, which is only noise in a skip
 
 SKIP: {
-	skip "fasta2hash can't read a .gz here: $no_gzip", 2 if $no_gzip;
+	skip "fasta2hash can't read a .gz here: $no_gzip", 3 if $no_gzip;
 	my $gz = gzip_file($plain, catfile($dir, 'a.fa.gz'));
 	is_deeply fasta2hash($gz), fasta2hash($plain), '.gz is decompressed';
 	is fasta2hash($gz, 'one desc'), 'ACGTAC', 'and can be read for one record';
+	# the suffix in any case, as pgs_score takes a weights file's; X.FA.GZ used
+	# to be read as plain text, and died of its first gzip byte as "sequence,
+	# but no defline"
+	my $upper = gzip_file($plain, catfile($dir, 'A.FA.GZ'));
+	is_deeply fasta2hash($upper), fasta2hash($plain), '.GZ is decompressed too';
 }
 
 SKIP: {
@@ -140,8 +151,20 @@ SKIP: {
 
 my %h = (b => 'ABCDEFGHIJ', a => 'XYZ', e => '');
 my $out = catfile($dir, 'out.fa');
-is hash2fasta_file(\%h, $out), $out, 'hash2fasta_file returns the file name';
-open my $fh, '<', $out or die $!;
+my $said = catfile($dir, 'said.txt');
+{
+	open my $saved, '>&', \*STDOUT or die $!;
+	open STDOUT, '>', $said or die $!;
+	is hash2fasta_file(\%h, $out), $out, 'hash2fasta_file returns the file name';
+	open STDOUT, '>&', $saved or die $!;
+}
+open my $fh, '<', $said or die $!;
+is do { local $/; <$fh> }, "wrote $out\n", 'and says "wrote" it, without colour when STDOUT is not a terminal, rather than nothing';
+close $fh;
+# Test::More has its own copy of STDOUT, made as it loaded, so the "wrote"
+# lines of the calls below can go to the null device rather than into the TAP.
+open STDOUT, '>', File::Spec->devnull or die "can't send STDOUT to the null device: $!";
+open $fh, '<', $out or die $!;
 is do { local $/; <$fh> }, ">a\nXYZ\n>b\nABCDEFGHIJ\n>e\n", 'sorted keys, 80 columns';
 close $fh;
 hash2fasta_file(\%h, $out, ['b', 'a'], 4);

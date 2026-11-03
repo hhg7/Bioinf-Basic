@@ -99,7 +99,10 @@ static bool any_space(const char *p, const char *e) {
 
 /*Drop the whitespace at the end of a defline, the '\r' of a CRLF file
 included, as Biopython does. It is chopped when the line ends rather than as it
-is read, because a block can end inside it.*/
+is read, because a block can end inside it. Only SvCUR moves: the bytes
+dropped stay in the buffer with no NUL after SvCUR, so the SV is read by its
+length (sv_eq, hv_*_ent, SVf) and never as a C string, as a warning in
+read_fasta() once read it and printed them.*/
 static void chop_space(SV *sv) {
 	STRLEN n = SvCUR(sv);
 	while (n && FASTA_SPACE(SvPVX(sv)[n - 1])) n--;
@@ -196,7 +199,7 @@ static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 				continue;
 			}
 			if (hv_exists_ent(out, hdr, 0))
-				warn("%s: \"%s\" appears more than once in %s (line %" UVuf "); its sequences will be concatenated", __func__, SvPV_nolen(hdr), name, line);
+				warn("%s: \"%" SVf "\" appears more than once in %s (line %" UVuf "); its sequences will be concatenated", __func__, SVfARG(hdr), name, line);
 			else if (order) av_push(order, newSVsv(hdr));
 			seq = HeVAL(hv_fetch_ent(out, hdr, 1, 0));
 			if (!SvOK(seq)) sv_setpvs(seq, "");
@@ -369,7 +372,7 @@ static void vcf_format(const char *p, const char *e, size_t *gt, size_t *dp) {
 //What vcf_call() found
 enum {
 	VCF_SHALLOW, // a DP below min_depth: the genotype is not counted at all
-	VCF_NO_CALL, // missing, partly missing ("./1"), more than two alleles, or an allele the site lacks
+	VCF_NO_CALL, // missing, partly missing ("./1"), cut short ("1/"), more than two alleles, or an allele the site lacks
 	VCF_CALL     // one or two alleles, each REF or the one ALT
 };
 
@@ -400,8 +403,10 @@ static short int vcf_call(const vcf_reader *r, const char *p, const char *e, siz
 		if (*s == '1') ++*alt;
 		else if (*s != '0') return VCF_NO_CALL; // no other allele exists at a biallelic site
 		s++;
-		if (s < sf && *s != '/' && *s != '|') return VCF_NO_CALL;
-		if (s < sf) s++;
+		if (s < sf) {
+			if (*s != '/' && *s != '|') return VCF_NO_CALL;
+			if (++s == sf) return VCF_NO_CALL; // "1/": a separator with no allele after it is a call cut short, not a haploid one
+		}
 	}
 	return VCF_CALL;
 }
@@ -477,7 +482,12 @@ static void vcf_line(pTHX_ vcf_reader *r, const char *p, const char *e) {
 
 /*The VCF r->name, which next, a perl sub, returns a block of at a time and
 then undef. r's name, min_depth, on_header and on_record are the caller's to
-set; the rest is set here.*/
+set; the rest is set here.
+
+next may grow perl's stack, which moves it, so an XSUB that reaches this must
+PUTBACK before and SPAGAIN after, and push nothing with the SP it had on entry.
+Up to 2026-10-26 none did, and a reader that grew the stack lost the results
+or corrupted the heap ("realloc(): invalid next size"); t/checks.t grows it.*/
 static void vcf_read(pTHX_ SV *next, vcf_reader *r) {
 	r->line = 0;
 	r->n = 0;
@@ -1666,7 +1676,9 @@ there is what the genotypes are counted against, so that a site written with
 several ALTs, or with the counted allele as its REF, is counted the same way.
 A record whose REF is longer than one base is passed over for every marker but
 the one that is an indel, since it is some other variant that shares the
-position.
+position. That one, an insertion, is counted from the ALT that is REF with its
+base put in once, which is the same test however the VCF anchors the indel.
+Bases are compared regardless of case, as CHROM is.
 
 What is kept is one byte for each sample at each marker, so a file costs one
 byte times its samples times the panel, however many records it holds.*/
@@ -1682,8 +1694,8 @@ enum {
 typedef struct {
 	unsigned short int chrom; // vcf_chrom()'s numbering, 1 to 24; 0 when the panel gives no position
 	UV pos;
-	char allele;              // the base counted, or 0 when insertion is TRUE
-	bool insertion;           // TRUE = count the ALT longer than REF, for the one marker of the panel that is an indel
+	char allele;              // the base counted, or the base inserted when insertion is TRUE
+	bool insertion;           // TRUE = count the ALT that is REF with allele put in once, for the one marker of the panel that is an indel
 	size_t k;                 // the marker's place in the panel perl gave, which its genotypes are stored under
 	char id[HPS_ID];          // the marker's rs number, for matching by ID
 } hps_site;
@@ -1747,17 +1759,34 @@ static const hps_site *hps_find_id(const hps_reader *t, const char *p, const cha
 	return NULL;
 }
 
+/*Whether the ALT a..ae is the REF r..re with the one base put in, in either
+case. Past the bases the two share at the start, the first base of ALT that
+differs is the one put in, and the rest of ALT must be the rest of REF; in a
+run of that base it could have gone anywhere in the run, and gives the same
+ALT. An MNV or a symbolic ALT such as <INS> fails it.*/
+static bool hps_inserts(char base, const char *r, const char *re, const char *a, const char *ae) {
+	const size_t rl = (size_t)(re - r);
+	if ((size_t)(ae - a) != rl + 1) return FALSE;
+	size_t i = 0; // the first place ALT differs from REF, read after the loop
+	while (i < rl && toUPPER(r[i]) == toUPPER(a[i])) i++;
+	if (toUPPER(a[i]) != toUPPER(base)) return FALSE;
+	for (size_t j = i; j < rl; j++) {
+		if (toUPPER(r[j]) != toUPPER(a[j + 1])) return FALSE;
+	}
+	return TRUE;
+}
+
 /*Where the marker's counted allele is among REF (0) and the ALTs (1, 2, ...),
 or -1 when the record does not carry it at all, which leaves every call of the
 record 0 copies of it. REF is ref..ref_end and ALT is alt..alt_end.*/
 static short int hps_allele(const hps_site *s, const char *ref, const char *ref_end, const char *alt, const char *alt_end) {
 	size_t ref_len = (size_t)(ref_end - ref);
-	if (!s->insertion && ref_len == 1 && *ref == s->allele) return 0;
+	if (!s->insertion && ref_len == 1 && toUPPER(*ref) == toUPPER(s->allele)) return 0;
 	short int i = 1;
 	for (const char *q = alt; q <= alt_end; i++) {
 		const char *c = (const char*)memchr(q, ',', (size_t)(alt_end - q));
 		const char *ce = c ? c : alt_end;
-		if (s->insertion ? (size_t)(ce - q) > ref_len : (ce - q == 1 && *q == s->allele)) return i;
+		if (s->insertion ? hps_inserts(s->allele, ref, ref_end, q, ce) : (ce - q == 1 && toUPPER(*q) == toUPPER(s->allele))) return i;
 		if (i == 127) break; // a short int holds no more, and no record of these markers has so many ALTs
 		q = ce + 1;
 	}
@@ -1877,8 +1906,8 @@ static void hps_panel(pTHX_ hps_reader *t, AV *panel, size_t markers) {
 		s->insertion = SvTRUE(*fld[3]) ? TRUE : FALSE;
 		STRLEN len;
 		const char *allele = SvPV(*fld[2], len);
-		if (!s->insertion && len != 1) croak("%s: entry %" IVdf " of the panel counts \"%.*s\", which isn't one base", __func__, (IV)i, (int)len, allele);
-		s->allele = len ? allele[0] : 0;
+		if (len != 1) croak("%s: entry %" IVdf " of the panel counts \"%.*s\", which isn't one base", __func__, (IV)i, (int)len, allele);
+		s->allele = allele[0];
 		const char *id = SvPV(*fld[4], len);
 		if (!len || len >= HPS_ID) croak("%s: entry %" IVdf " of the panel is named \"%.*s\", which is %s", __func__, (IV)i, (int)len, id,
 			len ? "longer than an rs number" : "empty");
@@ -1956,7 +1985,9 @@ _sex_tally(next, name, min_depth)
 PPCODE:
 	UV x_sites;
 	AV *names;
+	PUTBACK;
 	HV *out = sex_tally_vcf(aTHX_ next, name, min_depth, &x_sites, &names);
+	SPAGAIN;
 	EXTEND(SP, 3);
 	PUSHs(sv_2mortal(newRV_inc((SV*)out)));
 	PUSHs(sv_2mortal(newSVuv(x_sites)));
@@ -1978,7 +2009,9 @@ PPCODE:
 	t.r.on_record = parent_record_one;
 	t.want[0] = child;
 	t.want[1] = parent;
+	PUTBACK;
 	vcf_read(aTHX_ next, &t.r);
+	SPAGAIN;
 	UV in = 0; // the sites where either carries the ALT, every one of them in both, since there is one file
 	for (unsigned short int k = 1; k < 9; k++) in += t.t[k];
 	EXTEND(SP, 12);
@@ -1995,8 +2028,10 @@ _parent_own(child_next, child_name, parent_next, parent_name, min_depth)
 	const char *parent_name
 	UV min_depth
 PPCODE:
+	PUTBACK;
 	const parent_sites *a = parent_sites_vcf(aTHX_ child_next, child_name, min_depth);
 	const parent_sites *b = parent_sites_vcf(aTHX_ parent_next, parent_name, min_depth);
+	SPAGAIN;
 	UV t[9] = { 0 }, in[3] = { 0 }; // as parent_merge() fills them
 	parent_merge(a, b, t, in);
 	EXTEND(SP, 12);
@@ -2015,8 +2050,10 @@ PPCODE:
 	t.r.min_depth = min_depth;
 	t.r.on_header = rel_header_one;
 	t.r.on_record = rel_record_one;
+	PUTBACK;
 	vcf_read(aTHX_ next, &t.r);
 	if (t.k) rel_flush(&t);
+	SPAGAIN;
 	HV *sex = (HV*)sv_2mortal((SV*)newHV());
 	sex_rows(aTHX_ sex, t.r.names, t.sex, t.r.n, name);
 	EXTEND(SP, 3);
@@ -2031,7 +2068,7 @@ _relatedness_own(nexts, files, min_depth)
 	UV min_depth
 PPCODE:
 	const size_t n = (size_t)(av_len(nexts) + 1);
-	if ((SSize_t)n != av_len(files) + 1) croak("%s: %" UVuf " readers for %" UVuf " files", __func__, (UV)n, (UV)(av_len(files) + 1)); // cannot happen: perl makes one for each
+	if ((SSize_t)n != av_len(files) + 1) croak("_relatedness_own: %" UVuf " readers for %" UVuf " files", (UV)n, (UV)(av_len(files) + 1)); // cannot happen: perl makes one for each; named literally, since __func__ in an XSUB is XS_Cn__Bioinf__relatedness_own
 	parent_sites **s; // each file's sites, freed by parent_sites_read()'s destructor
 	Newx(s, n, parent_sites*);
 	SAVEFREEPV(s);
@@ -2040,9 +2077,10 @@ PPCODE:
 	SAVEFREEPV(count);
 	HV *seen = (HV*)sv_2mortal((SV*)newHV());
 	AV *names = (AV*)sv_2mortal((SV*)newAV());
+	PUTBACK;
 	for (size_t f = 0; f < n; f++) {
 		SV **next = av_fetch(nexts, (SSize_t)f, 0), **file = av_fetch(files, (SSize_t)f, 0);
-		if (!next || !file) croak("%s: file %" UVuf " has no reader", __func__, (UV)f); // cannot happen: perl fills both arrays
+		if (!next || !file) croak("_relatedness_own: file %" UVuf " has no reader", (UV)f); // cannot happen: perl fills both arrays
 		rel_own_reader t;
 		Zero(&t, 1, rel_own_reader);
 		t.p.r.name = SvPV_nolen(*file);
@@ -2054,6 +2092,7 @@ PPCODE:
 		t.names = names;
 		s[f] = parent_sites_read(aTHX_ &t.p, *next);
 	}
+	SPAGAIN;
 	UV *t; // REL_T counters a pair
 	Newxz(t, rel_pairs(aTHX_ n) * REL_T, UV);
 	SAVEFREEPV(t);
@@ -2075,7 +2114,9 @@ PPCODE:
 	r.name = name;
 	r.on_header = conc_stop;
 	r.on_record = conc_skip;
+	PUTBACK;
 	vcf_read(aTHX_ next, &r);
+	SPAGAIN;
 	XPUSHs(sv_2mortal(newRV_inc((SV*)r.names)));
 
 void
@@ -2100,6 +2141,7 @@ PPCODE:
 	test.r.on_record = conc_record_test;
 	test.s = s;
 	test.truth_names = truth_names;
+	PUTBACK;
 	vcf_read(aTHX_ test_next, &test.r);
 	conc_reader truth;
 	Zero(&truth, 1, conc_reader);
@@ -2109,6 +2151,7 @@ PPCODE:
 	truth.r.on_record = conc_record_truth;
 	truth.s = s;
 	vcf_read(aTHX_ truth_next, &truth.r);
+	SPAGAIN;
 	HV *out = conc_results(aTHX_ s, test.r.names, truth.r.names, discordances);
 	EXTEND(SP, 2);
 	PUSHs(sv_2mortal(newRV_inc((SV*)out)));
@@ -2124,7 +2167,9 @@ _hirisplex_dosage(next, name, min_depth, panel, markers, by_id)
 	UV by_id
 PPCODE:
 	AV *names, *seen;
+	PUTBACK;
 	HV *out = hps_dosage_vcf(aTHX_ next, name, min_depth, panel, (size_t)markers, by_id ? TRUE : FALSE, &names, &seen);
+	SPAGAIN;
 	EXTEND(SP, 3);
 	PUSHs(sv_2mortal(newRV_inc((SV*)out)));
 	PUSHs(sv_2mortal(newRV_inc((SV*)names)));

@@ -127,12 +127,22 @@ sub _user {
 	defined $user && length $user ? $user : 'unknown';
 }
 
+# The data in the JSON file $file, which $sub was given; dies naming $sub, as
+# the file is that caller's argument. Up to 2026-11-02 a file that was not JSON
+# died with JSON::MaybeXS's message, naming no function, and an empty one with
+# a "Usage:" message, since <$fh> passed decode_json an empty list.
 sub _json_file {
-	my ($file) = @_;
+	my ($sub, $file) = @_;
 	require JSON::MaybeXS;
-	open my $fh, '<:raw', $file or croak "_json_file: can't read $file: $!";
-	local $/;
-	JSON::MaybeXS::decode_json(<$fh>);
+	open my $fh, '<:raw', $file or croak "$sub: can't read $file: $!";
+	my $text = do { local $/; <$fh> } // ''; # undef for an empty file
+	close $fh or croak "$sub: can't read $file: $!";
+	my $data = eval { JSON::MaybeXS::decode_json($text) };
+	unless (defined $data) {
+		(my $why = $@) =~ s/ at .+ line \d+\.\n\z//; # the location is the module's, which says nothing of the file
+		croak "$sub: $file isn't JSON: $why";
+	}
+	$data;
 }
 
 # @cmd run with list-form system, which needs no shell. $? is -1 when the
@@ -202,7 +212,7 @@ sub _tmp {
 	my ($suffix, $keep) = @_;
 	require File::Temp;
 	my ($fh, $name) = File::Temp::tempfile(SUFFIX => $suffix, UNLINK => $keep ? 0 : 1, TMPDIR => 1);
-	close $fh;
+	close $fh or croak "_tmp: can't close $name: $!";
 	$name;
 }
 
@@ -311,7 +321,7 @@ sub _open_fasta {
 	croak "_open_fasta: undef isn't a readable file" unless defined $file;
 	croak "_open_fasta: \"$file\" doesn't exist or isn't a readable file" unless -f $file && -r _;
 	my $fh;
-	if ($file =~ /\.gz\z/) {
+	if ($file =~ /\.gz\z/i) { # any case, as _weight_rows takes it
 		# in an eval, since a perl without list-form piped open (MSWin32 before
 		# 5.22) dies in open itself, with no function name in the message
 		eval { open $fh, '-|', 'gzip', '-dc', $file } or croak "_open_fasta: can't run gzip on $file: " . ($@ || $!);
@@ -377,9 +387,19 @@ sub hash2fasta_file {
 	croak "hash2fasta_file: 3rd argument must be an array ref or undef" if defined $order && ref $order ne 'ARRAY';
 	# checked here because the XS takes it as a UV, where -1 would wrap round
 	croak "hash2fasta_file: 4th argument must be a whole number, 0 or more, or undef, not \"$width\"" if defined $width && $width !~ /\A[0-9]+\z/;
-	open my $fh, '>:raw', $filename or croak "hash2fasta_file: can't write $filename: $!";
-	_write_fasta($fh, $hash, $order // [sort keys %{ $hash }], $width // 80);
-	close $fh or croak "hash2fasta_file: can't write $filename: $!";
+	_fasta_file('hash2fasta_file', $hash, $filename, $order // [sort keys %{ $hash }], $width // 80);
+	_wrote($filename, 46); # cyan
+	$filename;
+}
+
+# hash2fasta_file without its checks, its defaults or its "wrote" line, for
+# the FASTA files the module writes for itself, mostly temporary ones that a
+# caller never asked for; $sub is the caller, to name in an error.
+sub _fasta_file {
+	my ($sub, $hash, $filename, $order, $width) = @_;
+	open my $fh, '>:raw', $filename or croak "$sub: can't write $filename: $!";
+	_write_fasta($fh, $hash, $order, $width);
+	close $fh or croak "$sub: can't write $filename: $!";
 	$filename;
 }
 
@@ -404,11 +424,21 @@ sub get_best_alignment_hit {
 	my %better = (align_len => 1, bit_score => 1, evalue => -1, gaps => -1, identity => 1, positive => 1, score => 1);
 	my $direction = $better{$sort_criterion}
 		// croak "get_best_alignment_hit: \"$sort_criterion\" isn't a sortable hsp field; use one of " . join(', ', sort keys %better);
-	my $blast = _json_file($json_file);
+	my $blast = _json_file('get_best_alignment_hit', $json_file);
+	croak "get_best_alignment_hit: $json_file isn't a BLAST report in JSON (-outfmt 15): it has no \"BlastOutput2\" array"
+		unless ref $blast eq 'HASH' && ref $blast->{BlastOutput2} eq 'ARRAY';
 	my %alignments;
-	foreach my $report (@{ $blast->{BlastOutput2} }) {
+	foreach my $i (0 .. $#{ $blast->{BlastOutput2} }) {
+		my $report = $blast->{BlastOutput2}[$i];
+		my $search = ref $report eq 'HASH' && ref $report->{report} eq 'HASH' && ref $report->{report}{results} eq 'HASH'
+			? $report->{report}{results}{search} : undef;
+		croak "get_best_alignment_hit: report " . ($i + 1) . " of $json_file has no report.results.search" unless ref $search eq 'HASH';
+		# BLAST titles a query by its defline, and a query with none by its
+		# query_id alone.
+		my $query = $search->{query_title} // $search->{query_id};
+		croak "get_best_alignment_hit: report " . ($i + 1) . " of $json_file names no query: it has no query_title or query_id" unless defined $query;
 		my @hits;
-		foreach my $hit (@{ $report->{report}{results}{search}{hits} }) {
+		foreach my $hit (@{ $search->{hits} // [] }) {
 			my $best; # undef until an hsp is seen; a hit with no hsps has nothing to record
 			foreach my $hsp (@{ $hit->{hsps} }) {
 				croak "get_best_alignment_hit: an hsp of \"$hit->{description}[0]{title}\" in $json_file has no \"$sort_criterion\" to sort on"
@@ -448,7 +478,6 @@ sub get_best_alignment_hit {
 		} 0 .. $#hits;
 		# Two queries of one title would leave only the second's hits, so that
 		# is refused rather than lost silently.
-		my $query = $report->{report}{results}{search}{query_title};
 		croak "get_best_alignment_hit: two queries in $json_file are both titled \"$query\"" if exists $alignments{$query};
 		$alignments{$query} = [ @hits[@order] ];
 	}
@@ -625,14 +654,28 @@ sub _plink2 {
 	my $log = File::Spec->catfile($dir, 'plink2.out');
 	open my $out, '>&', \*STDOUT or croak "_plink2: can't save STDOUT: $!";
 	open my $err, '>&', \*STDERR or croak "_plink2: can't save STDERR: $!";
-	open STDOUT, '>', $log or croak "_plink2: can't write $log: $!";
-	open STDERR, '>&', \*STDOUT or croak "_plink2: can't send STDERR to $log: $!";
+	# Puts the caller's STDOUT and STDERR back, so that a failure to redirect
+	# them does not leave the rest of the caller's output in the log.
+	my $restore = sub {
+		open STDOUT, '>&', $out or croak "_plink2: can't restore STDOUT: $!";
+		open STDERR, '>&', $err or croak "_plink2: can't restore STDERR: $!";
+	};
+	unless (open STDOUT, '>', $log) {
+		my $why = "$!";
+		$restore->();
+		croak "_plink2: can't write $log: $why";
+	}
+	unless (open STDERR, '>&', \*STDOUT) {
+		my $why = "$!";
+		$restore->();
+		croak "_plink2: can't send STDERR to $log: $why";
+	}
 	my $rc = system($plink2, @args);
-	my $status = $?;
-	open STDOUT, '>&', $out or croak "_plink2: can't restore STDOUT: $!";
-	open STDERR, '>&', $err or croak "_plink2: can't restore STDERR: $!";
+	# taken before $restore's opens can set $! to their own errors
+	my ($status, $errno) = ($?, "$!");
+	$restore->();
 	return if $rc == 0;
-	my $why = $status == -1 ? "it didn't start: $!" : $status & 127 ? 'killed by signal ' . ($status & 127) : 'exit ' . ($status >> 8);
+	my $why = $status == -1 ? "it didn't start: $errno" : $status & 127 ? 'killed by signal ' . ($status & 127) : 'exit ' . ($status >> 8);
 	# what PLINK 2 says from its "Error:" on, or else its last line; it
 	# rewrites its progress lines with a CR
 	my @said;
@@ -787,10 +830,12 @@ sub pgs_score {
 	push @import, '--psam', "$samples.psam", '--split-par', $r{build} if defined $r{build} && $input[0] ne '--pfile';
 	push @import, '--extract', 'bed1', $regions if $r{match} eq 'position';
 	my $g = File::Spec->catfile($dir, 'g');
-	# PLINK 2 exits 13 when none of the score's positions is in the VCF, which
-	# is a result here: every variant is missing.
+	# PLINK 2 exits 13 when none of the score's positions is in the VCF, and 7
+	# when none of its chromosomes is (a VCF, filtered by --chr as it is
+	# imported; a --pfile is filtered later, and exits 13). Either is a result
+	# here: every variant is missing.
 	my $none = eval { _plink2($sub, $plink2, $dir, @import, '--make-pgen', '--out', $g); 0 }
-		// ($@ =~ /\(exit 13\): Error: No variants remaining/ ? 1 : croak $@);
+		// ($@ =~ /\((?:exit 13\): Error: No variants remaining|exit 7\): Error: All \d+ variant\(s\) in --vcf file excluded by --chr)/ ? 1 : croak $@);
 
 	my @samples; # in PLINK 2's order
 	open my $psam, '<', "$samples.psam" or croak "$sub: can't read $samples.psam: $!";
@@ -1974,6 +2019,7 @@ sub trait_predict {
 			$uses{$t}{$_} = 1 foreach grep { $_ ne $Intercept } keys %{ $beta->{$t}{$c} };
 		}
 	}
+	my %used = map { %{ $uses{$_} } } keys %uses; # every trait's markers, whose dosages are checked
 
 	my %out;
 	foreach my $s (sort keys %{ $g }) {
@@ -1983,6 +2029,13 @@ sub trait_predict {
 		# "genotype" and which also says which predictions its markers allow,
 		# or a plain hash of marker => dosage.
 		my $dose = ref $rec->{genotype} eq 'HASH' ? $rec->{genotype} : $rec;
+		# A dosage may be fractional, as imputation gives, but anything else
+		# would be multiplied in as 0 copies and counted as called.
+		foreach my $m (sort keys %used) {
+			my $d = $dose->{$m};
+			croak "$sub: \"genotypes\" sample \"$s\" has $m " . _what($d) . ", which isn't a dosage from 0 to 2; a missing genotype is undef"
+				unless !defined $d || (!ref $d && $d =~ $Number && $d >= 0 && $d <= 2);
+		}
 		foreach my $t (@{ $traits }) {
 			my (@eta, @missing);
 			my $called = 0;
@@ -2103,7 +2156,7 @@ sub _rcsb_post {
 # the aligned sequences instead, which is how BLAST counts it.
 sub _pdb_alignment {
 	my ($m) = @_;
-	my ($q, $h) = @{ $m }{qw(query_aligned_seq subject_aligned_seq)};
+	my ($q, $h) = map { $_ // '' } @{ $m }{qw(query_aligned_seq subject_aligned_seq)};
 	my ($identity, $gaps) = (0, 0);
 	foreach my $i (0 .. length($q) - 1) {
 		my ($x, $y) = (substr($q, $i, 1), substr($h, $i, 1));
@@ -2114,14 +2167,16 @@ sub _pdb_alignment {
 		bit_score   => $m->{bitscore},
 		align_len   => $m->{alignment_length},
 		identity    => $identity,
-		pident      => 100 * $identity / $m->{alignment_length},
+		# undef where RCSB gives no length to divide by, rather than dying of it
+		pident      => ($m->{alignment_length} // 0) > 0 ? 100 * $identity / $m->{alignment_length} : undef,
 		mismatches  => $m->{mismatches},
 		gaps        => $gaps,
 		gap_opens   => $m->{gaps_opened},
 		query_from  => $m->{query_beg},
 		query_to    => $m->{query_end},
 		query_len   => $m->{query_length},
-		query_cover => 100 * ($m->{query_end} - $m->{query_beg} + 1) / $m->{query_length},
+		query_cover => defined $m->{query_beg} && defined $m->{query_end} && ($m->{query_length} // 0) > 0
+			? 100 * ($m->{query_end} - $m->{query_beg} + 1) / $m->{query_length} : undef,
 		hit_from    => $m->{subject_beg},
 		hit_to      => $m->{subject_end},
 		hit_len     => $m->{subject_length},
@@ -2199,7 +2254,8 @@ sub _pdb_report {
 	my @rows = map {
 		[$_->{id}, _pdb_method($_),
 			defined $_->{resolution} ? sprintf('%.2f A', $_->{resolution}) : defined $_->{plddt} ? "pLDDT $_->{plddt}" : '-',
-			sprintf('%.1f%%', $_->{pident}), sprintf('%.0f%%', $_->{query_cover}), sprintf('%.2g', $_->{evalue}), $_->{bit_score},
+			defined $_->{pident} ? sprintf('%.1f%%', $_->{pident}) : '-', defined $_->{query_cover} ? sprintf('%.0f%%', $_->{query_cover}) : '-',
+			sprintf('%.2g', $_->{evalue}), $_->{bit_score},
 			$_->{oligomeric_state} // '-', $_->{description} // '-']
 	} @{ $hits };
 	my @w = map { length $head[$_] } 0 .. $#head;
@@ -2265,6 +2321,13 @@ sub pdb_search {
 		},
 		return_type => 'polymer_entity',
 	}, $r{timeout});
+	if ($found) {
+		my $not = "$sub: $Rcsb_search answered with JSON that isn't a search result: ";
+		croak $not . 'it is not an object' unless ref $found eq 'HASH';
+		croak $not . 'it has no result_set array' unless ref $found->{result_set} eq 'ARRAY';
+		croak $not . 'it has no total_count' unless defined $found->{total_count} && !ref $found->{total_count};
+		ref $_ eq 'HASH' && defined $_->{identifier} or croak $not . 'a hit in its result_set has no identifier' foreach @{ $found->{result_set} };
+	}
 	my $total = $found ? $found->{total_count} : 0;
 	my @hits;
 	foreach my $res (@{ $found ? $found->{result_set} : [] }) {
@@ -2333,9 +2396,11 @@ sub _residue_number {
 # "s2" and so on, rather than its name, for clustalo: it cuts a name at its
 # first space in the guide tree and writes "(),:" in one unquoted, which drew 4
 # sequences as 5 tips up to 2026-10-17. _unnumber_fasta and _unnumber_newick put
-# the names back.
+# the names back. Dies naming $sub, whose "fasta" it is, for a sequence that is
+# not a string or that has no residues once its gaps are gone, which clustalo
+# and blastp would otherwise be given.
 sub _ungapped_fasta {
-	my ($fasta, $numbered) = @_;
+	my ($sub, $fasta, $numbered) = @_;
 	my ($seqs, @names);
 	if (ref $fasta eq 'HASH') {
 		$seqs = $fasta;
@@ -2345,12 +2410,18 @@ sub _ungapped_fasta {
 		($seqs, $order) = _fasta_ordered($fasta);
 		@names = @{ $order };
 	} else {
-		croak "_ungapped_fasta: \"fasta\" must be a FASTA file name or a hash ref of name => sequence, not " . _what($fasta);
+		croak "$sub: \"fasta\" must be a FASTA file name or a hash ref of name => sequence, not " . _what($fasta);
 	}
 	my @written = $numbered ? map { "s$_" } 1 .. @names : @names;
 	my %ungapped;
-	@ungapped{@written} = map { (my $s = $seqs->{$_}) =~ tr/-.//d; $s } @names;
-	(hash2fasta_file(\%ungapped, _tmp('.fa'), \@written), \@names);
+	foreach my $i (0 .. $#names) {
+		my $s = $seqs->{ $names[$i] };
+		croak "$sub: \"fasta\" sequence \"$names[$i]\" must be a string of residues, not " . _what($s) unless defined $s && !ref $s;
+		$s =~ tr/-.//d;
+		croak "$sub: \"fasta\" sequence \"$names[$i]\" has no residues" if $s eq '';
+		$ungapped{ $written[$i] } = $s;
+	}
+	(_fasta_file('_ungapped_fasta', \%ungapped, _tmp('.fa'), \@written, 80), \@names);
 }
 
 # The name that clustalo's "s<n>" in $file stands for, from @$names, the list
@@ -2374,7 +2445,7 @@ sub _unnumber_fasta {
 		my $name = _unnumber($id, $names, $file);
 		$aln{$name} = $utf8{ _utf8($name) } = $numbered->{$id};
 	}
-	hash2fasta_file(\%utf8, $file, [map { _utf8(_unnumber($_, $names, $file)) } @{ $ids }], 60);
+	_fasta_file('_unnumber_fasta', \%utf8, $file, [map { _utf8(_unnumber($_, $names, $file)) } @{ $ids }], 60);
 	\%aln;
 }
 
@@ -2408,7 +2479,7 @@ sub _unnumber_newick {
 # tree it writes get their names back.
 sub _align {
 	my ($args, $sub, $want_tree) = @_;
-	my ($in, $names) = _ungapped_fasta($args->{fasta}, 1);
+	my ($in, $names) = _ungapped_fasta($sub, $args->{fasta}, 1);
 	if (@{ $names } < 2) {
 		carp "$sub: clustalo needs at least 2 sequences, and there " . (@{ $names } ? 'is only 1' : 'are none');
 		return;
@@ -2427,10 +2498,14 @@ sub _align {
 sub plot_msa {
 	my $sub = 'plot_msa';
 	my $args = _args(\@_, $sub, [qw(fasta filename)], [qw(active_site_aa clustal_args execute fh labels msa_file order query threads title
-		tree_file xlabel ylabel)]);
+		tooltips tree_file xlabel ylabel)]);
 	_refs($sub, $args, 'ARRAY', qw(clustal_args order));
 	_refs($sub, $args, 'HASH', 'labels');
 	my $drawing = _drawing($sub, $args);
+	my $tooltips = $args->{'tooltips'} // 0; # 1 = a tooltip naming each residue, in an SVG; 0 = none
+	croak "$sub: \"tooltips\" must be 0 or 1, not " . _what($tooltips) unless !ref $tooltips && ($tooltips eq '0' || $tooltips eq '1');
+	croak "$sub: \"tooltips\" needs an SVG \"filename\", the only format that carries them, not \"$args->{filename}\""
+		if $tooltips && $args->{filename} !~ /\.svg\z/i;
 	my $sites = $args->{'active_site_aa'};
 	if (defined $sites) {
 		croak "$sub: \"active_site_aa\" must be a hash ref of label => residue number" unless ref $sites eq 'HASH';
@@ -2469,12 +2544,14 @@ sub plot_msa {
 		@segments = ('--s', _json_text({ map { _chars($_) => 0 + $sites{$_} } keys %sites }));
 	}
 	my %shown = map { $shown_as{$_} => $aln->{$_} } @order;
-	my $fa = hash2fasta_file(\%shown, _tmp('.fa'), [@shown_as{@order}], 0);
+	my $fa = _fasta_file($sub, \%shown, _tmp('.fa'), [@shown_as{@order}], 0);
 	$r->{'python_file'} = _draw($sub, $drawing, '--f', $fa, '--o', $args->{filename}, '--c', _creator($sub), '--quiet',
 		'--p', _json_text([map { _chars($_) } _align_provenance($args, $sub, $cmd, $names, $r->{'msa_file'}), _kept($args, qw(msa_file tree_file))]),
 		(defined $args->{title} ? ('--t', $args->{title}) : ()),
 		(defined $args->{xlabel} ? ('--x', $args->{xlabel}) : ()),
-		(defined $args->{ylabel} ? ('--y', $args->{ylabel}) : ()), @segments);
+		(defined $args->{ylabel} ? ('--y', $args->{ylabel}) : ()), @segments,
+		# the tooltips name each sequence as perl was given it, not by its label, which may be mathtext
+		($tooltips ? ('--tips', _json_text([map { _chars($_) } @order])) : ()));
 	_wrote($args->{filename}, 43, $drawing->{execute} ? 'wrote' : 'will write'); # yellow
 	$r->{filename} = $args->{filename};
 	$r;
@@ -2576,22 +2653,24 @@ sub msa_quality_table {
 		$blast = $aj;
 		$prov = 'from a BLAST report given as a hash ref';
 	} elsif (defined $aj && -f $aj) {
-		$blast = _json_file($aj);
+		$blast = _json_file($sub, $aj);
 		$prov = 'from the BLAST report ' . _file_id($aj);
 	} else {
 		croak "$sub: needs \"fasta\" to align, or an existing \"alignment_json\"" . (defined $aj ? " ($aj doesn't exist yet)" : '')
 			unless defined $fasta;
-		my ($in, $names) = _ungapped_fasta($fasta);
+		my ($in, $names) = _ungapped_fasta($sub, $fasta);
 		$aj //= _tmp('.json');
 		my $alien = _alien($sub);
 		my @cmd = ($alien->blast('blastp'), '-query', $in, '-subject', $in, '-out', $aj, '-outfmt', 15);
 		_run(@cmd);
-		$blast = _json_file($aj);
+		$blast = _json_file($sub, $aj);
 		$prov = 'from ' . _fasta_id($fasta, scalar @{ $names }) . ', written with its gaps stripped to ' . _file_id($in)
 			. ', which blastp ' . $alien->versions->{blast} . " from Alien::Bioinf $Alien::Bioinf::VERSION compared all against all into "
 			. _file_id($aj) . ', run as: ' . _cmd_text(@cmd);
 		$prov = join '; ', $prov, _kept($args, 'alignment_json');
 	}
+	croak "$sub: \"alignment_json\" isn't a BLAST report in JSON (-outfmt 15): it has no \"BlastOutput2\" array"
+		unless ref $blast eq 'HASH' && ref $blast->{BlastOutput2} eq 'ARRAY';
 	my (%data, $max);
 	foreach my $query (@{ $blast->{BlastOutput2} }) {
 		foreach my $hit_list (@{ $query->{report}{results}{bl2seq} }) {
@@ -2666,8 +2745,11 @@ sub msa_quality_table {
 # tilde accent, so those two (and the backslash) are spelled as text commands.
 sub _latex_text {
 	my ($text) = @_;
-	my %special = ('\\' => '\\textbackslash{}', '^' => '\\textasciicircum{}', '~' => '\\textasciitilde{}');
-	$text =~ s/([\\^~#\$%&_{}])/$special{$1} \/\/ "\\$1"/ge;
+	# |, < and > are commands, as the others are, because under the default
+	# OT1 fonts they print as an em dash and an inverted ! and ?
+	my %special = ('\\' => '\\textbackslash{}', '^' => '\\textasciicircum{}', '~' => '\\textasciitilde{}',
+		'|' => '\\textbar{}', '<' => '\\textless{}', '>' => '\\textgreater{}');
+	$text =~ s/([\\^~#\$%&_{}|<>])/$special{$1} \/\/ "\\$1"/ge;
 	$text;
 }
 
@@ -2720,9 +2802,10 @@ sub clustal_view_residues {
 		while ($data->{$protein} =~ /[A-Za-z]/g) {
 			push @col, pos($data->{$protein}) - 1;
 		}
+		# checked before they are sorted as numbers, which would warn of one that is not
+		_residue_number($sub, "a residue of $protein in \"color_residues\"", $_) foreach sort keys %{ $color->{$protein} };
 		foreach my $n (sort { $a <=> $b } keys %{ $color->{$protein} }) {
 			my $c = $color->{$protein}{$n};
-			_residue_number($sub, "a residue of $protein in \"color_residues\"", $n);
 			my $col = $col[$n - 1] // croak "$sub: $protein has no residue $n";
 			croak "$sub: the colour of $protein residue $n must be a name or 3 numbers" if ref $c && (ref $c ne 'ARRAY' || @{ $c } != 3);
 			$col_color{$col} = $c;
@@ -2735,6 +2818,8 @@ sub clustal_view_residues {
 		foreach my $protein (@proteins) {
 			my @seq = split //, substr($data->{$protein}, $start, $w);
 			$count{$protein} += grep { /[A-Za-z]/ } @seq;
+			# a residue is written so that LaTeX prints it, as a name is
+			$_ = _latex_text($_) foreach @seq;
 			foreach my $col (grep { $_ >= $start && $_ < $start + $w } keys %col_color) {
 				my ($c, $i) = ($col_color{$col}, $col - $start);
 				$seq[$i] = ref $c ? '{\color[rgb]{' . join(',', @{ $c }) . "}$seq[$i]}" : "\\textcolor{$c}{$seq[$i]}";
@@ -2744,13 +2829,17 @@ sub clustal_view_residues {
 			next unless defined $track && $protein eq $track;
 			# Each residue number written from its own column rightwards, one
 			# digit per column so the row stays aligned, and moved right past
-			# the end of the previous number rather than overwriting it.
+			# the end of the previous number rather than overwriting it. One
+			# that would then run past the end of the block is moved left to end
+			# there, and is left out only if that would overwrite the number
+			# before it.
 			my @row = ('-') x $w;
 			my $free = 0; # first column not yet taken by a number
 			foreach my $col (sort { $a <=> $b } grep { $_ >= $start && $_ < $start + $w } keys %col_number) {
 				my $at = $col - $start < $free ? $free : $col - $start;
 				my @digits = split //, $col_number{$col};
-				last if $at + @digits > $w;
+				$at = $w - @digits if $at + @digits > $w;
+				next if $at < $free;
 				@row[$at .. $at + $#digits] = @digits;
 				$free = $at + @digits + 1;
 			}
@@ -2758,7 +2847,8 @@ sub clustal_view_residues {
 		}
 		push @table, ['\hline'];
 	}
-	my $per_table = ($args->{split} // 4) * (1 + @proteins + (defined $track ? 1 : 0));
+	# rows a block: its proteins, the track row if the tracked protein is shown, and \hline
+	my $per_table = ($args->{split} // 4) * (1 + @proteins + ((defined $track && grep { $_ eq $track } @proteins) ? 1 : 0));
 	my $size = $args->{'table_text_size'} // '\footnotesize';
 	my $caption = $args->{caption} // '';
 	open my $tex, '>', $args->{'output_tex_file'} or croak "$sub: can't write $args->{'output_tex_file'}: $!";
@@ -2927,8 +3017,8 @@ in a PNG or PDF.
 
 =head2 fasta2hash($file, $key)
 
-Reads a FASTA file (gzip-compressed if its name ends in C<.gz>, which needs a
-C<gzip> program on C<PATH>). Returns a hash ref of defline (without the C<< E<gt> >>) =>
+Reads a FASTA file (gzip-compressed if its name ends in C<.gz>, in any case,
+which needs a C<gzip> program on C<PATH>). Returns a hash ref of defline (without the C<< E<gt> >>) =>
 sequence, or, with C<$key>, just the sequence of that defline, reading no
 further than the record after it. A defline that appears twice is warned about
 and its sequences concatenated; with C<$key>, only a repeat of C<$key> is looked
@@ -2944,7 +3034,8 @@ a truncated one, dies rather than returning the part that was read.
 
 Writes C<$hash> as FASTA: the keys in C<@$order> (default: sorted), sequences
 wrapped at C<$width> columns (default 80; 0 for one line each). Returns
-C<$filename>. Keys and sequences are written as bytes, as C<print> to a C<:raw>
+C<$filename>, and prints C<wrote $filename> to STDOUT, with the name in black
+on cyan when STDOUT is a terminal. Keys and sequences are written as bytes, as C<print> to a C<:raw>
 handle writes them, so a string that perl holds as UTF-8 is written as the
 characters in it. A character above 255 has no single byte and dies; encode
 such a string first, as with C<Encode::encode('UTF-8', $name)>.
@@ -3055,11 +3146,13 @@ How well it aligns:
 =item * C<identity>: the number of aligned columns where the two agree, and C<pident>,
 that as a percentage of C<align_len>. These are counted from the aligned
 sequences, since RCSB gives the identity only truncated to 3 places.
+C<pident> is C<undef> if RCSB gives an C<align_len> of 0 or none.
 
 =item * C<mismatches>, C<gaps> (gap columns), C<gap_opens>.
 
 =item * C<query_from>, C<query_to>, C<query_len> and C<query_cover>, the percentage of
-the query in the alignment.
+the query in the alignment, which is C<undef> if RCSB gives no C<query_len>
+or one of 0.
 
 =item * C<hit_from>, C<hit_to>, C<hit_len>: the same for the hit's sequence.
 
@@ -3371,9 +3464,9 @@ hom-REF calls.
 
 =item * C<x_haploid>: of those, the haploid calls.
 
-=item * C<x_missing>: the sample's calls there that were missing (C<./.>, C<.>, or
-partly missing, such as C<./1>), or not a call of one or two alleles of the
-record's two. A genotype left out by C<min_depth> is in no count.
+=item * C<x_missing>: the sample's calls there that were missing (C<./.>, C<.>,
+partly missing, such as C<./1>, or cut short, such as C<1/>), or not a call of
+one or two alleles of the record's two. A genotype left out by C<min_depth> is in no count.
 
 =item * C<y_called>, C<y_alt>: the sample's calls at SNVs on Y outside its
 pseudo-autosomal regions, and those of them that carry the C<ALT>. They
@@ -3961,8 +4054,11 @@ I<and> still has to be flipped -- the HIrisPlex-S manual singles it out as "the
 only SNP that may cause confusion and therefore must be converted (from NCBI's
 forward orientation)" -- so a tool that simply matched the named allele would
 silently count the wrong one. MC1R C<rs312262906> is not a SNP but the 86insA
-frameshift, merged in dbSNP into C<rs796296176>; it is counted as the allele
-longer than REF, and matching by rs number looks for both numbers.
+frameshift, merged in dbSNP into C<rs796296176>; it is counted as the C<ALT>
+that is C<REF> with one C<A> put in (C<A> to C<AA>, or C<AA> to C<AAA> as GRCh38
+writes it), so that an MNV or a symbolic C<< E<lt>INSE<gt> >> at that position is not taken
+for it, and matching by rs number looks for both numbers. Bases are compared
+regardless of case.
 
 =head3 Arguments
 
@@ -4083,7 +4179,10 @@ to overflow gives 1 rather than a NaN.
 =over
 
 =item * C<genotypes> (required): what C<hirisplex_genotypes> returned, or a plain hash
-ref of sample => { marker => 0, 1 or 2 }.
+ref of sample => { marker => 0, 1 or 2 }. A dosage may be any number from 0
+to 2, as imputation gives, and C<undef> is no genotype; anything else, C<NA>
+included, dies naming the sample and the marker. Only the markers the model
+uses are looked at.
 
 =item * C<model> (required): the table above, as a file name or a data frame.
 
@@ -4163,6 +4262,14 @@ label die, since they would be one row of the image.
 =item * C<active_site_aa>, C<query>: C<< { His395 =E<gt> 395, ... } >>, a dashed vertical line
 at each of these 1-based residue numbers of the sequence named by C<query>.
 A number below 1 dies.
+
+=item * C<tooltips>: 1 to give each residue a tooltip, which a browser shows when
+the pointer rests on it, naming the sequence, the residue and its number
+in that sequence, and the alignment column, as
+C<S.cerevisiae: Lys100, alignment column 105> (default 0). The sequence is
+named as it was given, not by its label. Only SVG carries tooltips, so
+C<filename> must end in C<.svg>. Each residue is an element of the SVG, so a
+large alignment makes a large file.
 
 =item * C<title>, C<xlabel>, C<ylabel>, C<threads>, C<clustal_args>: the plot title; the
 axis labels (default "Amino Acid Residue" and "Protein & Species");
@@ -4269,8 +4376,9 @@ C<msa_file> is accepted and ignored, for old callers.
 
 Writes an alignment as LaTeX tables with chosen residues coloured, and returns
 C<output_tex_file>, printing C<wrote> and that file name to STDOUT, the name in
-black on cyan when STDOUT is a terminal. Protein names are written so that
-LaTeX prints them as they are, C<_>, C<^>, C<{> and the like included.
+black on cyan when STDOUT is a terminal. Protein names and residues are
+written so that LaTeX prints them as they are, C<_>, C<^>, C<{>, C<|>, C<< E<lt> >> and the
+like included.
 
 =over
 
@@ -4288,7 +4396,10 @@ residue numbers are 1-based and a colour is an xcolor name or
 C<[r, g, b]>; a coloured column is coloured in every protein.
 
 =item * C<track>: a protein that gets a row under it showing its coloured residue
-numbers.
+numbers, each starting at its residue's column, or just after the number
+before it. A number that would run past the end of its block ends at the
+block's last column instead, and is left out only when it would then
+overwrite the number before it.
 
 =item * C<order>: an array ref of the proteins to show, top to bottom (default:
 sorted, ignoring case).

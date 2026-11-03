@@ -171,21 +171,33 @@ is sex_check(vcf => $plain, cutoff => 3)->{F}{sex}, 'male', 'and one below it ma
 	is scalar(@none), 0, 'and no warning for a VCF with X';
 }
 
+# A GT that ends in its separator, "1/" or "0|", has lost its second allele and
+# is missing. It used to be read as the haploid call "1": a hom-ALT call on X,
+# and counted as haploid. The plain "1" beside it is the haploid call it is not.
+{
+	my $cut = spew('cut_gt.vcf', "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS\tH\n"
+		. join('', map { "chrX\t$_->[0]\t.\tA\tG\t.\t.\t.\tGT\t$_->[1]\t1\n" } [3000000, '1/'], [3000100, '0|'], [3000200, '/1']));
+	my $r;
+	warnings_of(sub { $r = sex_check(vcf => $cut) });
+	is_deeply [@{ $r->{H} }{qw(x_haploid x_hom_alt x_missing)}], [3, 3, 0], 'a haploid "1" on X is counted haploid hom-ALT';
+	is_deeply [@{ $r->{S} }{qw(x_haploid x_hom_alt x_hom_ref x_missing)}], [0, 0, 0, 3], '"1/", "0|" and "/1" are missing, not haploid calls';
+}
+
 my $hdr = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tA\tB\n";
 my $x = "chrX\t3000000\t.\tA\tG\t.\t.\t.\tGT";
 foreach my $case (
-	["##fileformat=VCFv4.2\n", qr/^vcf_read: \S+ has no #CHROM line, so it isn't a VCF/, 'no #CHROM line'],
-	["$x\t0/1\t0/1\n$hdr", qr/^vcf_line: \S+ line 1 is a record, but no #CHROM line has come before it/, 'a record before #CHROM'],
-	["$hdr$hdr", qr/^vcf_header: \S+ line 2 is a second #CHROM line/, 'two #CHROM lines'],
-	["#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tA\tA\n", qr/^vcf_header: \S+ names sample "A" twice in its #CHROM line/, 'a sample named twice, whose name was freed twice on perl 5.32.1 and older'],
-	["#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n", qr/^vcf_header: \S+ has no samples: its #CHROM line \(line 1\) ends at INFO or before/, 'no FORMAT'],
-	["#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\n", qr/^vcf_header: \S+ has no samples: its #CHROM line \(line 1\) ends at FORMAT/, 'FORMAT and no samples'],
-	["$hdr\nchrX\t3000000\t.\tA\tG\n", qr/^vcf_columns: \S+ line 3 has 5 columns, and a record needs 9 and a sample/, 'a record of 5 columns (after an empty line, which is skipped)'],
-	["$hdr$x\t0/1\n", qr/^vcf_sample: \S+ line 2 has 1 samples, and the #CHROM line names 2/, 'a record of too few samples'],
-	["$hdr$x\t0/1\t0/1\t0/1\n", qr/^vcf_samples_end: \S+ line 2 has more samples than the 2 its #CHROM line names/, 'a record of too many samples'],
-	["${hdr}chrX\t3e6\t.\tA\tG\t.\t.\t.\tGT\t0/1\t0/1\n", qr/^vcf_pos: \S+ line 2 has POS "3e6", which isn't a position/, 'a POS that is not a whole number'],
-	["${hdr}chrX\t\t.\tA\tG\t.\t.\t.\tGT\t0/1\t0/1\n", qr/^vcf_pos: \S+ line 2 has an empty POS/, 'an empty POS'],
-	["${hdr}chrX\t99999999999999999999999\t.\tA\tG\t.\t.\t.\tGT\t0/1\t0/1\n", qr/^vcf_pos: \S+ line 2 has POS "99999999999999999999999", which isn't a position/, 'a POS too big for a UV'],
+	["##fileformat=VCFv4.2\n", qr/^vcf_read: .+? has no #CHROM line, so it isn't a VCF/, 'no #CHROM line'],
+	["$x\t0/1\t0/1\n$hdr", qr/^vcf_line: .+? line 1 is a record, but no #CHROM line has come before it/, 'a record before #CHROM'],
+	["$hdr$hdr", qr/^vcf_header: .+? line 2 is a second #CHROM line/, 'two #CHROM lines'],
+	["#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tA\tA\n", qr/^vcf_header: .+? names sample "A" twice in its #CHROM line/, 'a sample named twice, whose name was freed twice on perl 5.32.1 and older'],
+	["#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n", qr/^vcf_header: .+? has no samples: its #CHROM line \(line 1\) ends at INFO or before/, 'no FORMAT'],
+	["#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\n", qr/^vcf_header: .+? has no samples: its #CHROM line \(line 1\) ends at FORMAT/, 'FORMAT and no samples'],
+	["$hdr\nchrX\t3000000\t.\tA\tG\n", qr/^vcf_columns: .+? line 3 has 5 columns, and a record needs 9 and a sample/, 'a record of 5 columns (after an empty line, which is skipped)'],
+	["$hdr$x\t0/1\n", qr/^vcf_sample: .+? line 2 has 1 samples, and the #CHROM line names 2/, 'a record of too few samples'],
+	["$hdr$x\t0/1\t0/1\t0/1\n", qr/^vcf_samples_end: .+? line 2 has more samples than the 2 its #CHROM line names/, 'a record of too many samples'],
+	["${hdr}chrX\t3e6\t.\tA\tG\t.\t.\t.\tGT\t0/1\t0/1\n", qr/^vcf_pos: .+? line 2 has POS "3e6", which isn't a position/, 'a POS that is not a whole number'],
+	["${hdr}chrX\t\t.\tA\tG\t.\t.\t.\tGT\t0/1\t0/1\n", qr/^vcf_pos: .+? line 2 has an empty POS/, 'an empty POS'],
+	["${hdr}chrX\t99999999999999999999999\t.\tA\tG\t.\t.\t.\tGT\t0/1\t0/1\n", qr/^vcf_pos: .+? line 2 has POS "99999999999999999999999", which isn't a position/, 'a POS too big for a UV'],
 ) {
 	my ($content, $re, $name) = @{ $case };
 	dies_like(sub { sex_check(vcf => spew('bad.vcf', $content)) }, $re, $name);
@@ -204,13 +216,13 @@ foreach my $case (
 	gzip(\$vcf, \$gzipped) or die $GzipError;
 	bzip2(\$vcf, \$bzipped) or die $Bzip2Error;
 	dies_like(sub { sex_check(vcf => spew('cut.vcf.gz', substr($gzipped, 0, length($gzipped) - 20))) },
-		qr/^sex_check: can't read \S+cut\.vcf\.gz: unexpected end of file/, 'a truncated .vcf.gz');
+		qr/^sex_check: can't read .+?cut\.vcf\.gz: unexpected end of file/, 'a truncated .vcf.gz');
 	dies_like(sub { sex_check(vcf => spew('cut.vcf.bz2', substr($bzipped, 0, length($bzipped) - 20))) },
-		qr/^sex_check: can't read \S+cut\.vcf\.bz2: unexpected end of file/, 'a truncated .vcf.bz2');
-	dies_like(sub { sex_check(vcf => spew('plain.vcf.gz', $vcf)) }, qr/^sex_check: can't read \S+plain\.vcf\.gz: /, 'an uncompressed .vcf.gz');
-	dies_like(sub { sex_check(vcf => spew('tiny.vcf.gz', 'x')) }, qr/^sex_check: can't read \S+tiny\.vcf\.gz: (?:it isn't gzip-compressed|Header Error: Minimum header size is 10 bytes)/,
+		qr/^sex_check: can't read .+?cut\.vcf\.bz2: unexpected end of file/, 'a truncated .vcf.bz2');
+	dies_like(sub { sex_check(vcf => spew('plain.vcf.gz', $vcf)) }, qr/^sex_check: can't read .+?plain\.vcf\.gz: /, 'an uncompressed .vcf.gz');
+	dies_like(sub { sex_check(vcf => spew('tiny.vcf.gz', 'x')) }, qr/^sex_check: can't read .+?tiny\.vcf\.gz: (?:it isn't gzip-compressed|Header Error: Minimum header size is 10 bytes)/,
 		'one too short to hold a gzip header, which IO::Uncompress::Gunzip 2.223 gives no error for, and 2.020 (perl 5.10.1) does');
-	dies_like(sub { sex_check(vcf => spew('plain.vcf.bz2', $vcf)) }, qr/^sex_check: can't read \S+plain\.vcf\.bz2: /, 'an uncompressed .vcf.bz2');
+	dies_like(sub { sex_check(vcf => spew('plain.vcf.bz2', $vcf)) }, qr/^sex_check: can't read .+?plain\.vcf\.bz2: /, 'an uncompressed .vcf.bz2');
 }
 
 SKIP: {

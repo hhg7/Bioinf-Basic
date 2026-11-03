@@ -422,7 +422,9 @@ cannot be installed on 5.10 (see below). `test.all.perls.pl` reads it from
 On 2026-10-07, `/home/con/perl5/perlbrew/perls/` held `perl-5.44.0` (the
 default), `perl-5.42.3` (threaded), `perl-5.32.1`, `perl-5.12.5` (long double),
 `perl-5.10.1`, `5.44.0-quadmath`, `5.44.0-i686` (32-bit, so `IV_MAX` is
-2147483647), and `5.16.3-thr-ld` (threaded, long double, older than 5.20).
+2147483647), and `5.16.3-thr-ld` (threaded, long double, older than 5.20). By
+2026-11-02 `perl-5.18.4` had been added; it has no Alien::Bioinf, so
+`test.all.perls.pl` will try to install it there.
 
 `./test.all.perls.pl` builds and tests against all of them, installing
 Alien::Bioinf into any perl that lacks it, and with `-p` against chosen ones.

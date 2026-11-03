@@ -25,6 +25,10 @@ use Cn::Bioinf qw(hirisplex_genotypes trait_predict);
 # and says so: HIrisPlex-S's own coefficients are not published, and this
 # distribution ships no model.
 #
+# The genotypes of the insertion and lower-case records near the end were
+# worked out by hand from the rules on 2026-11-02, and are what
+# t/data/hirisplex_reference.py printed for each of them that day.
+#
 # The CSV that hirisplex_genotypes writes is compared against
 # t/data/hirisplexs_template.csv, the webtool's own upload template,
 # downloaded from https://hirisplex.erasmusmc.nl/examples/hirisplexs.csv on
@@ -189,6 +193,34 @@ my $plain = trait_predict(genotypes => { X => { 'rs12913832_T' => 0, 'rs16891982
 foreach my $c (sort keys %{ $expect{C}{eye} }) {
 	cmp_ok abs($plain->{X}{eye}{p}{$c} - $expect{C}{eye}{$c}), '<', $tol,
 		"a plain hash of genotypes predicts eye $c as the same dosages do through hirisplex_genotypes";
+}
+
+# The MC1R 86insA (rs312262906, at b37 16:89985751) is counted only from an ALT
+# that is REF with one A put in, however the indel is anchored. Any ALT longer
+# than REF used to count, so an MNV or a symbolic <INS> was taken for it. And
+# bases are compared regardless of case, as CHROM is, where a lower-case REF or
+# ALT used to match nothing and leave the marker 0 copies. rs11547464, at
+# 16:89986091, counts A.
+{
+	my $n = 0;
+	my $one = sub {
+		my (@records) = @_;
+		my $file = catfile($dir, 'ins' . ++$n . '.vcf');
+		open my $fh, '>', $file or die "can't write $file: $!";
+		print {$fh} "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS\n";
+		print {$fh} join("\t", @{ $_ }[0, 1], '.', @{ $_ }[2, 3], '.', 'PASS', '.', 'GT', $_->[4]), "\n" foreach @records;
+		close $fh or die "can't write $file: $!";
+		hirisplex_genotypes(vcf => $file, build => 'b37', min_depth => 0, report => 0)->{S}{genotype};
+	};
+	is $one->([16, 89985751, 'AA', 'AAA', '1/1'])->{'rs312262906_A'}, 2, 'the insertion, anchored on AA, counts 2 copies of 1/1';
+	is $one->([16, 89985751, 'C', 'CA', '0/1'])->{'rs312262906_A'}, 1, 'and anchored on another base, 1 copy of 0/1';
+	is $one->([16, 89985751, 'A', 'AT,AA', '0/2'])->{'rs312262906_A'}, 1, 'and as the second ALT, after an insertion of T';
+	is $one->([16, 89985751, 'AC', 'GTT', '1/1'])->{'rs312262906_A'}, 0, 'an MNV longer than its REF is not the insertion, where it used to count 2';
+	is $one->([16, 89985751, 'A', '<INS>', '1/1'])->{'rs312262906_A'}, 0, 'nor is a symbolic <INS>';
+	is $one->([16, 89985751, 'A', 'AAA', '1/1'])->{'rs312262906_A'}, 0, 'nor an insertion of two As';
+	my $lower = $one->([16, 89985751, 'a', 'aa', '0/1'], [16, 89986091, 'a', 'g', '0/1']);
+	is $lower->{'rs312262906_A'}, 1, 'a lower-case insertion counts';
+	is $lower->{'rs11547464_A'}, 1, 'and a lower-case REF of the counted allele, where it used to count 0';
 }
 
 done_testing();

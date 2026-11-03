@@ -30,8 +30,9 @@ sub creator { my ($sub, $by) = @_; qr/\Q$FindBin::RealScript\E called using "$su
 my $by_py = qr/.+msa_plot\.py with Python [\d.]+\S* \(.+?\), matplotlib [\d.]+/;
 my $sha = qr/\(SHA-256 [0-9a-f]{64}\)/;
 # what _align_provenance says of an alignment of $fa, by a run of clustalo
-# that matched $cmd
-sub aligned { my ($cmd) = @_; qr/; from the FASTA file \Q$fa\E $sha of 4 sequences, written with its gaps stripped and the sequences numbered s1 to s4 to [^;]+ $sha, which Clustal Omega [\d.]+ from Alien::Bioinf [\d.]+ aligned into [^;]+ $sha \(with the names put back\), run as: [^;]*clustalo --in $cmd/ }
+# that matched $cmd; the last argument is single-quoted when it holds a space,
+# as a TMPDIR may
+sub aligned { my ($cmd) = @_; qr/; from the FASTA file \Q$fa\E $sha of 4 sequences, written with its gaps stripped and the sequences numbered s1 to s4 to [^;]+ $sha, which Clustal Omega [\d.]+ from Alien::Bioinf [\d.]+ aligned into [^;]+ $sha \(with the names put back\), run as: [^;]*clustalo --in $cmd'?/ }
 # an SVG's metadata, which should hold nothing but the date, format, type and Creator
 sub svg_dc { my ($svg) = @_; my ($md) = $svg =~ m{<metadata>(.*?)</metadata>}s; [sort $md =~ /<dc:(\w+)/g] }
 
@@ -186,6 +187,20 @@ foreach my $bad (
 	eval { plot_msa(%{ $bad->[0] }) };
 	like $@, $bad->[1], "plot_msa dies: $bad->[1]";
 }
+# "tooltips": one <title> per residue of the 4 sequences of $fa, which are 142,
+# 142, 142 and 713 residues long; S.cerevisiae's 100th is N (Asn), and its
+# column is read from the alignment the same call keeps.
+my ($tips_svg, $tips_aln) = (catfile($dir, 'tips.svg'), catfile($dir, 'tips.aln.fa'));
+plot_msa(fasta => $fa, filename => $tips_svg, 'msa_file' => $tips_aln, tooltips => 1, labels => { 'S.cerevisiae' => '$\it{S. cerevisiae}$' });
+my $tips = slurp($tips_svg);
+my @titles = $tips =~ m{<g id="cnbtip[0-9]+" pointer-events="all"><title>([^<]*)</title>}g;
+is scalar(@titles), 3 * 142 + 713, 'plot_msa with "tooltips": a tooltip on every residue, and none on a gap';
+like $tips, qr/; a tooltip on each of its 1139 residues/, 'which the Creator says';
+my $sc = fasta2hash($tips_aln)->{'S.cerevisiae'};
+my $col = do { my $n = 0; my $c = 0; foreach (split //, $sc) { $c++; last if $_ ne '-' && ++$n == 100 } $c };
+ok scalar(grep { $_ eq "S.cerevisiae: Asn100, alignment column $col" } @titles), "naming the sequence as given, not its label, the residue, its number and its column ($col)";
+unlike $msa_svg, qr/<title>|cnbtip/, 'whereas without "tooltips" there are none';
+
 foreach my $bad (
 	[{ 'output_file' => 'x.png' }, qr/needs "fasta" to align, or "tree_file" to draw/],
 	[{}, qr/needs "fasta" to align, or "tree_file" to draw/],
@@ -301,5 +316,19 @@ foreach my $bad (
 ) {
 	eval { clustal_view_residues(%{ $bad->[0] }) };
 	like $@, $bad->[1], "dies: $bad->[1]";
+}
+
+# A title, label or file name that starts with "-" reaches msa_plot.py as the
+# value of its option. argparse used to read it as an option instead and exit
+# 2 ("argument --t: expected one argument"), once clustalo had run.
+{
+	my $svg = catfile($dir, '-dash.svg');
+	my $r = eval { plot_msa(fasta => $fa, filename => $svg, title => '-log10', xlabel => '-x', ylabel => '--t') };
+	is $@, '', 'plot_msa: a title "-log10", an xlabel "-x" and a ylabel "--t" do not die';
+	like slurp($svg), qr/<svg.*titled "-log10"/s, 'plot_msa: and the image is written, titled as it was asked';
+	my $png = catfile($dir, '-tree.png');
+	eval { plot_phylo(fasta => $fa, 'output_file' => $png, title => '--l') };
+	is $@, '', 'plot_phylo: a title "--l" does not die';
+	is png($png), "\x89PNG\r\n\x1a\n", 'plot_phylo: and the image is written';
 }
 done_testing;

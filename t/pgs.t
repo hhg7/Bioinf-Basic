@@ -284,6 +284,23 @@ score_is pgs_score(vcf => $vcf, weights => $weights, match => 'id'), {
 		S => { alleles => 0, average => undef, mismatched => 0, missing => 1, score => 0, variants => 0 },
 	}, 'an empty GT is a missing call';
 }
+{
+	# A score whose only chromosome the VCF lacks. PLINK 2 then drops every
+	# record by --chr and exits 7 ("All 2 variant(s) in --vcf file excluded by
+	# --chr"), not 13, and pgs_score died of it rather than scoring every
+	# variant missing, as it does when only the positions are absent.
+	my @warned;
+	local $SIG{__WARN__} = sub { push @warned, $_[0] };
+	my $v = [
+		{ CHROM => '1', POS => 100, ID => 'rs1', REF => 'A', ALT => 'G', 'S1.GT' => '0/1', 'S2.GT' => '0/0' },
+		{ CHROM => '1', POS => 200, ID => 'rs2', REF => 'C', ALT => 'T', 'S1.GT' => '0/0', 'S2.GT' => '1/1' },
+	];
+	my $w = [{ chr_name => '2', chr_position => 100, effect_allele => 'G', effect_weight => 2 }];
+	my $empty = { alleles => 0, average => undef, mismatched => 0, missing => 1, score => 0, variants => 0 };
+	score_is pgs_score(vcf => $v, weights => $w), { S1 => $empty, S2 => $empty },
+		'a score on a chromosome the VCF lacks is every variant missing, and does not die of exit 7 from PLINK 2';
+	like $warned[0], qr/^pgs_score: none of the 1 variants of "weights" was found in "vcf"/, 'and it warns as any score that matches nothing';
+}
 
 # ---- warnings -------------------------------------------------------------------
 

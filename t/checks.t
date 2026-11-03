@@ -77,6 +77,21 @@ SKIP: {
 		qr/^_run: .+ failed: killed by signal 15/, 'a death by signal is reported as one, not as "exit 0"';
 }
 
+#  _plink2
+
+# A plink2 that never starts is reported with the reason system gave. Up to
+# 2026-11-02 $! was read after STDOUT and STDERR had been reopened, and the
+# reason given was theirs ("Inappropriate ioctl for device"). The reason
+# expected is the one perl gives for the same failed system, which is how this
+# perl words it.
+SKIP: {
+	my $nowhere = catfile($dir, 'no such dir', 'plink2');
+	my $want = do { no warnings 'exec'; system($nowhere) == -1 ? "$!" : undef };
+	skip "this perl's system does not return -1 for a program that is not there", 1 unless defined $want;
+	dies_like sub { Cn::Bioinf::_plink2('pgs_score', $nowhere, $dir, '--version') },
+		qr/^pgs_score: .+ failed \(it didn't start: \Q$want\E\)/, '_plink2: a plink2 that does not start is reported with the reason it did not';
+}
+
 #  undef file names
 
 # Up to 2026-10-07 the message interpolated the undef, which warned
@@ -107,6 +122,26 @@ foreach my $w (-1, 1.5, 'x') {
 my $report = '{"report":{"results":{"search":{"query_title":"q","hits":[]}}}}';
 dies_like sub { get_best_alignment_hit(spew('twice.json', qq({"BlastOutput2":[$report,$report]}))) },
 	qr/^get_best_alignment_hit: two queries in .+twice\.json are both titled "q"/, 'two queries of one title die rather than one being lost';
+# A file that is not BLAST's JSON used to die with JSON::MaybeXS's message or
+# perl's "Not a HASH reference", naming no function, or, for {}, return no
+# queries as though BLAST had found none.
+foreach my $case (
+	['', qr/^get_best_alignment_hit: .+empty\.json isn't JSON: /, 'an empty file'],
+	['{not json', qr/^get_best_alignment_hit: .+bad\.json isn't JSON: /, 'a file that is not JSON'],
+	['[1]', qr/^get_best_alignment_hit: .+array\.json isn't a BLAST report in JSON \(-outfmt 15\): it has no "BlastOutput2" array/, 'a JSON array'],
+	['{}', qr/^get_best_alignment_hit: .+object\.json isn't a BLAST report in JSON \(-outfmt 15\): it has no "BlastOutput2" array/, 'a JSON object of no report'],
+	['{"BlastOutput2":[1]}', qr/^get_best_alignment_hit: report 1 of .+nosearch\.json has no report\.results\.search/, 'a report with no search'],
+	['{"BlastOutput2":[{"report":{"results":{"search":{"hits":[]}}}}]}', qr/^get_best_alignment_hit: report 1 of .+noquery\.json names no query: it has no query_title or query_id/,
+		'a report with no query'],
+) {
+	my ($json, $re, $name) = @{ $case };
+	my ($file) = $re =~ /\.\+(\w+)\\\.json/;
+	dies_like sub { get_best_alignment_hit(spew("$file.json", $json)) }, $re, "get_best_alignment_hit: $name dies";
+}
+# A query with no title is named by its query_id, where it used to be named
+# "" with an "uninitialized" warning.
+is_deeply [keys %{ get_best_alignment_hit(spew('untitled.json', '{"BlastOutput2":[{"report":{"results":{"search":{"query_id":"Query_1","hits":[]}}}}]}')) }],
+	['Query_1'], 'get_best_alignment_hit: a query with no title is named by its query_id';
 
 #  pgs_score 
 
@@ -268,6 +303,18 @@ dies_like sub { get_best_alignment_hit(spew('twice.json', qq({"BlastOutput2":[$r
 	}
 }
 
+# The XSUB's own checks of what perl hands it, which relatedness never gets
+# wrong; they named XS_Cn__Bioinf__relatedness_own, __func__ in an XSUB, up to
+# 2026-11-02.
+{
+	dies_like sub { Cn::Bioinf::_relatedness_own([sub { undef }], [], 0) },
+		qr/^_relatedness_own: 1 readers for 0 files/, '_relatedness_own: names itself when its arrays differ in length';
+	my @sparse;
+	$sparse[1] = 'b.vcf'; # element 0 does not exist
+	dies_like sub { Cn::Bioinf::_relatedness_own([sub { undef }, sub { undef }], \@sparse, 0) },
+		qr/^_relatedness_own: file 0 has no reader/, '_relatedness_own: and when a file is missing';
+}
+
 #  concordance 
 
 # Added with concordance on 2026-10-19; t/concordance.t has the counts
@@ -314,6 +361,9 @@ foreach my $n (0, -1, 1.5, 'two') {
 		qr/^plot_msa: active site X must be a residue number, 1 or more, not "\Q$n\E"/, "active site $n dies, rather than counting from the end";
 }
 dies_like sub { plot_msa(%two, 'active_site_aa' => [1]) }, qr/^plot_msa: "active_site_aa" must be a hash ref/, 'active_site_aa must be a hash ref';
+dies_like sub { plot_msa(%two, tooltips => 'yes') }, qr/^plot_msa: "tooltips" must be 0 or 1, not "yes"/, 'tooltips "yes" dies';
+dies_like sub { plot_msa(%two, tooltips => 1) }, qr/^plot_msa: "tooltips" needs an SVG "filename", the only format that carries them, not "\Q$two{filename}\E"/,
+	'tooltips in a PNG dies';
 
 # Up to 2026-10-17 a wrong kind of reference died with perl's own "Not an
 # ARRAY reference" or "Can't use string", naming no function.
@@ -327,6 +377,27 @@ foreach my $case (
 ) {
 	dies_like $case->[0], $case->[1], "dies: $case->[1]";
 }
+# A sequence that is undef, a reference or empty is refused before clustalo
+# runs. Up to 2026-11-02 undef warned "uninitialized" and then died in
+# write_fasta, a reference was written as "ARRAY(0x...)" for clustalo to
+# align, and an empty one died in clustalo ("Sequence 's2' has 0 residues"),
+# none of them naming plot_msa; and a fasta that was neither a file nor a hash
+# ref named _ungapped_fasta.
+foreach my $case (
+	[{ a => 'MK', b => undef }, qr/^plot_msa: "fasta" sequence "b" must be a string of residues, not undef/, 'undef'],
+	[{ a => 'MK', b => [1] }, qr/^plot_msa: "fasta" sequence "b" must be a string of residues, not an ARRAY ref/, 'an ARRAY ref'],
+	[{ a => 'MK', b => '' }, qr/^plot_msa: "fasta" sequence "b" has no residues/, 'empty'],
+	[{ a => 'MK', b => '--.-' }, qr/^plot_msa: "fasta" sequence "b" has no residues/, 'only gaps'],
+	[[], qr/^plot_msa: "fasta" must be a FASTA file name or a hash ref of name => sequence, not an ARRAY ref/, 'an ARRAY ref for fasta'],
+) {
+	my ($fasta, $re, $name) = @{ $case };
+	my $warned = '';
+	local $SIG{__WARN__} = sub { $warned .= $_[0] };
+	dies_like sub { plot_msa(%two_noq, fasta => $fasta) }, $re, "plot_msa: a sequence that is $name dies";
+	is $warned, '', "plot_msa: with no warning first, for a sequence that is $name";
+}
+dies_like sub { msa_quality_table(fasta => { a => 'MK', b => '' }, filename => catfile($dir, 'q.png'), metric => 'evalue') },
+	qr/^msa_quality_table: "fasta" sequence "b" has no residues/, 'msa_quality_table: so does an empty sequence';
 
 # "fh" and "execute", as Matplotlib::Simple's plt takes them, are checked
 # before clustalo would run.
@@ -361,6 +432,12 @@ dies_like sub { msa_quality_table(%q, 'alignment_json' => []) },
 	qr/^msa_quality_table: "alignment_json" must be a file name or a hash ref, not an ARRAY ref/, 'and so does an alignment_json that is neither';
 dies_like sub { msa_quality_table(%q, order => ['E.f']) },
 	qr/^msa_quality_table: no pair of the sequences in "order" has a "evalue" value/, 'an order with nothing to draw dies';
+# a file of JSON that is not a BLAST report used to die with perl's "Not a HASH
+# reference", and one that is not JSON at all with JSON::MaybeXS's message
+dies_like sub { msa_quality_table(%q, 'alignment_json' => spew('q_array.json', '[1]')) },
+	qr/^msa_quality_table: "alignment_json" isn't a BLAST report in JSON \(-outfmt 15\): it has no "BlastOutput2" array/, 'an alignment_json of a JSON array dies';
+dies_like sub { msa_quality_table(%q, 'alignment_json' => spew('q_bad.json', '{not json')) },
+	qr/^msa_quality_table: .+q_bad\.json isn't JSON: /, 'and one that is not JSON';
 
 #  clustal_view_residues 
 
@@ -393,6 +470,46 @@ is slurp(catfile($dir, 'out.txt')), "wrote $tex\n", 'the "wrote" line has no col
 my $body = slurp($tex);
 like $body, qr/^\\textit\{a\\_b\\textasciicircum\{\}c\\textasciitilde\{\}d\} & /m, 'a name\'s _, ^ and ~ print as themselves';
 like $body, qr/^\\textit\{e\\\{f\\\}\} & /m, 'and so do its braces';
+{
+	# Up to 2026-11-02 |, < and > were left as they were, and print under
+	# LaTeX's default OT1 fonts as an em dash and an inverted ! and ?; and the
+	# residues were not escaped at all, so a % in one ended the line.
+	local *STDOUT; # for the "wrote" lines, which are not TAP
+	open STDOUT, '>', catfile($dir, 'quiet.txt') or die "can't send STDOUT to quiet.txt: $!";
+	my $odd = hash2fasta_file({ 'sp|P1|<x>' => 'MK%L#' }, catfile($dir, 'odd.aln.fa'));
+	clustal_view_residues('msa_file' => $odd, 'output_tex_file' => $tex);
+	like slurp($tex), qr/^\\textit\{sp\\textbar\{\}P1\\textbar\{\}\\textless\{\}x\\textgreater\{\}\} & \\texttt\{MK\\%L\\#\} & 3$/m,
+		'a name\'s |, < and > print as themselves, and so do a residue\'s % and #';
+}
+{
+	# A number in a block's last columns used to be left off the track row,
+	# and so did every number after it in that block; it now ends at the
+	# block's end. 9 and 10 in the second case cannot both fit, so 10 is left
+	# out and 9 kept.
+	local *STDOUT; # for the "wrote" lines, which are not TAP
+	open STDOUT, '>', catfile($dir, 'quiet.txt') or die "can't send STDOUT to quiet.txt: $!";
+	my $one = hash2fasta_file({ a => 'ACDEFGHIKLMN', b => 'ACDEFGHIKLMN' }, catfile($dir, 'track.aln.fa'));
+	my %t = ('msa_file' => $one, 'output_tex_file' => $tex, 'row_width' => 10, track => 'a');
+	clustal_view_residues(%t, 'color_residues' => { a => { 3 => 'red', 5 => 'blue', 10 => 'green', 11 => 'red' } });
+	my @track = slurp($tex) =~ /^\\textit\{a\} track & \\texttt\{([^}]*)\}/mg;
+	is_deeply \@track, ['--3-5---10', '11'], 'clustal_view_residues: a residue number in the last column of a block ends at the block\'s end';
+	clustal_view_residues(%t, 'color_residues' => { a => { 9 => 'red', 10 => 'green' } });
+	@track = slurp($tex) =~ /^\\textit\{a\} track & \\texttt\{([^}]*)\}/mg;
+	is_deeply \@track, ['--------9-', '--'], 'clustal_view_residues: and one that would overlap the number before it is left out';
+	# A tracked protein that "order" leaves out has no track row, and used to be
+	# counted as having one, so a table held more blocks than "split" said.
+	clustal_view_residues(%t, track => 'b', order => ['a'], 'row_width' => 4, split => 2);
+	my $tables = () = slurp($tex) =~ /\\begin\{table\}/g;
+	is $tables, 2, 'clustal_view_residues: three blocks at 2 a table are two tables when the tracked protein is not shown';
+	# a residue number that is not a number used to warn "isn't numeric in
+	# sort" before it was refused
+	my $warned = '';
+	local $SIG{__WARN__} = sub { $warned .= $_[0] };
+	dies_like sub { clustal_view_residues(%t, 'color_residues' => { a => { abc => 'red', 2 => 'blue' } }) },
+		qr/^clustal_view_residues: a residue of a in "color_residues" must be a residue number, 1 or more, not "abc"/,
+		'clustal_view_residues: a residue number "abc" dies';
+	is $warned, '', 'clustal_view_residues: with no warning from sorting it first';
+}
 
 # ---- hirisplex_genotypes and trait_predict
 #
@@ -445,7 +562,16 @@ like $body, qr/^\\textit\{e\\\{f\\\}\} & /m, 'and so do its braces';
 		like $warned, qr/^hirisplex_genotypes: "vcf" .* holds none of the 41 HIrisPlex-S markers/,
 			'hirisplex_genotypes: and it says so, rather than returning an empty answer quietly';
 	}
+	# The panel's insertion is checked to count one base, as every other marker
+	# is; with none it used to be stored as base 0 and never counted.
+	dies_like sub { Cn::Bioinf::_hirisplex_dosage(sub { undef }, 'x.vcf', 0, [[16, 89985751, '', 1, 'rs312262906', 0]], 1, 0) },
+		qr/^hps_panel: entry 0 of the panel counts "", which isn't one base/, 'hirisplex_genotypes: a panel insertion of no base dies';
+	dies_like sub { Cn::Bioinf::_hirisplex_dosage(sub { undef }, 'x.vcf', 0, [[16, 89985751, 'A', 1, 'rs312262906', 0]], 1, 0) },
+		qr/^vcf_read: x\.vcf has no #CHROM line/, 'hirisplex_genotypes: and one of a base gets as far as reading the VCF';
 
+	# a model that uses one marker, for checking the dosages given for it
+	my $dose_model = [{ trait => 'eye', category => 'blue', marker => 'rs12913832_T', beta => 1 },
+		{ trait => 'eye', category => 'brown', marker => '(intercept)', beta => 0 }];
 	my @bad_model = (
 		[[genotypes => 'x', model => $model], qr/^trait_predict: "genotypes" must be a hash ref of sample => genotypes, as hirisplex_genotypes returns, not "x"/, 'genotypes that are a string'],
 		[[genotypes => {}, model => $model], qr/^trait_predict: "genotypes" has no samples/, 'no samples'],
@@ -460,6 +586,17 @@ like $body, qr/^\\textit\{e\\\{f\\\}\} & /m, 'and so do its braces';
 			{ trait => 'eye', category => 'blue', marker => 'm', beta => 2 }]],
 			qr/^trait_predict: row 2 of "model" gives eye category "blue" a second beta for m/, 'a marker given two betas'],
 		[[genotypes => { S => {} }, model => $model, force => 2], qr/^trait_predict: "force" must be 0 or 1, not "2"/, 'a force of 2'],
+		# a dosage used to be multiplied in whatever it held, so that "NA" was a
+		# called genotype of 0 copies, with only perl's "isn't numeric" warning
+		[[genotypes => { S => { 'rs12913832_T' => 'NA' } }, model => $dose_model],
+			qr/^trait_predict: "genotypes" sample "S" has rs12913832_T "NA", which isn't a dosage from 0 to 2; a missing genotype is undef/,
+			'a dosage of "NA", rather than counting it 0 copies'],
+		[[genotypes => { S => { genotype => { 'rs12913832_T' => 3 } } }, model => $dose_model],
+			qr/^trait_predict: "genotypes" sample "S" has rs12913832_T "3", which isn't a dosage from 0 to 2/, 'a dosage of 3'],
+		[[genotypes => { S => { 'rs12913832_T' => -1 } }, model => $dose_model],
+			qr/^trait_predict: "genotypes" sample "S" has rs12913832_T "-1", which isn't a dosage/, 'a dosage of -1'],
+		[[genotypes => { S => { 'rs12913832_T' => [] } }, model => $dose_model],
+			qr/^trait_predict: "genotypes" sample "S" has rs12913832_T an ARRAY ref, which isn't a dosage/, 'a dosage that is a ref'],
 		[[genotypes => { S => {} }, model => $model, shade => 1], qr/^trait_predict: doesn't know "shade"; it takes force, genotypes, model, report/, 'an unknown option'],
 	);
 	foreach my $case (@bad_model) {
@@ -471,6 +608,13 @@ like $body, qr/^\\textit\{e\\\{f\\\}\} & /m, 'and so do its braces';
 		model => [{ trait => 't', category => 'only', marker => '(intercept)', beta => '-3' }], report => 0);
 	is $one->{S}{t}{p}{only}, 1, 'trait_predict: a model of one category gives it a probability of 1';
 	is $one->{S}{t}{call}, 'only', 'trait_predict: and calls it';
+	# A dosage between 0 and 2, as imputation gives, is a dosage; one the model
+	# does not use is not looked at. The probability differs from the formula's
+	# by 0 on perl 5.44.0; _softmax takes the larger predictor out first, which
+	# can move the last bit, and 1e-12 is t/hirisplex.t's bound for the same.
+	my $frac = trait_predict(genotypes => { S => { 'rs12913832_T' => '1.5', other => 'NA' } }, model => $dose_model, report => 0);
+	cmp_ok abs($frac->{S}{eye}{p}{blue} - exp(1.5) / (exp(1.5) + 1)), '<', 1e-12, 'trait_predict: a dosage of 1.5 is multiplied in';
+	is $frac->{S}{eye}{called}, 1, 'trait_predict: and is a called genotype';
 }
 
 # ---- pdb_search
@@ -506,6 +650,86 @@ like $body, qr/^\\textit\{e\\\{f\\\}\} & /m, 'and so do its braces';
 	}
 	# the positive sentinel: a good call does get as far as asking RCSB
 	dies_like sub { pdb_search(seq => $seq) }, qr/^the network was used/, 'pdb_search: a good call reaches RCSB';
+}
+
+#  the XSUBs that read a VCF, when the reader grows perl's stack
+#
+# Up to 2026-10-26 each XSUB that reads a VCF through a perl callback pushed
+# its results with the stack pointer it took on entry. A callback that grew
+# perl's stack moved it, and the results went to freed memory: _vcf_samples
+# returned nothing instead of its samples, found by review. Each XSUB is run
+# in a child perl, where the stack is still small, once with a reader that
+# calls a sub with 2,000,000 arguments (16 MB of stack on a 64-bit perl, which
+# glibc's malloc cannot grow in place from its heap, so the stack moves), and
+# once with one that does not. The expected value is the second run's: what
+# each XSUB counts is tested in t/sex.t, t/parent.t, t/relatedness.t,
+# t/concordance.t and t/hirisplex.t, and this checks only that a moved stack
+# does not change it.
+{
+	my $two = spew('stack.two.vcf', join '', map { join("\t", @{ $_ }) . "\n" }
+		['##fileformat=VCFv4.2'],
+		['#CHROM', qw(POS ID REF ALT QUAL FILTER INFO FORMAT A B)],
+		[qw(1 100 rs1 A G . PASS . GT:DP 0/1:30 1/1:30)],
+		[qw(1 200 rs2 C T . PASS . GT:DP 0/0:30 0/1:30)],
+		[qw(X 5000000 rs3 G A . PASS . GT:DP 1/1:30 0/1:30)]);
+	my $one_a = spew('stack.a.vcf', "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tA\n"
+		. "1\t100\trs1\tA\tG\t.\tPASS\t.\tGT\t0/1\n");
+	my $one_b = spew('stack.b.vcf', "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tB\n"
+		. "1\t100\trs1\tA\tG\t.\tPASS\t.\tGT\t1/1\n");
+	# The child's reader hands over 16 bytes at a time, so that lines span
+	# blocks; $grown is 1 once its first call has grown the stack, for the
+	# sentinel.
+	my $child = spew('stack.pl', <<'CHILD');
+use strict;
+use warnings FATAL => 'all';
+use Storable ();
+use Cn::Bioinf ();
+my ($case, $grow, $out, $two, $one_a, $one_b) = @ARGV;
+my $grown = 0;
+sub deep { scalar @_ }
+sub reader {
+	my ($file) = @_;
+	open my $fh, '<:raw', $file or die "$file: $!";
+	sub {
+		if ($grow && !$grown) {
+			deep((1) x 2_000_000);
+			$grown = 1;
+		}
+		my $n = read $fh, my $block, 16;
+		die "$file: $!" unless defined $n;
+		$n ? $block : undef;
+	};
+}
+my %call = (
+	vcf_samples      => sub { Cn::Bioinf::_vcf_samples(reader($two), $two) },
+	sex_tally        => sub { Cn::Bioinf::_sex_tally(reader($two), $two, 0) },
+	parent_one       => sub { Cn::Bioinf::_parent_one(reader($two), $two, 0, 'A', 'B') },
+	parent_own       => sub { Cn::Bioinf::_parent_own(reader($one_a), $one_a, reader($one_b), $one_b, 0) },
+	relatedness_one  => sub { Cn::Bioinf::_relatedness_one(reader($two), $two, 0) },
+	relatedness_own  => sub { Cn::Bioinf::_relatedness_own([reader($one_a), reader($one_b)], [$one_a, $one_b], 0) },
+	concordance      => sub { Cn::Bioinf::_concordance(reader($two), $two, reader($two), $two, ['A', 'B'], 0, 1) },
+	hirisplex_dosage => sub { Cn::Bioinf::_hirisplex_dosage(reader($two), $two, 0, [[1, 100, 'G', 0, 'rs1', 0], [1, 200, 'T', 0, 'rs2', 1]], 2, 0) },
+);
+my @result = $call{$case}->();
+Storable::nstore({ grown => $grown, result => \@result }, $out);
+CHILD
+	require Storable;
+	# each XSUB and how many values it returns
+	my @cases = ([vcf_samples => 1], [sex_tally => 3], [parent_one => 12], [parent_own => 12],
+		[relatedness_one => 3], [relatedness_own => 3], [concordance => 2], [hirisplex_dosage => 3]);
+	foreach my $case (@cases) {
+		my ($name, $values) = @{ $case };
+		my %run; # 0 = the stack left alone, 1 = grown by the reader
+		foreach my $grow (0, 1) {
+			my $out = catfile($dir, "stack.$name.$grow");
+			my $status = system($^X, @inc, $child, $name, $grow, $out, $two, $one_a, $one_b);
+			is $status, 0, "_$name: the child perl exits 0 " . ($grow ? 'with' : 'without') . ' the stack grown';
+			$run{$grow} = $status == 0 ? Storable::retrieve($out) : { grown => -1, result => [] };
+		}
+		is $run{1}{grown}, 1, "_$name: the reader grew the stack";
+		is scalar @{ $run{0}{result} }, $values, "_$name: returns $values values";
+		is_deeply $run{1}{result}, $run{0}{result}, "_$name: returns the same when the reader grows the stack, rather than losing its results";
+	}
 }
 
 done_testing;

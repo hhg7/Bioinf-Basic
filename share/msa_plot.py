@@ -7,36 +7,66 @@ from Alien::Bioinf. The
 alignment drawing is ~/Scripts/HitList/scripts/x.my.align.py, cut down to what
 it uses; that script was itself derived from CIAlign (Tumescheit, Firth & Brown,
 PeerJ 2022, MIT licence), whose colour-blind-safe "CBS" palette and RasMol-based
-residue colouring are copied below as flat tables. The tree is read and drawn by
+residue colouring are copied below as flat tables. The alignment's tooltips
+(--tips) are SVG <title> elements, which a browser shows on hovering, put on an
+invisible cell over each residue as matplotlib's "SVG Tooltip" gallery example
+does: each cell is given an id, and its <title> is added to the SVG after it is
+written. The tree is read and drawn by
 Biopython's Bio.Phylo (Cock et al., Bioinformatics 2009), onto matplotlib axes;
 it replaces the R/ggtree script bioinf.pm used to write. The table follows the
 script Matplotlib::Simple 0.317's colored_table wrote for msa_quality_table
 before this took its place: a gist_rainbow-coloured matplotlib table over a
 hidden imshow that carries the colorbar, with empty cells grey.
 """
-import argparse, io, json, platform, sys
+import argparse, io, json, platform, re, sys
+from xml.sax.saxutils import escape
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
+from matplotlib.patches import Rectangle
 from matplotlib.colors import ListedColormap, LogNorm, Normalize
 
 ap = argparse.ArgumentParser(description=__doc__)
-ap.add_argument('--f', help='aligned FASTA to draw')
-ap.add_argument('--tree', help='newick tree to draw instead')
-ap.add_argument('--o', help='output image (required)')
-ap.add_argument('--t', default='', help='title')
-ap.add_argument('--x', default='Amino Acid Residue', help='x-axis label')
-ap.add_argument('--y', default='Protein & Species', help='y-axis label')
-ap.add_argument('--s', help='JSON {label: 0-based alignment column} of vertical lines to draw')
-ap.add_argument('--l', help='JSON {tip name: label} for --tree')
-ap.add_argument('--table', help='JSON file of the table to draw instead: rows, cols, cells (null for none), vmin, vmax, log, numbers, title, cblabel')
-ap.add_argument('--c', default='Cn::Bioinf', help='Creator metadata: the script and sub that called this')
-ap.add_argument('--p', help='JSON array of further provenance clauses to end the Creator with: the inputs and the commands that made them')
-ap.add_argument('--quiet', action='store_true', help="don't print 'wrote' and the output file; the caller prints its own")
-ap.add_argument('--argfile', help='a JSON array of every other argument, in place of them on the command line')
-a = ap.parse_args()
+valued = set()  # the options that take a value, which joined() joins to it
+def option(*names, **kw):
+	action = ap.add_argument(*names, **kw)
+	if action.nargs != 0:  # 0 is a flag, such as --quiet
+		valued.update(action.option_strings)
+option('--f', help='aligned FASTA to draw')
+option('--tree', help='newick tree to draw instead')
+option('--o', help='output image (required)')
+option('--t', default='', help='title')
+option('--x', default='Amino Acid Residue', help='x-axis label')
+option('--y', default='Protein & Species', help='y-axis label')
+option('--s', help='JSON {label: 0-based alignment column} of vertical lines to draw')
+option('--tips', help='JSON array of the sequence names, top row first, to name in a tooltip on each residue; --o must be .svg')
+option('--l', help='JSON {tip name: label} for --tree')
+option('--table', help='JSON file of the table to draw instead: rows, cols, cells (null for none), vmin, vmax, log, numbers, title, cblabel')
+option('--c', default='Cn::Bioinf', help='Creator metadata: the script and sub that called this')
+option('--p', help='JSON array of further provenance clauses to end the Creator with: the inputs and the commands that made them')
+option('--quiet', action='store_true', help="don't print 'wrote' and the output file; the caller prints its own")
+option('--argfile', help='a JSON array of every other argument, in place of them on the command line')
+def joined(argv):
+	"""argv with each option that takes a value joined to it, as --t=VALUE.
+
+	Given as two arguments, a value that starts with "-", such as a title of
+	"-log10" or a file named "-x.svg", is read by argparse as an option, and the
+	option before it then has no value. Perl always passes the two together, so
+	the pairs are taken in order and a value is never mistaken for an option,
+	even one that is itself "--t".
+	"""
+	out, i = [], 0
+	while i < len(argv):
+		if argv[i] in valued and i + 1 < len(argv):
+			out.append(argv[i] + '=' + argv[i + 1])
+			i += 2
+		else:
+			out.append(argv[i])
+			i += 1
+	return out
+a = ap.parse_args(joined(sys.argv[1:]))
 # msa_quality_table passes everything through --argfile, because perl's
 # system(LIST) on Windows does not escape a '"' inside an argument, and the JSON
 # options and the Creator ("... called using \"plot_msa\" ...") are full of
@@ -44,7 +74,7 @@ a = ap.parse_args()
 # sys.argv itself, so they need no command line at all.
 if a.argfile:
 	with open(a.argfile, encoding='utf-8') as fh:
-		a = ap.parse_args(json.load(fh))
+		a = ap.parse_args(joined(json.load(fh)))
 # checked here rather than with required=True, which would refuse --argfile alone
 if not a.o:
 	ap.error('--o is required')
@@ -55,15 +85,21 @@ AA = dict(D='#a22c49', E='#a22c49', C='#c9c433', M='#c9c433', K='#0038a2', R='#0
 	T='#e57700', F='#589aab', Y='#589aab', N='#50d3cb', Q='#50d3cb', G='#eae2ea', L='#56ae6c', V='#56ae6c',
 	I='#56ae6c', A='#888988', W='#89236a', H='#e669ca', P='#ffc4a9', X='#000000', B='#936e23', Z='#936e23',
 	J='#936e23', U='#936e23', O='#936e23', **{'-': '#FFFFFF', '*': '#FFFFFF'})
+# the IUPAC-IUBMB three-letter names of the one-letter codes in AA, for the
+# tooltips; '*' is a stop codon
+AA3 = dict(A='Ala', R='Arg', N='Asn', D='Asp', C='Cys', Q='Gln', E='Glu', G='Gly', H='His', I='Ile', L='Leu',
+	K='Lys', M='Met', F='Phe', P='Pro', S='Ser', T='Thr', W='Trp', Y='Tyr', V='Val', B='Asx', Z='Glx', J='Xle',
+	U='Sec', O='Pyl', X='Xaa', **{'*': 'Ter'})
 NT = dict(A='#56ae6c', G='#c9c433', T='#a22c49', C='#0038a2', N='#6979d3', U='#a22c49',
 	**{c: '#6979d3' for c in 'RYSWKMBDHVX'}, **{'-': '#FFFFFF'})
 
-def save(fig, title, also=(), notes=()):
+def save(fig, title, also=(), notes=(), tips=None):
 	"""Writes the figure to --o, with its whole provenance as one Creator line,
 	as Matplotlib::Simple 0.319 writes it: --c, this script and the versions
 	it ran with, then the title (title, or None for none), the
 	--p clauses, and notes, a list of this script's own. also: further
-	libraries that drew the image, as "name version"."""
+	libraries that drew the image, as "name version". tips: {gid: text} of
+	the artists to give a tooltip, for an SVG only."""
 	# the Python and matplotlib versions are read here, not by the perl that
 	# wrote a.c, which never sees this interpreter, after Matplotlib::Simple
 	creator = ', '.join([a.c + ', drawn by ' + __file__ + ' with Python ' + platform.python_version()
@@ -74,7 +110,18 @@ def save(fig, title, also=(), notes=()):
 	# in jpg and the rest
 	fmt = a.o.rsplit('.', 1)[-1].lower()
 	md = {'Creator': creator} if fmt in ('svg', 'png', 'pdf', 'ps', 'eps') else None
-	fig.savefig(a.o, bbox_inches='tight', pad_inches=0.1, metadata=md)
+	if tips:
+		buf = io.BytesIO()
+		fig.savefig(buf, format='svg', bbox_inches='tight', pad_inches=0.1, metadata=md)
+		# matplotlib writes an artist's gid as the id of the <g> around it. A
+		# cell is drawn with no fill, which a browser takes to be no target
+		# for the pointer unless pointer-events is "all".
+		svg = re.sub(r'<g id="(cnbtip[0-9]+)">', lambda m: '<g id="' + m.group(1) + '" pointer-events="all"><title>'
+			+ escape(tips[m.group(1)]) + '</title>', buf.getvalue().decode('utf-8'))
+		with open(a.o, 'w', encoding='utf-8', newline='') as fh:
+			fh.write(svg)
+	else:
+		fig.savefig(a.o, bbox_inches='tight', pad_inches=0.1, metadata=md)
 	# closed, since a script given as "fh" can draw many images in one process
 	plt.close(fig)
 	if not a.quiet:
@@ -122,6 +169,26 @@ def draw_alignment():
 		ax.spines[side].set_visible(False)
 	f.suptitle(a.t, fontsize=11)
 	ax.imshow(num, cmap=ListedColormap([pal[c] for c in present]), aspect='auto', interpolation='nearest')
+	tips, notes = {}, []
+	if a.tips:
+		if not a.o.lower().endswith('.svg'):
+			raise SystemExit('--tips needs an SVG --o, the only format that carries tooltips, not ' + a.o)
+		limits = ax.get_xlim(), ax.get_ylim()
+		for i, (name, seq) in enumerate(zip(json.loads(a.tips), seqs)):
+			# the first sequence is the bottom row, at y = height - 1
+			y, n = height - 1 - i, 0
+			for col, c in enumerate(seq):
+				if c in '-.':
+					continue
+				n += 1
+				gid = 'cnbtip' + str(len(tips))
+				cell = Rectangle((col - 0.5, y - 0.5), 1, 1, facecolor='none', edgecolor='none', gid=gid)
+				ax.add_patch(cell)
+				tips[gid] = name + ': ' + (AA3.get(c, c) if pal is AA else c) + str(n) + ', alignment column ' + str(col + 1)
+		# the cells would otherwise widen the axes by autoscaling
+		ax.set_xlim(*limits[0])
+		ax.set_ylim(*limits[1])
+		notes.append('a tooltip on each of its ' + str(len(tips)) + ' residues')
 	ax.set_yticks(list(range(height))[::-1])
 	ax.set_yticklabels(names, fontsize=10)
 	ax.set_xlabel(a.x)
@@ -136,7 +203,7 @@ def draw_alignment():
 		ax.add_collection(LineCollection([[(col, height), (col, 0)] for col in sites.values()],
 			colors='black', linewidth=3, alpha=0.5, linestyle='dashed'))
 		adjust_text(texts, only_move={'text': 'x', 'static': 'x', 'explode': 'x', 'pull': 'x'})
-	save(f, a.t)
+	save(f, a.t, notes=notes, tips=tips)
 
 def draw_tree():
 	try:

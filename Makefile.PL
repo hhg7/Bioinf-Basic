@@ -33,6 +33,11 @@ WriteMakefile(
 	NAME             => 'Cn::Bioinf',
 	DISTNAME         => 'Cn-Bioinf',
 	VERSION_FROM     => 'lib/Cn/Bioinf.pm',
+	# Only the module. Without PM, MakeMaker also installs every *.pm and *.pl in
+	# the root, which holds the maintainer's scratch scripts: on 2026-11-02 a
+	# build here put md2pod.pl and nine others in blib/lib/Cn/. The tarball has
+	# none, since [PruneFiles] leaves them out.
+	PM               => { 'lib/Cn/Bioinf.pm' => '$(INST_LIB)/Cn/Bioinf.pm' },
 	ABSTRACT         => 'FASTA I/O in XS, BLAST hit ranking, and alignment plots and tables', # the POD has no NAME section; PodWeaver makes one from '# ABSTRACT:'
 	AUTHOR           => 'David E. Condon <dcondon@uidaho.edu>',
 	LICENSE          => 'perl_5',

@@ -172,6 +172,32 @@ like $out, qr/^1CH4_1 +X-ray +2\.50 A +61\.0% +99% +9\.7e-47 +168 +Homo 4-mer /m
 	eval { replay($err, seq => $alpha, report => 0) };
 	like $@, qr/^pdb_search: https:\/\/data\.rcsb\.org\/graphql said nothing of 1BZ1_1 and the rest: boom/, 'a GraphQL error dies with its message';
 }
+# A search answer that is JSON but not a search result used to die with perl's
+# "Not a HASH reference" or "Not an ARRAY reference", naming no function, and
+# one with no total_count gave an "uninitialized" warning as the report used it.
+foreach my $case (
+	[[1], 'a JSON array'],
+	[{ total_count => 1 }, 'an object with no result_set'],
+	[{ result_set => [] }, 'a result_set with no total_count'],
+	[{ total_count => 1, result_set => [1] }, 'a hit that is not an object'],
+) {
+	my ($answer, $name) = @{ $case };
+	eval { replay([{ answer => $answer }], seq => $alpha) };
+	like $@, qr/^pdb_search: https:\/\/search\.rcsb\.org\/rcsbsearch\/v2\/query answered with JSON that isn't a search result: /, "$name dies";
+}
+# A match with an alignment_length or a query_length of 0, or none, used to
+# die of "Illegal division by zero"; its pident or query_cover is undef, and
+# the report shows "-".
+{
+	my $zero = JSON::MaybeXS::decode_json(JSON::MaybeXS::encode_json($recorded));
+	my $m = $zero->[0]{answer}{result_set}[0]{services}[0]{nodes}[0]{match_context}[0];
+	@{ $m }{qw(alignment_length query_length)} = (0, undef);
+	my ($g, undef, undef, $o, $w) = replay($zero, seq => $alpha);
+	is_deeply [@{ $g->[0] }{qw(id pident query_cover bit_score)}], ['1BZ1_1', undef, undef, 291],
+		'an alignment_length of 0 and no query_length leave pident and query_cover undef, and the rest of the hit';
+	like $o, qr/^1BZ1_1 +X-ray +1\.59 A +- +- +1\.6e-89 +291 /m, 'and the report shows them as "-"';
+	is $w, '', 'with no warning';
+}
 
 # ---- _rcsb_post, with HTTP::Tiny standing in for the network
 
