@@ -5,14 +5,17 @@ Makefile
 Makefile.old
 MYMETA.*
 pm_to_blib
-Basic.bs
-Basic.c
-Basic.o
+Bioinf.bs
+Bioinf.c
+Bioinf.o
 # dzil build and release products
 /.build/
-/Bioinf-Basic-*
-# what md2pod.pl writes besides the POD in lib/Bioinf/Basic.pm
+/Cn-Bioinf-*
+# what md2pod.pl writes besides the POD in lib/Cn/Bioinf.pm
 /read.me.pod
+# what pgs.score.pl writes: a person's polygenic score beside 1000 Genomes',
+# which is that person's to publish and so stays out of the repository
+/pgs.*.tsv
 # what examples.pl writes
 /phylo.svg
 /DEG20010421.aln.fa
