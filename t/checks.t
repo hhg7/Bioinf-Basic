@@ -874,4 +874,114 @@ CHILD
 	}
 }
 
+#  the sequence functions (2026-11-11): the arguments each one refuses
+
+{
+	my %with_seq = (
+		complement => sub { complement(@_) }, reverse_complement => sub { reverse_complement(@_) }, transcribe => sub { transcribe(@_) },
+		back_transcribe => sub { back_transcribe(@_) }, translate => sub { translate(@_) }, translate_six_frames => sub { translate_six_frames(@_) },
+		find_orfs => sub { find_orfs(@_) }, gc_content => sub { gc_content(@_) }, kmer_count => sub { kmer_count($_[0], 3) },
+		molecular_weight => sub { molecular_weight(@_) }, isoelectric_point => sub { isoelectric_point(@_) },
+		protein_charge => sub { protein_charge($_[0], 7) }, subseq => sub { subseq($_[0], 1, 2) }, motif_search => sub { motif_search($_[0], 'ACGT') },
+	);
+	foreach my $f (sort keys %with_seq) {
+		dies_like(sub { $with_seq{$f}->(undef) }, qr/^\Q$f\E: the sequence must be a string, not undef/, "$f: an undef sequence dies");
+		dies_like(sub { $with_seq{$f}->(['ACGT']) }, qr/^\Q$f\E: the sequence must be a string, not an ARRAY ref/, "$f: a sequence that is a reference dies");
+	}
+	# those that take name => value pairs after the sequence
+	my %with_options = (
+		complement => sub { complement('ACGT', @_) }, reverse_complement => sub { reverse_complement('ACGT', @_) },
+		translate => sub { translate('ATGAAA', @_) }, translate_six_frames => sub { translate_six_frames('ATGAAA', @_) },
+		find_orfs => sub { find_orfs('ATGAAA', @_) }, gc_content => sub { gc_content('ACGT', @_) }, kmer_count => sub { kmer_count('ACGT', 2, @_) },
+		molecular_weight => sub { molecular_weight('ACGT', @_) }, motif_search => sub { motif_search('ACGT', 'CG', @_) },
+	);
+	foreach my $f (sort keys %with_options) {
+		dies_like(sub { $with_options{$f}->(nonesuch => 1) }, qr/^\Q$f\E: doesn't know "nonesuch"; it takes /, "$f: an option it does not have dies");
+		dies_like(sub { $with_options{$f}->('type') }, qr/^\Q$f\E: takes name => value pairs, and was given an odd number of arguments/, "$f: an option with no value dies");
+		dies_like(sub { $with_options{$f}->({ type => 'DNA' }) }, qr/^\Q$f\E: takes name => value pairs, not a hash ref/, "$f: a hash ref of options dies");
+	}
+	dies_like(sub { transcribe('ACGT', type => 'RNA') }, qr/^transcribe: takes one argument, the sequence/, 'transcribe: a second argument dies');
+	dies_like(sub { back_transcribe('ACGU', 1) }, qr/^back_transcribe: takes one argument, the sequence/, 'back_transcribe: a second argument dies');
+	dies_like(sub { isoelectric_point('MK', 7) }, qr/^isoelectric_point: takes one argument, the sequence/, 'isoelectric_point: a second argument dies');
+	dies_like(sub { protein_charge('MK', 7, 8) }, qr/^protein_charge: takes two arguments, the sequence and the pH/, 'protein_charge: a third argument dies');
+	dies_like(sub { subseq('ACGT', 1, 2, 3) }, qr/^subseq: takes the sequence, where to start and where to end/, 'subseq: a fourth argument dies');
+	dies_like(sub { assembly_stats(['ACGT'], 1) }, qr/^assembly_stats: takes one argument, the sequences/, 'assembly_stats: a second argument dies');
+
+	dies_like(sub { complement('ACGT', type => 'protein') }, qr/^complement: "type" must be "DNA" or "RNA", not "protein"/, 'complement: a protein dies');
+	dies_like(sub { reverse_complement('ACGT', type => []) }, qr/^reverse_complement: "type" must be "DNA" or "RNA", not an ARRAY ref/, 'reverse_complement: a "type" that is a reference dies');
+	dies_like(sub { molecular_weight('ACGT', type => 'lipid') }, qr/^molecular_weight: "type" must be "DNA", "RNA" or "protein", not "lipid"/, 'molecular_weight: a "type" it does not know dies');
+	dies_like(sub { molecular_weight('MK', type => 'protein', double_stranded => 1) }, qr/^molecular_weight: a protein has one strand, so "double_stranded" can't be used with it/,
+		'molecular_weight: a double-stranded protein dies');
+	dies_like(sub { motif_search('ACGT', 'CG', type => 'lipid') }, qr/^motif_search: "type" must be "DNA", "RNA" or "protein", not "lipid"/, 'motif_search: a "type" it does not know dies');
+	dies_like(sub { motif_search('MKV', 'KV', type => 'protein', strand => 'both') }, qr/^motif_search: a protein has one strand, so "strand" can only be "\+" with it/,
+		'motif_search: the minus strand of a protein dies');
+	dies_like(sub { motif_search('ACGT', 'CG', strand => 'up') }, qr/^motif_search: "strand" must be "\+", "-" or "both", not "up"/, 'motif_search: a "strand" it does not know dies');
+	dies_like(sub { find_orfs('ATGAAA', strand => 2) }, qr/^find_orfs: "strand" must be "\+", "-" or "both", not "2"/, 'find_orfs: a "strand" it does not know dies');
+	foreach my $motif (undef, '', ['ACGT']) {
+		dies_like(sub { motif_search('ACGT', $motif) }, qr/^motif_search: the motif must be a string of IUPAC letters or a qr\/\/ pattern, not /,
+			'motif_search: a motif that is ' . (!defined $motif ? 'undef' : ref $motif ? 'a reference' : 'empty') . ' dies');
+	}
+	dies_like(sub { motif_search('ACGT', 'AC.T') }, qr/^motif_search: "\." of the motif "AC\.T" isn't a letter of DNA; a pattern is given as qr\/\//,
+		'motif_search: a motif of letters with a "." dies, rather than being read as a pattern');
+	dies_like(sub { motif_search('ACGT', 'ACXT') }, qr/"X" of the motif "ACXT" isn't a letter of DNA/, 'motif_search: X in a nucleotide motif dies');
+	dies_like(sub { motif_search('MKV', 'M1V', type => 'protein') }, qr/"1" of the motif "M1V" isn't a letter of protein/, 'motif_search: a digit in a protein motif dies');
+
+	foreach my $f (qw(translate translate_six_frames find_orfs)) {
+		my $call = $with_options{$f};
+		dies_like(sub { $call->(table => 7) }, qr/^\Q$f\E: "table" must be the number or the name of an NCBI genetic code, not "7"; the numbers are 1, 2, 3, 4, 5, 6, 9, 10, 11, /,
+			"$f: genetic code 7, which NCBI withdrew, dies");
+		dies_like(sub { $call->(table => 'Martian') }, qr/^\Q$f\E: "table" must be the number or the name of an NCBI genetic code, not "Martian"/, "$f: a code's name that is not one dies");
+		dies_like(sub { $call->(table => {}) }, qr/^\Q$f\E: "table" must be .*, not a HASH ref/, "$f: a \"table\" that is a reference dies");
+	}
+	foreach my $t (['stop_symbol', '**'], ['stop_symbol', ''], ['gap', '--'], ['gap', []], ['stop_symbol', "\x{3b1}"]) {
+		my ($k, $v) = @{ $t };
+		dies_like(sub { translate('ATGAAA', $k => $v) }, qr/^translate: "\Q$k\E" must be one character, below 256, not /, "translate: a \"$k\" that is not one character below 256 dies");
+	}
+	dies_like(sub { translate_six_frames('ATGAAA', stop_symbol => 'ab') }, qr/^translate_six_frames: "stop_symbol" must be one character/, 'translate_six_frames: a "stop_symbol" of two characters dies');
+	# An error that Bioinf.xs raises is placed at the caller's line, as the
+	# others are. The period after the line number is optional: Carp wrote none
+	# before its 1.25, so perl 5.12.5's does not.
+	dies_like(sub { translate('ATGAA?') }, qr/^translate_codons: codon 2, "AA\?", has a letter that isn't a nucleotide's at \Q${\ __FILE__}\E line \d+\.?\n\z/,
+		"translate: a bad codon is reported at the caller's line");
+	dies_like(sub { find_orfs('ATGAA?TTT') }, qr/^translate_codons: codon 2, "AA\?"/, 'find_orfs: a bad codon dies');
+	dies_like(sub { translate_six_frames('ATGAA?') }, qr/^translate_codons: codon 2, "AA\?"/, 'translate_six_frames: a bad codon dies');
+	foreach my $v (0, -1, 1.5, 'ten', [10]) {
+		dies_like(sub { find_orfs('ATGAAA', min_length => $v) }, qr/^find_orfs: "min_length" must be a whole number, 1 or more, not /, 'find_orfs: a "min_length" of ' . (ref $v ? 'a reference' : $v) . ' dies');
+	}
+	dies_like(sub { find_orfs('ATGAAA', start => 'atg') }, qr/^find_orfs: "start" must be "any", "ATG" or "code", not "atg"/, 'find_orfs: a "start" it does not know dies');
+	dies_like(sub { gc_content('ACGT', ambiguous => 'other string') }, qr/^gc_content: "ambiguous" must be "remove", "ignore" or "weighted", not "other string"/,
+		'gc_content: an "ambiguous" it does not know dies');
+	foreach my $k (undef, 0, -3, 1.5, 'three', [3], 2147483648, '99999999999') {
+		dies_like(sub { kmer_count('ACGT', $k) }, qr/^kmer_count: k must be a whole number from 1 to 2147483647, not /,
+			'kmer_count: a k of ' . (!defined $k ? 'undef' : ref $k ? 'a reference' : $k) . ' dies');
+	}
+	is_deeply kmer_count('ACGT', 2147483647), {}, 'kmer_count: the largest k there is counts nothing in a short sequence';
+	foreach my $seqs (undef, 'ACGT', \'ACGT') {
+		dies_like(sub { assembly_stats($seqs) }, qr/^assembly_stats: the sequences must be a hash ref, as fasta2hash returns, or an array ref, not /,
+			'assembly_stats: sequences that are ' . (!defined $seqs ? 'undef' : ref $seqs ? 'a SCALAR ref' : 'a string') . ' die');
+	}
+	dies_like(sub { assembly_stats(['ACGT', undef]) }, qr/^assembly_stats: every sequence must be a string, and one is undef/, 'assembly_stats: an undef sequence dies');
+	dies_like(sub { assembly_stats({ a => ['ACGT'] }) }, qr/^assembly_stats: every sequence must be a string, and one is an ARRAY ref/, 'assembly_stats: a sequence that is a reference dies');
+	dies_like(sub { isoelectric_point('') }, qr/^isoelectric_point: the sequence is empty/, 'isoelectric_point: an empty sequence dies');
+	dies_like(sub { protein_charge('', 7) }, qr/^protein_charge: the sequence is empty/, 'protein_charge: an empty sequence dies');
+	foreach my $ph (undef, 'neutral', '', [7], 9**9**9, -9**9**9) {
+		dies_like(sub { protein_charge('MK', $ph) }, qr/^protein_charge: the pH must be a number, not /,
+			'protein_charge: a pH of ' . (!defined $ph ? 'undef' : ref $ph ? 'a reference' : "\"$ph\"") . ' dies');
+	}
+	foreach my $t ([undef, 2], ['a', 2], [1.5, 2], [1, 'b'], [1, -2], [[1], 2]) {
+		dies_like(sub { subseq('ACGT', @{ $t }) }, qr/^subseq: the (?:start|end) must be a whole number, 1 or more, not /, 'subseq: a start or an end that is not a position dies');
+	}
+	foreach my $file (undef, '', ['x.fa']) {
+		my $what = !defined $file ? 'undef' : ref $file ? 'a reference' : 'empty';
+		dies_like(sub { fasta_index($file) }, qr/^fasta_index: the FASTA must be a file name, not /, "fasta_index: a file name that is $what dies");
+		dies_like(sub { fasta_region($file, 'a') }, qr/^fasta_region: the FASTA must be a file name, not /, "fasta_region: a file name that is $what dies");
+	}
+	my $fa = spew('regions.fa', ">a\nACGT\n");
+	dies_like(sub { fasta_index($fa, 1) }, qr/^fasta_index: takes one argument, the FASTA file/, 'fasta_index: a second argument dies');
+	dies_like(sub { fasta_region($fa) }, qr/^fasta_region: needs at least one region, such as "chr1:100-200"/, 'fasta_region: no regions die');
+	dies_like(sub { fasta_region($fa, 'a', undef) }, qr/^fasta_region: a region must be a string, such as "chr1:100-200", not undef/, 'fasta_region: an undef region dies');
+	dies_like(sub { fasta_region($fa, ['a', 1, 2]) }, qr/^fasta_region: a region must be a string, .*, not an ARRAY ref/, 'fasta_region: a region that is a reference dies');
+	ok !-e "$fa.fai", 'and none of those wrote an index';
+}
+
 done_testing;

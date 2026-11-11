@@ -22,7 +22,15 @@ from the markers in `share/blood_type_panel.tsv`, which
 `share/make_blood_type_panel.pl` chose from 1000 Genomes), and a search of
 the RCSB PDB's structures for a sequence (`pdb_search`, since 2026-10-21),
 which asks RCSB's search and data APIs over HTTPS with HTTP::Tiny and is
-tested offline by replaying `t/data/pdb_search.json`. It is meant for CPAN,
+tested offline by replaying `t/data/pdb_search.json`. Since 2026-11-11 it
+also has the everyday operations on a sequence held as a string (`complement`,
+`reverse_complement`, `transcribe`, `back_transcribe`, `translate`,
+`translate_six_frames`, `find_orfs`, `gc_content`, `kmer_count`,
+`assembly_stats`, `molecular_weight`, `isoelectric_point`, `protein_charge`,
+`subseq` and `motif_search`) and samtools's FASTA index (`fasta_index`,
+`fasta_region`). Of those only the codon loop and the k-mer count are in XS;
+the genetic codes are `share/genetic_codes.tsv`, which
+`share/make_genetic_codes.pl` writes from NCBI's gc.prt. It is meant for CPAN,
 so it has to work on perls and platforms that are not this one.
 
 ## No prediction model ships
@@ -240,7 +248,10 @@ the house style. The only floating-point arithmetic in `Bioinf.xs` is
 `concordance`'s ratios (`conc_ratio()`, since 2026-10-19), one `NV` division
 each, which `t/concordance.t` compares within a relative 1e-15 so that
 long-double and quadmath perls pass; follow the `NV` rules for anything
-more.
+more. The sequence functions' floating point (`gc_content`,
+`molecular_weight`, `isoelectric_point`, `protein_charge`) is in perl on
+purpose (2026-11-11): perl's own `**` and `/` are already the width of an
+`NV`, so none of the `nv_*` libm block was needed.
 
 ### Types match the value's real domain
 
@@ -330,6 +341,22 @@ Biopython's `SeqIO` for FASTA (installed under
 its `Tests/` directory is not installed), and BLAST+ and Clustal Omega
 themselves.
 
+For the sequence functions (2026-11-11) the references are other packages'
+own test suites, fetched from their repositories at a tag, and the programs
+themselves: Biopython 1.87 (`Tests/test_seq.py`, `test_translate.py`,
+`test_SeqUtils.py`, `test_ProtParam.py`, from the `biopython-187` tag, since
+`Tests/` is not installed), scikit-bio 0.7.4, BioPerl (bioperl-live at commit
+4a43b46), htslib 1.25 (`test/faidx`), assembly-stats 1.0.1, EMBOSS 6.6.0 and
+samtools 1.19.2. `t/seq.t`, `t/orf.t` and `t/faidx.t` say which value is
+whose. EMBOSS and samtools are not installed here: for
+`t/data/emboss_reference.pl` and `t/data/faidx_reference.pl` they were unpacked
+from Ubuntu's packages into a scratch directory, with no root needed
+(`apt-get download emboss emboss-lib emboss-data libhpdf-2.3.0`, then `dpkg -x`
+each, and `LD_LIBRARY_PATH`, `EMBOSS_ACDROOT` and `EMBOSS_DATA` pointed into
+the unpacked tree; `samtools libhts3t64 libhtscodecs2 libdeflate0` likewise).
+A test of a new sequence function takes its cases from one of those suites
+before anything is made up for it.
+
 - Expected values are literals in the `.t` file, or are fixtures in `t/data/`.
   A generator that is worth keeping sits next to its output, with a comment
   saying how to re-run it, as `t/data/make_fixtures.pl` does. The tests never
@@ -354,7 +381,11 @@ Alien::Bioinf (which is not on CPAN), and often no gzip and no Python.
 - Everything that does not need those tools must still run there. Argument
   checks, and anything else that is decided before clustalo, blastp, plink2 or
   Python starts, go in `t/checks.t`, because that is the part a Windows smoker
-  actually exercises.
+  actually exercises. `t/seq.t`, `t/orf.t` and `t/faidx.t` need none of the
+  tools, so they run in full on every smoker.
+- `t/data/faidx.fa` is htslib's file byte for byte, CRLF lines included, and
+  `fasta_index`'s offsets are bytes: `t/faidx.t` checks its SHA-256 first, and
+  `.gitattributes` marks it `-text` so that a checkout cannot rewrite it.
 - Never skip a test because a reference implementation (R, Python, Biopython)
   is missing, since expected values are frozen and a skipped cross-check never
   runs on a smoker.
@@ -436,6 +467,9 @@ default), `perl-5.42.3` (threaded), `perl-5.32.1`, `perl-5.12.5` (long double),
 `5.44.0-i686-64int` was there too, and neither it nor `perl-5.18.4` had
 File::ShareDir::Install, so both failed at `perl Makefile.PL` under
 `./test.all.perls.pl --no-install --no-alien`; `--deps` would install it.
+On 2026-11-11 the same command gave the same result: seven perls passed
+(2,342 tests where Alien::Bioinf is installed, 1,760 on `5.44.0-i686`) and
+those two failed at `perl Makefile.PL` for that reason.
 
 `./test.all.perls.pl` builds and tests against all of them, installing
 Alien::Bioinf into any perl that lacks it, and with `-p` against chosen ones.

@@ -5,6 +5,17 @@
     my $seqs = fasta2hash('proteome.fa.gz');        # { defline => sequence }
     my $one  = fasta2hash('proteome.fa', 'P12345'); # just that sequence
     hash2fasta_file($seqs, 'copy.fa');
+    my $part = fasta_region('genome.fa', 'chr1:1000-2000');   # as samtools faidx
+
+    # sequences as strings
+    my $rc      = reverse_complement('ATGAAACTG');             # CAGTTTCAT
+    my $protein = translate('ATGAAACTGTAA', to_stop => 1);     # MKL
+    my $orfs    = find_orfs($one, table => 11, min_length => 100);
+    my $hits    = motif_search($one, 'GRATYC', strand => 'both');
+    my $gc      = gc_content($one);
+    my $kmers   = kmer_count($one, 4);
+    my $stats   = assembly_stats($seqs);                       # N50 and the rest
+    my $pi      = isoelectric_point($protein);
 
     my $hits = get_best_alignment_hit('blast.json', 'bit_score');
 
@@ -51,7 +62,11 @@
 
 # DESCRIPTION
 
-FASTA I/O in XS, BLAST hit ranking, a search of the PDB's structures for a
+FASTA I/O in XS, with `samtools`'s index for fetching a part of a file; the
+everyday operations on a sequence (its reverse complement, its translation
+under any of NCBI's genetic codes, its open reading frames, GC content, k-mers,
+motifs, molecular weight and isoelectric point, and an assembly's N50); BLAST
+hit ranking, a search of the PDB's structures for a
 sequence, and multiple-sequence-alignment plots and LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, how every two people are related, how well one VCF's calls agree with another's, each sample's ABO and RhD blood type, and the genotypes of the HIrisPlex-S eye, hair and skin colour panel, with a trait predictor for any multinomial logistic model you supply.
 
 Nothing is exported by default; ask for functions by name or with `:all`.
@@ -168,6 +183,276 @@ such a string first, as with `Encode::encode('UTF-8', $name)`. A key that is
 empty or holds a line feed dies, as does a sequence that is a reference
 (unless it is an object that overloads its own text), since `fasta2hash` could
 not read any of them back as what was given.
+
+## fasta_index($file)
+
+Writes the index of a FASTA file that `samtools faidx` writes, `$file.fai`,
+and returns its name; it prints `wrote` and that name to STDOUT, as
+`hash2fasta_file` does. The index has a line for each sequence: its name (the
+first word of its defline), its length, the byte where it starts, and how many
+bases and how many bytes each of its lines holds. Other programs that read a
+`.fai` can use it, and `fasta_region` does.
+
+    my $fai = fasta_index('genome.fa');   # genome.fa.fai
+
+A file can be indexed when, within each sequence, every line but the last is
+the same length, which is `samtools`'s rule; a file that breaks it dies, naming
+the line. Of two sequences with one name, the first is indexed, with a warning.
+A compressed file dies, since a place in it cannot be sought.
+
+## fasta_region($file, @regions)
+
+The parts of a FASTA file that `@regions` name, as a hash ref of region =>
+sequence, without reading the rest of the file: the job of `samtools faidx`.
+
+    my $part = fasta_region('genome.fa', 'chr1:1,000-2,000', 'chrM');
+    print $part->{'chr1:1,000-2,000'};
+
+A region is a sequence's name, for all of it, or `name:start-end`,
+`name:start` (to the end) or `name:-end` (from the start), counting from 1 with
+both ends included; commas in the numbers are ignored. A name that has a colon
+in it, such as `HLA-A*01:01:01:01`, is taken whole when a sequence has that
+name. A region that runs past the end of its sequence is cut short there, and
+one that starts past it is empty, as `samtools faidx` gives them; a name that
+is not in the file, a start of 0 and an end before the start die.
+
+It uses `$file.fai` when that is there, whether `fasta_index` or `samtools`
+wrote it, and warns when the index is older than the FASTA. Without one it
+reads through the file to make the index, which it does not write: for a large
+file that will be asked more than once, call `fasta_index` first. The file must
+not be compressed.
+
+## complement($seq, type => 'DNA')
+
+`$seq` with each nucleotide replaced by the one it pairs with: `A` and `T`,
+`C` and `G`, and each IUPAC ambiguity letter with the letter for the bases its
+own pair with (`R` and `Y`, `K` and `M`, `B` and `V`, `D` and `H`; `S`, `W` and
+`N` are their own). Case is kept, and anything that is not a nucleotide letter,
+a gap included, is left as it is.
+
+    complement('ATGAAACTG');                 # TACTTTGAC
+    complement('AUGAAACUG', type => 'RNA');  # UACUUUGAC
+
+`type` is `DNA` (the default) or `RNA`, in any case, and says what is written,
+`T` or `U`; either is read in both. These are Biopython's `complement` and
+`complement_rna`.
+
+## reverse_complement($seq, type => 'DNA')
+
+`complement` of `$seq`, reversed: the other strand, read from its own 5' end.
+
+    reverse_complement('ATGAAACTG');   # CAGTTTCAT
+
+## transcribe($seq), back_transcribe($seq)
+
+`transcribe` writes `U` for every `T` of `$seq`, and `back_transcribe` `T` for
+every `U`, in either case; nothing else changes.
+
+    transcribe('ATGAAACTG');        # AUGAAACUG
+    back_transcribe('AUGAAACUG');   # ATGAAACTG
+
+## translate($seq, %args)
+
+The protein that the DNA or RNA `$seq` codes for, one letter for each three of
+its own, from its first letter.
+
+    translate('GTGGCCATTGTAATGGGCCGCTGAAAGGGTGCCCGATAG');                # VAIVMGR*KGAR*
+    translate('GTGGCCATTGTAATGGGCCGCTGAAAGGGTGCCCGATAG', to_stop => 1);  # VAIVMGR
+    translate($cds, table => 'Vertebrate Mitochondrial', cds => 1);
+
+- `table`: the genetic code, as NCBI's number for it (1, the standard code, by
+  default) or one of its names in any case, such as `Standard`, `SGC0`,
+  `Bacterial` or `Vertebrate Mitochondrial`. The codes are those of
+  [NCBI's table](https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi),
+  version 4.6: 1 to 6, 9 to 16 and 21 to 33.
+- `to_stop`: 1 ends the protein before the first stop codon; 0 (the default)
+  writes each stop and carries on.
+- `stop_symbol`: the character written for a stop, `*` by default.
+- `cds`: 1 says `$seq` is a whole coding sequence, and checks it: it must start
+  with one of the code's start codons, be a multiple of three long, end with a
+  stop codon and have no other. The start codon is then written as `M`,
+  whatever it codes for inside a protein, and the stop is left out.
+- `gap`: a character, such as `-`, three of which make a codon that is written
+  as that character. Without it a gap dies, as any other letter that is not a
+  nucleotide's does, naming the codon.
+
+A codon with an ambiguous letter is given what the codons it stands for agree
+on: their amino acid when they share one (`ATGAARCTG` is `MKL`), `*` when all
+are stops, `B` for aspartate or asparagine, `Z` for glutamate or glutamine, `J`
+for leucine or isoleucine, and `X` otherwise, a codon that may or may not be a
+stop included. Case is ignored, and `T` and `U` may be mixed.
+
+One or two letters left after the last whole codon are not translated, with a
+warning; cut the sequence to a multiple of three to avoid it. Codes 27, 28 and
+31 read some codons as an amino acid or as a stop, by context: those are
+translated as the amino acid, with a warning, and `to_stop` dies with them.
+
+These rules are Biopython's, whose `Seq.translate` this gives the same answers
+as, with one exception: an `X` in a codon dies here, since it is not an IUPAC
+nucleotide letter, where Biopython reads it as `N` in some codons.
+
+## translate_six_frames($seq, %args)
+
+`$seq` translated in all six reading frames, as a hash ref: `1`, `2` and `3`
+are the frames that start at its first, second and third letter, and `-1`, `-2`
+and `-3` those that start at the first, second and third letter of its reverse
+complement. Each protein is written from its own N-terminus.
+
+    my $f = translate_six_frames('AUGCUAACAUAAA');
+    # { 1 => 'MLT*', 2 => 'C*HK', 3 => 'ANI', -1 => 'FMLA', -2 => 'LC*H', -3 => 'YVS' }
+
+`table` and `stop_symbol` are as for `translate`. Letters left after a frame's
+last whole codon are dropped without a warning, since five of the six frames
+always have some. The minus frames are numbered as scikit-bio and BLAST number
+them, which is EMBOSS `transeq`'s `-alternative`.
+
+## find_orfs($seq, %args)
+
+The open reading frames of `$seq` on both strands, as an array ref of hash
+refs in order of where they start:
+
+    my $orfs = find_orfs($plasmid, table => 11, min_length => 100, start => 'code');
+    printf "%d-%d %s %s...\n", @{ $_ }{qw(start end strand)}, substr $_->{protein}, 0, 10 for @{ $orfs };
+
+- `table`: the genetic code, as for `translate`.
+- `start`: where a frame opens. `any` (the default) is at the codon after a
+  stop, or at the sequence's first, so that every stretch between stops is a
+  frame. `ATG` is at the first `ATG` after that, and `code` at the first of the
+  genetic code's own start codons, which for code 11 include `GTG` and `TTG`;
+  with either, the protein starts with `M`, whatever the codon codes for
+  elsewhere, and a stretch with no start codon is no frame.
+- `min_length`: the fewest amino acids a frame may have, 10 by default.
+- `strand`: `both` (the default), `+` or `-`.
+
+Each frame has `start` and `end`, its first and last base in `$seq`, counted
+from 1, with `start` the smaller on either strand and the stop codon left out;
+`strand`, 1 or -1; `frame`, as `translate_six_frames` numbers them; `length`,
+in amino acids; and `protein`. A frame that reaches the end of the sequence
+without a stop is returned as far as it goes.
+
+This is what EMBOSS's `getorf` finds: `start => 'any'` is its `-find 0`,
+`start => 'ATG'` its `-find 1` with its default table, and `start => 'code'`
+its `-find 1` with `-table`; its `-minsize` is in nucleotides, three times
+`min_length`.
+
+## gc_content($seq, ambiguous => 'remove')
+
+The share of `$seq` that is G or C, from 0 to 1, in either case; 0 for an
+empty sequence. `S`, which is G or C, counts as one.
+
+    gc_content('ACTGN');                           # 0.5
+    gc_content('ACTGN', ambiguous => 'ignore');    # 0.4
+
+`ambiguous` says what the other ambiguity letters count for: `remove` (the
+default) leaves them out, so that the share is of the letters A, C, G, T, U, S
+and W; `ignore` counts them in the length but not as G or C; and `weighted`
+counts each as the share of its bases that are G or C, half for `N` and
+two-thirds for `B`. This is Biopython's `gc_fraction`.
+
+## kmer_count($seq, $k, %args)
+
+How many times each run of `$k` letters occurs in `$seq`, as a hash ref of
+k-mer => count. The letters are taken as they are: fold the case first if `a`
+and `A` should count together.
+
+    kmer_count('GATTACA', 3);                 # { GAT => 1, ATT => 1, TTA => 1, TAC => 1, ACA => 1 }
+    kmer_count('GATTACA', 3, overlap => 0);   # { GAT => 1, TAC => 1 }
+
+- `overlap`: 1 (the default) counts the k-mer at every letter; 0 counts one
+  every `$k` letters, from the first, so that none overlaps another.
+- `relative`: 1 gives each k-mer's share of all that were counted, which sum to
+  1, in place of its count.
+
+A `$k` longer than the sequence gives an empty hash. This is scikit-bio's
+`kmer_frequencies`.
+
+## assembly_stats($seqs)
+
+The statistics of a set of sequences, such as the contigs of an assembly, that
+`assembly-stats` prints. `$seqs` is a hash ref of name => sequence, as
+`fasta2hash` returns, or an array ref of sequences.
+
+    my $s = assembly_stats(fasta2hash('contigs.fa'));
+    print "N50 $s->{n50} in $s->{l50} of $s->{number} contigs\n";
+
+It returns a hash ref of `number`, how many sequences there are;
+`total_length`, `mean_length`, `longest` and `shortest`; `n_count`, how many
+letters are `N` or `n`, and `gaps`, how many runs of them there are; `n50` and
+`l50`; and `nx` and `lx`, hash refs of those two for every tenth from 10 to 100.
+N50 is the length of the sequence at which the lengths, added from the longest
+down, first reach half of their total, and L50 is how many sequences that took;
+`$s->{nx}{90}` and `$s->{lx}{90}` are the same for 90%. With no sequences
+every number is 0.
+
+## molecular_weight($seq, %args)
+
+The weight of a molecule of DNA, RNA or protein, in daltons.
+
+    molecular_weight('AGC');                      # 949.6095
+    molecular_weight('AGC', type => 'RNA');       # 997.6077
+    molecular_weight('AGC', type => 'protein');   # 249.2874
+
+- `type`: `DNA` (the default), `RNA` or `protein`, in any case.
+- `double_stranded`: 1 adds the weight of the strand that pairs with `$seq`.
+- `circular`: 1 for a molecule with no ends, which has one more bond.
+- `monoisotopic`: 1 uses the weight of each element's commonest isotope, which
+  is what a mass spectrometer resolves, rather than its average weight.
+
+A nucleic acid is weighed with a 5' phosphate. Only the plain letters have a
+weight -- `ACGT`, `ACGU`, or the 20 amino acids with `O` (pyrrolysine) and `U`
+(selenocysteine) -- so any other letter dies, as does an empty sequence;
+whitespace is dropped and case ignored. The weights are Biopython's, and this
+is its `molecular_weight`.
+
+## isoelectric_point($protein), protein_charge($protein, $pH)
+
+`isoelectric_point` is the pH at which a protein has no net charge, and
+`protein_charge` its charge at a pH you give.
+
+    isoelectric_point('INGAR');    # 9.75
+    protein_charge('INGAR', 7);    # 0.76
+
+The charge is that of the two ends of the chain and of every K, R, H, D, E, C
+and Y, each by the Henderson-Hasselbalch equation, with the pK values of
+Bjellqvist et al. (*Electrophoresis* 14:1023, 1993, and 15:529, 1994), which
+depend on the residue at each end; these are the values ExPASy's Compute pI/Mw
+uses, and the method is that of Biopython's `IsoelectricPoint`. The isoelectric
+point is found by bisection and is good to four decimal places. Other letters
+carry no charge, case is ignored, and an empty sequence dies.
+
+## subseq($seq, $start, $end)
+
+The part of `$seq` from `$start` to `$end`, counting from 1 with both
+included; `$end` is the sequence's end when it is not given.
+
+    subseq('TTGGTGGCGTCAACT', 2, 5);   # TGGT
+
+A start of 0, a start after the end and an end past the sequence die, as they
+do in BioPerl's `subseq`. For a part of a sequence in a file, see
+`fasta_region`.
+
+## motif_search($seq, $motif, %args)
+
+Where `$motif` occurs in `$seq`, as an array ref of hits in order of where
+they start, each a hash ref of `start` and `end` (counted from 1, both
+included), `strand` (1 or -1) and `match`, the letters that matched. Hits that
+overlap are all found.
+
+    my $hits = motif_search($seq, 'GRATYC', strand => 'both');   # EcoRI and BamHI sites
+    my $glyc = motif_search($protein, qr/N[^P][ST][^P]/, type => 'protein');
+
+`$motif` is a string of IUPAC letters or a `qr//` pattern. In a string of
+nucleotide letters, each ambiguity letter matches any of its bases (`R` is `A`
+or `G`, `N` any of the four), `T` and `U` match each other, and case is
+ignored; in a protein's, `B` is `D` or `N`, `Z` is `E` or `Q`, `J` is `I` or
+`L`, and `X` is anything. A pattern is used as it is written.
+
+- `type`: `DNA` (the default), `RNA` or `protein`.
+- `strand`: `+` (the default), `-` or `both`. The minus strand is searched as
+  its own sequence, the reverse complement of `$seq`, so a hit there has the
+  motif as its `match`, while its `start` and `end` are still positions in
+  `$seq`. A motif that is its own reverse complement is found on both strands
+  at each site.
 
 ## get_best_alignment_hit($json_file, $sort_criterion)
 

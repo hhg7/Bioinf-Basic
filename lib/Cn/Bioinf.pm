@@ -30,7 +30,13 @@ use Sys::Hostname 'hostname';
 use Exporter 'import';
 use XSLoader;
 our $VERSION = '0.01';
-our @EXPORT_OK = qw(blood_type clustal_view_residues concordance fasta2hash get_best_alignment_hit hash2fasta_file hirisplex_genotypes msa_quality_table parent pdb_search pgs_score plot_msa plot_phylo relatedness sex_check trait_predict);
+our @EXPORT_OK = qw(
+	assembly_stats back_transcribe blood_type clustal_view_residues complement concordance fasta2hash fasta_index
+	fasta_region find_orfs gc_content get_best_alignment_hit hash2fasta_file hirisplex_genotypes isoelectric_point
+	kmer_count molecular_weight motif_search msa_quality_table parent pdb_search pgs_score plot_msa plot_phylo
+	protein_charge relatedness reverse_complement sex_check subseq trait_predict transcribe translate
+	translate_six_frames
+);
 our @EXPORT = @EXPORT_OK;
 our %EXPORT_TAGS = (all => \@EXPORT_OK);
 XSLoader::load('Cn::Bioinf', $VERSION);
@@ -447,6 +453,796 @@ sub _fasta_file {
 	_located(sub { _write_fasta($fh, $hash, $order, $width) });
 	close $fh or croak "$sub: can't write $filename: $!";
 	$filename;
+}
+
+# ---- sequences
+#
+# complement to motif_search work on a sequence held as a perl string, and
+# fasta_index and fasta_region on a FASTA file. Each says which function of
+# which library it follows, and t/seq.t, t/protein.t and t/faidx.t take their
+# expected values from that library's own tests.
+
+# Dies, naming $sub, unless $seq is a sequence: a string, which may be empty.
+sub _sequence {
+	my ($sub, $seq) = @_;
+	croak "$sub: the sequence must be a string, not " . _what($seq) if !defined $seq || ref $seq;
+}
+
+# "type" of $sub's $args, which says what kind of sequence it was given, as the
+# one of @$allowed ('DNA', 'RNA', 'protein') that it names in any case; DNA
+# when it was not given.
+sub _seq_type {
+	my ($sub, $args, $allowed) = @_;
+	my $type = $args->{type} // 'DNA';
+	my ($found) = ref $type ? () : grep { lc $_ eq lc $type } @{ $allowed };
+	return $found if defined $found;
+	my @q = map { "\"$_\"" } @{ $allowed };
+	croak "$sub: \"type\" must be " . join(', ', @q[0 .. $#q - 1]) . " or $q[-1], not " . _what($type);
+}
+
+# "strand" of $sub's $args as 'both', '+' or '-'; $default when it was not
+# given.
+sub _strand {
+	my ($sub, $args, $default) = @_;
+	my $strand = $args->{strand} // $default;
+	croak "$sub: \"strand\" must be \"+\", \"-\" or \"both\", not " . _what($strand)
+		if ref $strand || $strand !~ /\A(?:\+|-|both)\z/;
+	$strand;
+}
+
+# $seq with every nucleotide replaced by the one it pairs with, for $sub, which
+# was given @opt. The pairs are Biopython 1.87's ambiguous_dna_complement and
+# ambiguous_rna_complement (Bio/Data/IUPACData.py), in both cases, and U is
+# read as T, as its Seq.complement() and Seq.complement_rna() read it. N and X
+# pair with themselves, and so does every character that is not a nucleotide,
+# a gap included.
+sub _complement {
+	my ($sub, $seq, @opt) = @_;
+	_sequence($sub, $seq);
+	my $type = _seq_type($sub, _args(\@opt, $sub, [], ['type']), ['DNA', 'RNA']);
+	my $c = "$seq";
+	if ($type eq 'RNA') {
+		$c =~ tr/ACGTUMRWSYKVHDBacgtumrwsykvhdb/UGCAAKYWSRMBDHVugcaakywsrmbdhv/;
+	} else {
+		$c =~ tr/ACGTUMRWSYKVHDBacgtumrwsykvhdb/TGCAAKYWSRMBDHVtgcaakywsrmbdhv/;
+	}
+	$c;
+}
+
+sub complement { _complement('complement', @_) }
+
+sub reverse_complement { scalar reverse _complement('reverse_complement', @_) }
+
+sub transcribe {
+	my ($seq, @rest) = @_;
+	croak 'transcribe: takes one argument, the sequence' if @rest;
+	_sequence('transcribe', $seq);
+	(my $rna = "$seq") =~ tr/Tt/Uu/;
+	$rna;
+}
+
+sub back_transcribe {
+	my ($seq, @rest) = @_;
+	croak 'back_transcribe: takes one argument, the sequence' if @rest;
+	_sequence('back_transcribe', $seq);
+	(my $dna = "$seq") =~ tr/Uu/Tt/;
+	$dna;
+}
+
+# NCBI's genetic codes, from share/genetic_codes.tsv, which
+# share/make_genetic_codes.pl writes and whose header comment says where each
+# column comes from. %Code is id => { id, names, aas, start_mask, stop_mask,
+# both } and %Code_id is each lower-cased name => id; both are empty until the
+# file has been read. The three 64-letter strings are what Bioinf.xs's
+# _translate() takes, a letter for each codon from TTT to GGG:
+#
+# - aas: the codon's amino acid, or * for a stop.
+# - start_mask: M for a codon that can start a protein, and A for any other.
+# - stop_mask: * for a codon that can end one, and A for any other.
+#
+# "Translating" a codon with a mask says whether it is a start or a stop by the
+# rules that translate it, so that an ambiguous codon is a start only when
+# every codon it stands for is one. "both" lists, as [codon, amino acid], the
+# codons that aas gives an amino acid and stop_mask a stop: the organism reads
+# them either way.
+my (%Code, %Code_id);
+
+# The 64 codons in the order of those strings.
+my @Codon = map { my $x = $_; map { my $y = $_; map { "$x$y$_" } qw(T C A G) } qw(T C A G) } qw(T C A G);
+
+# start_mask for ATG alone, which is codon 35: A is base 2 and G base 3 of
+# T, C, A, G, so 16 * 2 + 4 * 0 + 3.
+my $Atg_mask = ('A' x 35) . 'M' . ('A' x 28);
+
+# Reads the genetic codes into %Code and %Code_id, once, for $sub.
+sub _genetic_codes {
+	my ($sub) = @_;
+	return if %Code;
+	my $file = _share_file($sub, 'genetic_codes.tsv');
+	open my $fh, '<', $file or croak "$sub: can't read $file: $!";
+	my (%code, %id);
+	while (defined(my $line = <$fh>)) {
+		$line =~ s/\r?\n\z//;
+		next if $line eq '' || $line =~ /\A#/;
+		my ($id, $names, $aas, $starts) = split /\t/, $line, -1;
+		croak "$sub: line $. of $file isn't a genetic code: it needs a number, names, 64 amino acids and 64 start and stop marks"
+			unless defined $starts && $id =~ /\A[1-9][0-9]*\z/ && length $names && $aas =~ /\A[A-Z*]{64}\z/ && $starts =~ /\A[M*-]{64}\z/;
+		(my $start_mask = $starts) =~ tr/M*-/MAA/;
+		(my $stop_mask = $starts) =~ tr/M*-/A*A/;
+		my @both = map { [$Codon[$_], substr $aas, $_, 1] } grep { substr($starts, $_, 1) eq '*' && substr($aas, $_, 1) ne '*' } 0 .. 63;
+		$code{$id} = { id => 0 + $id, names => [split /; /, $names], aas => $aas, start_mask => $start_mask, stop_mask => $stop_mask, both => \@both };
+		# A code is known by each of its names, and by each part of a name that
+		# lists several organisms, which is how Biopython's CodonTable.py
+		# registers them: "Bacterial, Archaeal and Plant Plastid" is also
+		# "Bacterial", "Archaeal" and "Plant Plastid".
+		$id{lc $_} //= 0 + $id for $names, map { $_, split /, | and / } split /; /, $names;
+	}
+	close $fh or croak "$sub: can't read $file: $!";
+	croak "$sub: $file has no genetic codes" unless %code;
+	%Code = %code;
+	%Code_id = %id;
+}
+
+# The genetic code that $table, "table" of $sub's arguments, names: one of
+# %Code's values.
+sub _genetic_code {
+	my ($sub, $table) = @_;
+	_genetic_codes($sub);
+	my $id = ref $table ? undef : $table =~ /\A[0-9]+\z/ ? 0 + $table : $Code_id{lc $table};
+	croak "$sub: \"table\" must be the number or the name of an NCBI genetic code, not " . _what($table)
+		. '; the numbers are ' . join(', ', sort { $a <=> $b } keys %Code) unless defined $id && $Code{$id};
+	$Code{$id};
+}
+
+# Warns, for $sub, when $code has codons that are read as an amino acid or as
+# a stop, since they are translated as the amino acid; with $to_stop it dies
+# instead, as the protein's end could not be told. Biopython 1.87's
+# _translate_str() (Bio/Seq.py) does both.
+sub _both_ways {
+	my ($sub, $code, $to_stop) = @_;
+	my @both = @{ $code->{both} } or return;
+	my $reads = "genetic code $code->{id} reads " . join(' and ', map { "$_->[0] as $_->[1] or as a stop" } @both);
+	croak "$sub: \"to_stop\" can't be used with \"table\" $code->{id}: $reads" if $to_stop;
+	carp "$sub: $reads, and " . (@both > 1 ? 'they are' : 'it is') . ' translated as the amino acid';
+}
+
+# $v, the option $k of $sub, as a single byte for Bioinf.xs, which takes the
+# first byte of the string it is handed; dies unless it is one character below
+# 256. undef is passed through.
+sub _one_char {
+	my ($sub, $k, $v) = @_;
+	return $v unless defined $v;
+	croak "$sub: \"$k\" must be one character, below 256, not " . _what($v) if ref $v || $v !~ /\A[\x00-\xff]\z/s;
+	utf8::downgrade($v); # a character from 128 to 255 can be held as two bytes
+	$v;
+}
+
+sub translate {
+	my ($seq, @opt) = @_;
+	my $sub = 'translate';
+	_sequence($sub, $seq);
+	my $args = _args(\@opt, $sub, [], [qw(cds gap stop_symbol table to_stop)]);
+	my %r; # the options, each resolved once
+	$r{table} = $args->{table} // 1; # an NCBI genetic code's number or name
+	$r{to_stop} = $args->{to_stop} ? 1 : 0; # 1 = the protein ends before the first stop
+	$r{cds} = $args->{cds} ? 1 : 0; # 1 = $seq is a whole coding sequence, start codon to stop codon
+	$r{stop_symbol} = _one_char($sub, 'stop_symbol', $args->{stop_symbol} // '*'); # the letter written for a stop
+	$r{gap} = _one_char($sub, 'gap', $args->{gap}); # the gap character; undef = a gap is not a codon
+	my $code = _genetic_code($sub, $r{table});
+	_both_ways($sub, $code, $r{to_stop});
+	my $len = length $seq;
+	if ($r{cds}) {
+		# Biopython's checks, in its order
+		my ($first) = _located(sub { _translate(substr($seq, 0, 3), $code->{start_mask}, '*', 0, undef) });
+		croak "$sub: with \"cds\", the first codon, \"" . substr($seq, 0, 3) . "\", must be a start codon of genetic code $code->{id}"
+			unless $first eq 'M';
+		croak "$sub: with \"cds\", the sequence's length, $len, must be a multiple of three" if $len % 3;
+		my ($last) = _located(sub { _translate(substr($seq, -3), $code->{stop_mask}, '*', 0, undef) });
+		croak "$sub: with \"cds\", the last codon, \"" . substr($seq, -3) . "\", must be a stop codon of genetic code $code->{id}"
+			unless $last eq '*';
+		# every codon but the last, up to the first stop, which there must not be
+		my ($p) = _located(sub { _translate(substr($seq, 0, $len - 3), $code->{aas}, '*', 1, $r{gap}) });
+		croak "$sub: with \"cds\", only the last codon may be a stop, and codon " . (length($p) + 1) . ', "'
+			. substr($seq, 3 * length $p, 3) . '", is one' if length($p) < $len / 3 - 1;
+		substr($p, 0, 1) = 'M'; # whatever the start codon stands for inside a protein
+		return $p;
+	}
+	carp "$sub: the sequence's length, $len, is not a multiple of three, so its last " . ($len % 3 == 1 ? 'letter is' : '2 letters are')
+		. ' not translated' if $len % 3;
+	my ($p) = _located(sub { _translate($seq, $code->{aas}, $r{stop_symbol}, $r{to_stop}, $r{gap}) });
+	$p;
+}
+
+sub translate_six_frames {
+	my ($seq, @opt) = @_;
+	my $sub = 'translate_six_frames';
+	_sequence($sub, $seq);
+	my $args = _args(\@opt, $sub, [], [qw(stop_symbol table)]);
+	my %r; # the options, each resolved once
+	$r{table} = $args->{table} // 1; # an NCBI genetic code's number or name
+	$r{stop_symbol} = _one_char($sub, 'stop_symbol', $args->{stop_symbol} // '*'); # the letter written for a stop
+	my $code = _genetic_code($sub, $r{table});
+	_both_ways($sub, $code, 0);
+	my %frame;
+	foreach my $strand (1, -1) {
+		my $nuc = $strand > 0 ? $seq : scalar reverse _complement($sub, $seq);
+		foreach my $f (0 .. 2) {
+			# a frame that starts beyond the sequence's end has no codons
+			($frame{$strand * ($f + 1)}) = $f < length $nuc
+				? _located(sub { _translate(substr($nuc, $f), $code->{aas}, $r{stop_symbol}, 0, undef) }) : '';
+		}
+	}
+	\%frame;
+}
+
+sub find_orfs {
+	my ($seq, @opt) = @_;
+	my $sub = 'find_orfs';
+	_sequence($sub, $seq);
+	my $args = _args(\@opt, $sub, [], [qw(min_length start strand table)]);
+	my %r; # the options, each resolved once
+	$r{table} = $args->{table} // 1; # an NCBI genetic code's number or name
+	# The fewest amino acids an open reading frame may have. 10 is the default
+	# of EMBOSS 6.6.0's getorf, whose -minsize is 30 nucleotides.
+	$r{min_length} = $args->{min_length} // 10;
+	croak "$sub: \"min_length\" must be a whole number, 1 or more, not " . _what($r{min_length})
+		if ref $r{min_length} || $r{min_length} !~ /\A[1-9][0-9]*\z/;
+	# Where a reading frame opens: 'any' = at the codon after a stop, or the
+	# first of the sequence; 'ATG' = at the first ATG after that; 'code' = at
+	# the first of the genetic code's start codons after that.
+	$r{start} = $args->{start} // 'any';
+	croak "$sub: \"start\" must be \"any\", \"ATG\" or \"code\", not " . _what($r{start})
+		if ref $r{start} || $r{start} !~ /\A(?:any|ATG|code)\z/;
+	$r{strand} = _strand($sub, $args, 'both'); # '+', '-' or 'both'
+	my $code = _genetic_code($sub, $r{table});
+	_both_ways($sub, $code, 0);
+	my $mask = $r{start} eq 'any' ? undef : $r{start} eq 'ATG' ? $Atg_mask : $code->{start_mask};
+	my $len = length $seq;
+	my @orf;
+	foreach my $strand ($r{strand} eq 'both' ? (1, -1) : $r{strand} eq '+' ? 1 : -1) {
+		my $nuc = $strand > 0 ? $seq : scalar reverse _complement($sub, $seq);
+		foreach my $f (0 .. 2) {
+			next unless $f < $len;
+			my $frame = substr $nuc, $f;
+			# the frame's codons as amino acids, and as M where one is a start
+			my ($protein) = _located(sub { _translate($frame, $code->{aas}, '*', 0, undef) });
+			my ($starts) = defined $mask ? _located(sub { _translate($frame, $mask, '*', 0, undef) }) : undef;
+			my $codons = length $protein;
+			# $from and $stop count codons: the frame is open over $from .. $stop - 1
+			for (my $from = 0; $from < $codons;) {
+				my $stop = index $protein, '*', $from;
+				$stop = $codons if $stop < 0;
+				my $next = $stop + 1;
+				$from = index $starts, 'M', $from if defined $starts;
+				if ($from >= 0 && $stop - $from >= $r{min_length}) {
+					my $p = substr $protein, $from, $stop - $from;
+					# a start codon stands for M at a protein's start, whatever
+					# it stands for inside one, as getorf's -methionine has it
+					substr($p, 0, 1) = 'M' if defined $starts;
+					# the first and last base, counted from 0 on this strand
+					my ($x, $y) = ($f + 3 * $from, $f + 3 * $stop - 1);
+					push @orf, {
+						start => $strand > 0 ? $x + 1 : $len - $y, end => $strand > 0 ? $y + 1 : $len - $x,
+						strand => $strand, frame => $strand * ($f + 1), length => $stop - $from, protein => $p,
+					};
+				}
+				$from = $next;
+			}
+		}
+	}
+	[sort { $a->{start} <=> $b->{start} || $a->{end} <=> $b->{end} || $b->{strand} <=> $a->{strand} } @orf];
+}
+
+sub gc_content {
+	my ($seq, @opt) = @_;
+	my $sub = 'gc_content';
+	_sequence($sub, $seq);
+	my $args = _args(\@opt, $sub, [], ['ambiguous']);
+	# What a letter other than A, C, G, T, U, S and W counts for: 'remove' =
+	# nothing, and it is left out of the length too; 'ignore' = nothing, but it
+	# is part of the length; 'weighted' = the share of the bases it stands for
+	# that are G or C.
+	my $ambiguous = $args->{ambiguous} // 'remove';
+	croak "$sub: \"ambiguous\" must be \"remove\", \"ignore\" or \"weighted\", not " . _what($ambiguous)
+		if ref $ambiguous || $ambiguous !~ /\A(?:remove|ignore|weighted)\z/;
+	my $gc = ($seq =~ tr/CGScgs//);
+	my $len = $ambiguous eq 'remove' ? $gc + ($seq =~ tr/ATWUatwu//) : length $seq;
+	if ($ambiguous eq 'weighted') {
+		# Biopython 1.87's _gc_values (Bio/SeqUtils/__init__.py), added in the
+		# order its gc_fraction() adds them, B D H K M N R V X Y, so that the
+		# sum rounds as its sum does
+		$gc += ($seq =~ tr/Bb//) * (2 / 3); # C, G or T
+		$gc += ($seq =~ tr/Dd//) * (1 / 3); # A, G or T
+		$gc += ($seq =~ tr/Hh//) * (1 / 3); # A, C or T
+		$gc += ($seq =~ tr/Kk//) * 0.5; # G or T
+		$gc += ($seq =~ tr/Mm//) * 0.5; # A or C
+		$gc += ($seq =~ tr/Nn//) * 0.5; # any base
+		$gc += ($seq =~ tr/Rr//) * 0.5; # A or G
+		$gc += ($seq =~ tr/Vv//) * (2 / 3); # A, C or G
+		$gc += ($seq =~ tr/Xx//) * 0.5; # any base
+		$gc += ($seq =~ tr/Yy//) * 0.5; # C or T
+	}
+	$len ? $gc / $len : 0;
+}
+
+sub assembly_stats {
+	my ($seqs, @rest) = @_;
+	my $sub = 'assembly_stats';
+	croak "$sub: takes one argument, the sequences" if @rest;
+	croak "$sub: the sequences must be a hash ref, as fasta2hash returns, or an array ref, not " . _what($seqs)
+		unless ref $seqs eq 'HASH' || ref $seqs eq 'ARRAY';
+	my (@len, %nx, %lx);
+	my ($total, $n_count, $gaps) = (0, 0, 0);
+	foreach my $s (ref $seqs eq 'HASH' ? values %{ $seqs } : @{ $seqs }) {
+		croak "$sub: every sequence must be a string, and one is " . _what($s) if !defined $s || ref $s;
+		push @len, length $s;
+		$total += length $s;
+		$n_count += ($s =~ tr/Nn//);
+		$gaps++ while $s =~ /[Nn]+/g;
+	}
+	@len = sort { $b <=> $a } @len;
+	# Nx is the length of the sequence at which the lengths, added from the
+	# longest down, first reach x% of their total, and Lx is how many
+	# sequences that took. The comparison is in whole numbers, 10 * the sum
+	# against the total * x / 10, where assembly-stats divides in floating point.
+	my ($sum, $tenth) = (0, 1); # $tenth = the x / 10 that has not been reached yet
+	foreach my $i (0 .. $#len) {
+		$sum += $len[$i];
+		while ($tenth <= 10 && 10 * $sum >= $total * $tenth) {
+			$nx{10 * $tenth} = $len[$i];
+			$lx{10 * $tenth} = $i + 1;
+			$tenth++;
+		}
+	}
+	# no sequences, or none with any length: every Nx and Lx is 0
+	$nx{10 * $_} //= 0, $lx{10 * $_} //= 0 for 1 .. 10;
+	{
+		number => scalar @len, total_length => $total, mean_length => @len ? $total / @len : 0,
+		longest => @len ? $len[0] : 0, shortest => @len ? $len[-1] : 0,
+		n_count => $n_count, gaps => $gaps, n50 => $nx{50}, l50 => $lx{50}, nx => \%nx, lx => \%lx,
+	};
+}
+
+sub kmer_count {
+	my ($seq, $k, @opt) = @_;
+	my $sub = 'kmer_count';
+	_sequence($sub, $seq);
+	# 2147483647 is the longest key a perl hash takes, I32_MAX
+	croak "$sub: k must be a whole number from 1 to 2147483647, not " . _what($k)
+		if !defined $k || ref $k || $k !~ /\A[1-9][0-9]{0,9}\z/ || $k > 2147483647;
+	my $args = _args(\@opt, $sub, [], [qw(overlap relative)]);
+	my %r; # the options, each resolved once
+	$r{overlap} = ($args->{overlap} // 1) ? 1 : 0; # 1 = every k-mer; 0 = one every k letters, which do not overlap
+	$r{relative} = $args->{relative} ? 1 : 0; # 1 = each count as a share of them all
+	my $step = $r{overlap} ? 1 : 0 + $k;
+	my $count;
+	# Bioinf.xs counts bytes. A string that perl holds as characters is handed
+	# over as bytes where it can be, and counted here where it cannot, which
+	# is when it has a character above 255.
+	my $bytes = $seq;
+	if (!utf8::is_utf8($bytes) || utf8::downgrade($bytes, 1)) {
+		($count) = _located(sub { _kmer_count($bytes, 0 + $k, $step) });
+	} else {
+		$count = {};
+		for (my $i = 0; $i + $k <= length $seq; $i += $step) {
+			$count->{ substr $seq, $i, $k }++;
+		}
+	}
+	if ($r{relative}) {
+		my $all = 0;
+		$all += $_ for values %{ $count };
+		$_ /= $all for values %{ $count };
+	}
+	$count;
+}
+
+# The weight of each nucleotide, as its monophosphate, and of each amino acid,
+# in daltons: "average" with every element at its standard atomic weight and
+# "monoisotopic" with each at its commonest isotope. They are Biopython 1.87's
+# unambiguous_dna_weights, unambiguous_rna_weights and protein_weights, and
+# the monoisotopic_ table of each (Bio/Data/IUPACData.py), which that file
+# introduces with "Mass data taken from PubChem". O is pyrrolysine and U
+# selenocysteine. "water" is what one bond between two residues gives up, from
+# molecular_weight() of Bio/SeqUtils/__init__.py.
+my %Weight = (
+	average => {
+		DNA => { A => 331.2218, C => 307.1971, G => 347.2212, T => 322.2085 },
+		RNA => { A => 347.2212, C => 323.1965, G => 363.2206, U => 324.1813 },
+		protein => {
+			A => 89.0932, C => 121.1582, D => 133.1027, E => 147.1293, F => 165.1891, G => 75.0666, H => 155.1546,
+			I => 131.1729, K => 146.1876, L => 131.1729, M => 149.2113, N => 132.1179, O => 255.3134, P => 115.1305,
+			Q => 146.1445, R => 174.201, S => 105.0926, T => 119.1192, U => 168.0532, V => 117.1463, W => 204.2252,
+			Y => 181.1885,
+		},
+		water => 18.0153,
+	},
+	monoisotopic => {
+		DNA => { A => 331.06817, C => 307.056936, G => 347.063084, T => 322.056602 },
+		RNA => { A => 347.063084, C => 323.051851, G => 363.057999, U => 324.035867 },
+		protein => {
+			A => 89.047678, C => 121.019749, D => 133.037508, E => 147.053158, F => 165.078979, G => 75.032028,
+			H => 155.069477, I => 131.094629, K => 146.105528, L => 131.094629, M => 149.051049, N => 132.053492,
+			O => 255.158292, P => 115.063329, Q => 146.069142, R => 174.111676, S => 105.042593, T => 119.058243,
+			U => 168.964203, V => 117.078979, W => 204.089878, Y => 181.073893,
+		},
+		water => 18.010565,
+	},
+);
+
+# A pattern for each capital letter, compiled once: perl 5.32 leaks a pattern
+# that is compiled at run time, and molecular_weight would compile one for
+# each letter on every call.
+my %Letter_re = map { $_ => qr/$_/ } 'A' .. 'Z';
+
+sub molecular_weight {
+	my ($seq, @opt) = @_;
+	my $sub = 'molecular_weight';
+	_sequence($sub, $seq);
+	my $args = _args(\@opt, $sub, [], [qw(circular double_stranded monoisotopic type)]);
+	my %r; # the options, each resolved once
+	$r{type} = _seq_type($sub, $args, ['DNA', 'RNA', 'protein']);
+	$r{circular} = $args->{circular} ? 1 : 0; # 1 = the molecule has no ends
+	$r{double_stranded} = $args->{double_stranded} ? 1 : 0; # 1 = with the strand that pairs with it
+	$r{monoisotopic} = $args->{monoisotopic} ? 1 : 0; # 1 = every atom its commonest isotope
+	croak "$sub: a protein has one strand, so \"double_stranded\" can't be used with it" if $r{double_stranded} && $r{type} eq 'protein';
+	my $table = $Weight{ $r{monoisotopic} ? 'monoisotopic' : 'average' };
+	my $weight = $table->{ $r{type} };
+	# whitespace is dropped and case ignored, as Biopython does
+	(my $left = uc $seq) =~ s/\s+//g;
+	my $len = length $left;
+	croak "$sub: the sequence is empty" unless $len;
+	# Each letter is counted by taking it out, so that what is left when every
+	# letter of the table has gone is what the table has no weight for.
+	my %n;
+	$n{$_} = ($left =~ s/$Letter_re{$_}//g) || 0 for sort keys %{ $weight };
+	croak "$sub: \"" . substr($left, 0, 1) . "\" has no weight as a letter of $r{type}; only " . join('', sort keys %{ $weight }) . ' do'
+		if length $left;
+	# a chain of $len residues has $len - 1 bonds, and a ring has $len
+	my $bonds = ($len - 1 + $r{circular}) * $table->{water};
+	my $total = -$bonds;
+	$total += $n{$_} * $weight->{$_} for sort keys %{ $weight };
+	if ($r{double_stranded}) {
+		# the other strand has as many of a letter's partner as this has of it
+		my %pair = $r{type} eq 'DNA' ? (A => 'T', C => 'G', G => 'C', T => 'A') : (A => 'U', C => 'G', G => 'C', U => 'A');
+		$total -= $bonds;
+		$total += $n{$_} * $weight->{ $pair{$_} } for sort keys %{ $weight };
+	}
+	$total;
+}
+
+# The pK of each group of a protein that takes or gives up a proton, for its
+# charge at a pH. They are positive_pKs, negative_pKs, pKnterminal and
+# pKcterminal of Biopython 1.87's Bio/SeqUtils/IsoelectricPoint.py, which
+# takes them from Bjellqvist et al., Electrophoresis 14:1023-1031 (1993) and
+# 15:529-539 (1994): the values ExPASy's Compute pI/Mw uses. "N" and "C" are
+# the two ends of the chain, whose pK depends on the residue that is there:
+# %Pk_n_end and %Pk_c_end give it for the residues that change it.
+my @Pk_positive = (['N', 7.5], ['K', 10.0], ['R', 12.0], ['H', 5.98]);
+my @Pk_negative = (['C_end', 3.55], ['D', 4.05], ['E', 4.45], ['C', 9.0], ['Y', 10.0]);
+my %Pk_n_end = (A => 7.59, M => 7.0, S => 6.93, P => 8.36, T => 6.82, V => 7.44, E => 7.7);
+my %Pk_c_end = (D => 4.55, E => 4.75);
+
+# How many of each charged group the protein $seq has, with the pK of each of
+# its ends, for _charge(): [[count, pK], ...] for the groups that carry a
+# positive charge when they hold a proton, and the same for those that carry a
+# negative one when they have lost it. Dies, for $sub, when $seq is empty.
+sub _charged_groups {
+	my ($sub, $seq) = @_;
+	_sequence($sub, $seq);
+	croak "$sub: the sequence is empty" unless length $seq;
+	my %n = (
+		N => 1, C_end => 1, # one of each end
+		K => ($seq =~ tr/Kk//), R => ($seq =~ tr/Rr//), H => ($seq =~ tr/Hh//),
+		D => ($seq =~ tr/Dd//), E => ($seq =~ tr/Ee//), C => ($seq =~ tr/Cc//), Y => ($seq =~ tr/Yy//),
+	);
+	my ($first, $last) = (uc substr($seq, 0, 1), uc substr($seq, -1));
+	my @positive = map { [$n{ $_->[0] }, $_->[0] eq 'N' && exists $Pk_n_end{$first} ? $Pk_n_end{$first} : $_->[1]] } @Pk_positive;
+	my @negative = map { [$n{ $_->[0] }, $_->[0] eq 'C_end' && exists $Pk_c_end{$last} ? $Pk_c_end{$last} : $_->[1]] } @Pk_negative;
+	(\@positive, \@negative);
+}
+
+# The charge at $ph of a protein with _charged_groups()'s $positive and
+# $negative: by the Henderson-Hasselbalch equation, a group of pK p holds its
+# proton for 1 / (1 + 10 ** (pH - p)) of the time. The sums are made in
+# Biopython's order, so that they round as its charge_at_pH() does.
+sub _charge {
+	my ($positive, $negative, $ph) = @_;
+	my ($plus, $minus) = (0, 0);
+	$plus += $_->[0] * (1 / (10 ** ($ph - $_->[1]) + 1)) for @{ $positive };
+	$minus += $_->[0] * (1 / (10 ** ($_->[1] - $ph) + 1)) for @{ $negative };
+	$plus - $minus;
+}
+
+sub protein_charge {
+	my ($seq, $ph, @rest) = @_;
+	my $sub = 'protein_charge';
+	croak "$sub: takes two arguments, the sequence and the pH" if @rest;
+	my ($positive, $negative) = _charged_groups($sub, $seq);
+	require Scalar::Util;
+	croak "$sub: the pH must be a number, not " . _what($ph)
+		if !defined $ph || ref $ph || !Scalar::Util::looks_like_number($ph) || $ph != $ph || $ph - $ph != 0;
+	_charge($positive, $negative, $ph);
+}
+
+sub isoelectric_point {
+	my ($seq, @rest) = @_;
+	my $sub = 'isoelectric_point';
+	croak "$sub: takes one argument, the sequence" if @rest;
+	my ($positive, $negative) = _charged_groups($sub, $seq);
+	# Bisection, as IsoelectricPoint.pi() of Biopython 1.87 does it, from its
+	# own starting interval: 4.05 is below the pI of a protein that is all
+	# aspartate and 12 above that of one that is all arginine, and 7.775 is
+	# its first guess. It stops when the interval is 0.0001 wide or less,
+	# which is that function's limit, so the answer is good to 4 decimal
+	# places.
+	my ($ph, $low, $high) = (7.775, 4.05, 12);
+	while ($high - $low > 0.0001) {
+		if (_charge($positive, $negative, $ph) > 0) {
+			$low = $ph;
+		} else {
+			$high = $ph;
+		}
+		$ph = ($low + $high) / 2;
+	}
+	$ph;
+}
+
+sub subseq {
+	my ($seq, $start, $end, @rest) = @_;
+	my $sub = 'subseq';
+	croak "$sub: takes the sequence, where to start and where to end" if @rest;
+	_sequence($sub, $seq);
+	my $len = length $seq;
+	$end //= $len;
+	foreach my $p (['start', $start], ['end', $end]) {
+		croak "$sub: the $p->[0] must be a whole number, 1 or more, not " . _what($p->[1])
+			if !defined $p->[1] || ref $p->[1] || $p->[1] !~ /\A[1-9][0-9]*\z/;
+	}
+	croak "$sub: the start, $start, is after the end, $end" if $start > $end;
+	croak "$sub: the end, $end, is beyond the sequence's length, $len" if $end > $len;
+	substr $seq, $start - 1, $end - $start + 1;
+}
+
+# ---- FASTA index
+#
+# The index is samtools's .fai: a line for each sequence, of its name, its
+# length, the byte in the file where it starts, how many bases each of its
+# lines holds, and how many bytes each takes with its line ending. What is and
+# is not a sequence that can be indexed is decided as fai_build_core() of
+# htslib 1.25's faidx.c decides it, and t/faidx.t checks the result against
+# that library's own expected index.
+
+# The index of the FASTA $file, read from the file itself, for $sub: an array
+# ref of [name, length, offset, line bases, line width] in the file's order.
+sub _fai_scan {
+	my ($sub, $file) = @_;
+	open my $fh, '<:raw', $file or croak "$sub: can't read $file: $!";
+	my (@index, %seen);
+	my ($name, $len, $offset, $bases, $width); # the sequence being read
+	my $inside = 0; # 1 = its lines are being read; 0 = they have ended, and only a blank line or a defline may follow
+	my $any = 0; # 1 = it has had a line, without which htslib does not count it as a sequence
+	my $pos = 0; # bytes read
+	my $add = sub {
+		if ($seen{$name}++) {
+			carp "$sub: $file has more than one sequence named \"$name\", and the first is the one indexed";
+		} else {
+			push @index, [$name, $len, $offset, $bases, $width];
+		}
+	};
+	local $/ = "\n";
+	while (defined(my $line = <$fh>)) {
+		$pos += length $line;
+		if (substr($line, 0, 1) eq '>') {
+			$add->() if $any;
+			croak "$sub: the last sequence of $file has a defline and nothing more" unless $line =~ /\n\z/;
+			# the name is the defline's first word, after any space that follows the ">"
+			($name) = $line =~ /\A>[^\S\n]*(\S*)/;
+			($len, $offset, $bases, $width, $inside, $any) = (0, $pos, 0, 0, 1, 0);
+		} elsif ($inside && $line eq "\n") {
+			$inside = 0;
+		} elsif (!$inside) {
+			next if $line eq "\n" || $line eq "\r\n";
+			croak "$sub: line $. of $file " . (defined $name
+				? "follows a shorter line of \"$name\", and only a sequence's last line can be shorter than its others"
+				: "comes before any defline");
+		} else {
+			# htslib counts the line feed even of a last line that has none
+			my $ll = length($line) + ($line =~ /\n\z/ ? 0 : 1);
+			my $cl = ($line =~ tr/\x21-\x7e//); # what C's isgraph() takes: the bases
+			$any = 1;
+			$len += $cl;
+			if ($width == 0) {
+				($width, $bases) = ($ll, $cl);
+			} elsif ($ll < $width) {
+				$inside = 0;
+			} elsif ($ll > $width) {
+				croak "$sub: line $. of $file is longer than the lines before it of \"$name\", and only a sequence's last line can differ";
+			}
+		}
+	}
+	close $fh or croak "$sub: can't read $file: $!";
+	croak "$sub: " . (defined $name ? "the last sequence of $file has a defline and nothing more" : "$file has no sequences") unless $any;
+	$add->();
+	\@index;
+}
+
+# The index in the .fai file $fai, for $sub, as _fai_scan() returns one.
+sub _fai_read {
+	my ($sub, $fai) = @_;
+	open my $fh, '<', $fai or croak "$sub: can't read $fai: $!";
+	my @index;
+	while (defined(my $line = <$fh>)) {
+		$line =~ s/\r?\n\z//;
+		my @f = split /\t/, $line, -1;
+		# a FASTQ's index has a sixth column, where its qualities start
+		croak "$sub: line $. of $fai isn't a line of a FASTA index: it needs a name, a length, an offset, a line's bases and a line's width"
+			unless @f == 5 && !grep { !/\A[0-9]+\z/ } @f[1 .. 4];
+		push @index, [$f[0], map { 0 + $_ } @f[1 .. 4]];
+	}
+	close $fh or croak "$sub: can't read $fai: $!";
+	croak "$sub: $fai has no sequences" unless @index;
+	\@index;
+}
+
+# Dies, for $sub, unless $file is a FASTA that can be indexed: a file that is
+# there, and not gzip's, since a byte of it cannot be sought.
+sub _fai_file {
+	my ($sub, $file) = @_;
+	croak "$sub: the FASTA must be a file name, not " . _what($file) if !defined $file || ref $file || $file eq '';
+	croak "$sub: \"$file\" doesn't exist or isn't a readable file" unless -f $file && -r _;
+	croak "$sub: $file is compressed, and a place in it can't be sought; decompress it first" if $file =~ /\.(?:gz|bz2|xz|zst)\z/i;
+}
+
+sub fasta_index {
+	my ($file, @rest) = @_;
+	my $sub = 'fasta_index';
+	croak "$sub: takes one argument, the FASTA file" if @rest;
+	_fai_file($sub, $file);
+	my $index = _fai_scan($sub, $file);
+	my $fai = "$file.fai";
+	open my $fh, '>:raw', $fai or croak "$sub: can't write $fai: $!";
+	print {$fh} join("\t", @{ $_ }), "\n" or croak "$sub: can't write $fai: $!" for @{ $index };
+	close $fh or croak "$sub: can't write $fai: $!";
+	_wrote($fai, 46); # cyan
+	$fai;
+}
+
+sub fasta_region {
+	my ($file, @regions) = @_;
+	my $sub = 'fasta_region';
+	_fai_file($sub, $file);
+	croak "$sub: needs at least one region, such as \"chr1:100-200\"" unless @regions;
+	foreach my $r (@regions) {
+		croak "$sub: a region must be a string, such as \"chr1:100-200\", not " . _what($r) if !defined $r || ref $r;
+	}
+	my $fai = "$file.fai";
+	my $index;
+	if (-f $fai) {
+		$index = _fai_read($sub, $fai);
+		# as htslib warns; -M is the age in days, so the older file has the larger
+		carp "$sub: $fai is older than $file, and may no longer describe it" if -M $fai > -M $file;
+	} else {
+		$index = _fai_scan($sub, $file);
+	}
+	my %by;
+	$by{ $_->[0] } //= $_ for @{ $index };
+	open my $fh, '<:raw', $file or croak "$sub: can't read $file: $!";
+	my %seq;
+	foreach my $region (@regions) {
+		next if exists $seq{$region};
+		# A region that is a sequence's whole name is that sequence, even when
+		# it could be read as a name and a range, which is how htslib's
+		# hts_parse_region() reads "HLA-A*01:01:01:01".
+		my ($entry, $start, $end) = ($by{$region});
+		# "name:start-end", "name:start", "name:start-" and "name:-end", with
+		# commas allowed in the numbers
+		if (!$entry && $region =~ /\A(.*):([0-9,]*)(?:-([0-9,]*))?\z/s && $by{$1}) {
+			my ($name, $from, $to) = ($1, $2, $3 // '');
+			tr/,//d for $from, $to;
+			($entry, $start, $end) = ($by{$name}, $from, $to) if length "$from$to";
+		}
+		croak "$sub: $file has no sequence named \"$region\"" . ($region =~ /:/ ? ', nor is it a range of one' : '') unless $entry;
+		my (undef, $len, $offset, $bases, $width) = @{ $entry };
+		$start = 1 unless defined $start && length $start;
+		my $to_end = !(defined $end && length $end); # 1 = no end was given, so it runs to the sequence's
+		croak "$sub: the region \"$region\" starts at 0, and positions are counted from 1" if $start < 1;
+		croak "$sub: the region \"$region\" ends before it starts" if !$to_end && $end < $start;
+		# a range that runs past the sequence's end is cut short there, as
+		# samtools faidx cuts it; one that starts past it is empty
+		$end = $len if $to_end || $end > $len;
+		my $want = $end - $start + 1;
+		if ($want <= 0) {
+			$seq{$region} = '';
+			next;
+		}
+		croak "$sub: $fai gives \"$entry->[0]\" lines of no bases" unless $bases > 0 && $width >= $bases;
+		my $skip = $start - 1; # bases before the first one wanted
+		my $in_line = $skip % $bases; # those of them on its own line
+		my $from = $offset + ($skip - $in_line) / $bases * $width + $in_line;
+		# the bases wanted and the line endings between them
+		my $bytes = $want + int(($in_line + $want - 1) / $bases) * ($width - $bases);
+		seek $fh, $from, 0 or croak "$sub: can't seek to byte $from of $file: $!";
+		my $buffer = '';
+		my $got = read $fh, $buffer, $bytes;
+		croak "$sub: can't read $file: $!" unless defined $got;
+		$buffer =~ tr/\x21-\x7e//cd;
+		croak "$sub: the index gives \"$entry->[0]\" " . ($skip + $want) . " bases, and $file has fewer where it says they are"
+			. (-f $fai ? "; $fai doesn't describe this file" : '') unless length($buffer) == $want;
+		$seq{$region} = $buffer;
+	}
+	close $fh or croak "$sub: can't read $file: $!";
+	\%seq;
+}
+
+# ---- motifs
+
+# What each letter of a motif matches, as the inside of a character class: the
+# bases an IUPAC nucleotide letter stands for (Biopython 1.87's
+# ambiguous_dna_values, Bio/Data/IUPACData.py, with U beside T so that a motif
+# written either way finds DNA and RNA alike), and the amino acids that B, Z
+# and J stand for (its extended_protein_values). X of a protein motif is any
+# one character, as it is when Bio::Tools::SeqPattern of BioPerl expands it.
+my %Motif_class = (
+	nucleotide => {
+		A => 'A', C => 'C', G => 'G', T => 'TU', U => 'TU', M => 'AC', R => 'AG', W => 'ATU', S => 'CG', Y => 'CTU',
+		K => 'GTU', V => 'ACG', H => 'ACTU', D => 'AGTU', B => 'CGTU', N => 'ACGTU',
+	},
+	protein => { (map { $_ => $_ } split //, 'ACDEFGHIKLMNOPQRSTUVWY'), B => 'DN', Z => 'EQ', J => 'IL' },
+);
+
+# The compiled pattern of each motif that motif_search has been given: by
+# "type" and then the motif for a string of letters, and under "pattern" by its
+# own text for a qr//.
+my %Motif_re;
+
+sub motif_search {
+	my ($seq, $motif, @opt) = @_;
+	my $sub = 'motif_search';
+	_sequence($sub, $seq);
+	my $args = _args(\@opt, $sub, [], [qw(strand type)]);
+	my %r; # the options, each resolved once
+	$r{type} = _seq_type($sub, $args, ['DNA', 'RNA', 'protein']);
+	$r{strand} = _strand($sub, $args, '+'); # '+', '-' or 'both'
+	croak "$sub: a protein has one strand, so \"strand\" can only be \"+\" with it" if $r{type} eq 'protein' && $r{strand} ne '+';
+	# The motif as a pattern that matches without moving on, so that the next
+	# search starts one letter along and hits that overlap are all found. It
+	# is compiled once for each motif and kept in %Motif_re, since perl 5.32
+	# leaks a pattern that is compiled at run time, and is used alone in the
+	# match below.
+	my $re;
+	if (re::is_regexp($motif)) {
+		$re = $Motif_re{pattern}{"$motif"} //= qr/(?=($motif))/;
+	} elsif (defined $motif && !ref $motif && $Motif_re{ $r{type} }{$motif}) {
+		$re = $Motif_re{ $r{type} }{$motif};
+	} else {
+		croak "$sub: the motif must be a string of IUPAC letters or a qr// pattern, not " . _what($motif)
+			if !defined $motif || ref $motif || $motif eq '';
+		my $class = $Motif_class{ $r{type} eq 'protein' ? 'protein' : 'nucleotide' };
+		my $pattern = '';
+		foreach my $letter (split //, uc $motif) {
+			if ($r{type} eq 'protein' && $letter eq 'X') {
+				$pattern .= '.';
+				next;
+			}
+			croak "$sub: \"$letter\" of the motif \"$motif\" isn't a letter of $r{type}; a pattern is given as qr//"
+				unless exists $class->{$letter};
+			$pattern .= length $class->{$letter} > 1 ? "[$class->{$letter}]" : $class->{$letter};
+		}
+		$re = $Motif_re{ $r{type} }{$motif} = qr/(?=($pattern))/is;
+	}
+	my $len = length $seq;
+	my @hit;
+	foreach my $strand ($r{strand} eq 'both' ? (1, -1) : $r{strand} eq '+' ? 1 : -1) {
+		my $text = $strand > 0 ? "$seq" : scalar reverse _complement($sub, $seq, type => $r{type});
+		while ($text =~ /$re/g) {
+			next unless $+[1] > $-[1]; # a pattern that can match nothing does, everywhere
+			push @hit, {
+				start => $strand > 0 ? $-[1] + 1 : $len - $+[1] + 1, end => $strand > 0 ? $+[1] : $len - $-[1],
+				strand => $strand, match => $1,
+			};
+		}
+	}
+	[sort { $a->{start} <=> $b->{start} || $a->{end} <=> $b->{end} || $b->{strand} <=> $a->{strand} } @hit];
 }
 
 # ---- BLAST
@@ -1766,8 +2562,9 @@ my %Build_length = (
 # writes that file and its header comment says where every column comes from.
 my $Panel; # undef until the file has been read
 
-# The marker panel $name, which this distribution installs in its share
-# directory, as a file that can be read; dies, naming $sub, when it is nowhere.
+# The data file $name (a marker panel, or the genetic codes), which this
+# distribution installs in its share directory, as a file that can be read;
+# dies, naming $sub, when it is nowhere.
 sub _share_file {
 	my ($sub, $name) = @_;
 	# Installed, the panel is in the distribution's share directory, which is
@@ -1783,7 +2580,7 @@ sub _share_file {
 		push @try, File::Spec->catfile($dir, File::Spec->updir, File::Spec->updir, 'share', $name) if length $dir;
 		($file) = grep { -f $_ && -r _ } @try;
 	}
-	croak "$sub: can't find the marker panel $name, which this distribution installs in its share directory"
+	croak "$sub: can't find $name, which this distribution installs in its share directory"
 		unless defined $file && -f $file && -r _;
 	$file;
 }
@@ -3288,6 +4085,17 @@ __END__
  my $seqs = fasta2hash('proteome.fa.gz');        # { defline => sequence }
  my $one  = fasta2hash('proteome.fa', 'P12345'); # just that sequence
  hash2fasta_file($seqs, 'copy.fa');
+ my $part = fasta_region('genome.fa', 'chr1:1000-2000');   # as samtools faidx
+
+ # sequences as strings
+ my $rc      = reverse_complement('ATGAAACTG');             # CAGTTTCAT
+ my $protein = translate('ATGAAACTGTAA', to_stop => 1);     # MKL
+ my $orfs    = find_orfs($one, table => 11, min_length => 100);
+ my $hits    = motif_search($one, 'GRATYC', strand => 'both');
+ my $gc      = gc_content($one);
+ my $kmers   = kmer_count($one, 4);
+ my $stats   = assembly_stats($seqs);                       # N50 and the rest
+ my $pi      = isoelectric_point($protein);
 
  my $hits = get_best_alignment_hit('blast.json', 'bit_score');
 
@@ -3334,7 +4142,11 @@ __END__
 
 =head1 DESCRIPTION
 
-FASTA I/O in XS, BLAST hit ranking, a search of the PDB's structures for a
+FASTA I/O in XS, with C<samtools>'s index for fetching a part of a file; the
+everyday operations on a sequence (its reverse complement, its translation
+under any of NCBI's genetic codes, its open reading frames, GC content, k-mers,
+motifs, molecular weight and isoelectric point, and an assembly's N50); BLAST
+hit ranking, a search of the PDB's structures for a
 sequence, and multiple-sequence-alignment plots and LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, how every two people are related, how well one VCF's calls agree with another's, each sample's ABO and RhD blood type, and the genotypes of the HIrisPlex-S eye, hair and skin colour panel, with a trait predictor for any multinomial logistic model you supply.
 
 Nothing is exported by default; ask for functions by name or with C<:all>.
@@ -3457,6 +4269,308 @@ such a string first, as with C<Encode::encode('UTF-8', $name)>. A key that is
 empty or holds a line feed dies, as does a sequence that is a reference
 (unless it is an object that overloads its own text), since C<fasta2hash> could
 not read any of them back as what was given.
+
+=head2 fasta_index($file)
+
+Writes the index of a FASTA file that C<samtools faidx> writes, C<$file.fai>,
+and returns its name; it prints C<wrote> and that name to STDOUT, as
+C<hash2fasta_file> does. The index has a line for each sequence: its name (the
+first word of its defline), its length, the byte where it starts, and how many
+bases and how many bytes each of its lines holds. Other programs that read a
+C<.fai> can use it, and C<fasta_region> does.
+
+ my $fai = fasta_index('genome.fa');   # genome.fa.fai
+
+A file can be indexed when, within each sequence, every line but the last is
+the same length, which is C<samtools>'s rule; a file that breaks it dies, naming
+the line. Of two sequences with one name, the first is indexed, with a warning.
+A compressed file dies, since a place in it cannot be sought.
+
+=head2 fasta_region($file, @regions)
+
+The parts of a FASTA file that C<@regions> name, as a hash ref of region =>
+sequence, without reading the rest of the file: the job of C<samtools faidx>.
+
+ my $part = fasta_region('genome.fa', 'chr1:1,000-2,000', 'chrM');
+ print $part->{'chr1:1,000-2,000'};
+
+A region is a sequence's name, for all of it, or C<name:start-end>,
+C<name:start> (to the end) or C<name:-end> (from the start), counting from 1 with
+both ends included; commas in the numbers are ignored. A name that has a colon
+in it, such as C<HLA-A*01:01:01:01>, is taken whole when a sequence has that
+name. A region that runs past the end of its sequence is cut short there, and
+one that starts past it is empty, as C<samtools faidx> gives them; a name that
+is not in the file, a start of 0 and an end before the start die.
+
+It uses C<$file.fai> when that is there, whether C<fasta_index> or C<samtools>
+wrote it, and warns when the index is older than the FASTA. Without one it
+reads through the file to make the index, which it does not write: for a large
+file that will be asked more than once, call C<fasta_index> first. The file must
+not be compressed.
+
+=head2 complement($seq, type => 'DNA')
+
+C<$seq> with each nucleotide replaced by the one it pairs with: C<A> and C<T>,
+C<C> and C<G>, and each IUPAC ambiguity letter with the letter for the bases its
+own pair with (C<R> and C<Y>, C<K> and C<M>, C<B> and C<V>, C<D> and C<H>; C<S>, C<W> and
+C<N> are their own). Case is kept, and anything that is not a nucleotide letter,
+a gap included, is left as it is.
+
+ complement('ATGAAACTG');                 # TACTTTGAC
+ complement('AUGAAACUG', type => 'RNA');  # UACUUUGAC
+
+C<type> is C<DNA> (the default) or C<RNA>, in any case, and says what is written,
+C<T> or C<U>; either is read in both. These are Biopython's C<complement> and
+C<complement_rna>.
+
+=head2 reverse_complement($seq, type => 'DNA')
+
+C<complement> of C<$seq>, reversed: the other strand, read from its own 5' end.
+
+ reverse_complement('ATGAAACTG');   # CAGTTTCAT
+
+=head2 transcribe($seq), back_transcribe($seq)
+
+C<transcribe> writes C<U> for every C<T> of C<$seq>, and C<back_transcribe> C<T> for
+every C<U>, in either case; nothing else changes.
+
+ transcribe('ATGAAACTG');        # AUGAAACUG
+ back_transcribe('AUGAAACUG');   # ATGAAACTG
+
+=head2 translate($seq, %args)
+
+The protein that the DNA or RNA C<$seq> codes for, one letter for each three of
+its own, from its first letter.
+
+ translate('GTGGCCATTGTAATGGGCCGCTGAAAGGGTGCCCGATAG');                # VAIVMGR*KGAR*
+ translate('GTGGCCATTGTAATGGGCCGCTGAAAGGGTGCCCGATAG', to_stop => 1);  # VAIVMGR
+ translate($cds, table => 'Vertebrate Mitochondrial', cds => 1);
+
+=over
+
+=item * C<table>: the genetic code, as NCBI's number for it (1, the standard code, by
+default) or one of its names in any case, such as C<Standard>, C<SGC0>,
+C<Bacterial> or C<Vertebrate Mitochondrial>. The codes are those of
+L<NCBI's table|https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi>,
+version 4.6: 1 to 6, 9 to 16 and 21 to 33.
+
+=item * C<to_stop>: 1 ends the protein before the first stop codon; 0 (the default)
+writes each stop and carries on.
+
+=item * C<stop_symbol>: the character written for a stop, C<*> by default.
+
+=item * C<cds>: 1 says C<$seq> is a whole coding sequence, and checks it: it must start
+with one of the code's start codons, be a multiple of three long, end with a
+stop codon and have no other. The start codon is then written as C<M>,
+whatever it codes for inside a protein, and the stop is left out.
+
+=item * C<gap>: a character, such as C<->, three of which make a codon that is written
+as that character. Without it a gap dies, as any other letter that is not a
+nucleotide's does, naming the codon.
+
+=back
+
+A codon with an ambiguous letter is given what the codons it stands for agree
+on: their amino acid when they share one (C<ATGAARCTG> is C<MKL>), C<*> when all
+are stops, C<B> for aspartate or asparagine, C<Z> for glutamate or glutamine, C<J>
+for leucine or isoleucine, and C<X> otherwise, a codon that may or may not be a
+stop included. Case is ignored, and C<T> and C<U> may be mixed.
+
+One or two letters left after the last whole codon are not translated, with a
+warning; cut the sequence to a multiple of three to avoid it. Codes 27, 28 and
+31 read some codons as an amino acid or as a stop, by context: those are
+translated as the amino acid, with a warning, and C<to_stop> dies with them.
+
+These rules are Biopython's, whose C<Seq.translate> this gives the same answers
+as, with one exception: an C<X> in a codon dies here, since it is not an IUPAC
+nucleotide letter, where Biopython reads it as C<N> in some codons.
+
+=head2 translate_six_frames($seq, %args)
+
+C<$seq> translated in all six reading frames, as a hash ref: C<1>, C<2> and C<3>
+are the frames that start at its first, second and third letter, and C<-1>, C<-2>
+and C<-3> those that start at the first, second and third letter of its reverse
+complement. Each protein is written from its own N-terminus.
+
+ my $f = translate_six_frames('AUGCUAACAUAAA');
+ # { 1 => 'MLT*', 2 => 'C*HK', 3 => 'ANI', -1 => 'FMLA', -2 => 'LC*H', -3 => 'YVS' }
+
+C<table> and C<stop_symbol> are as for C<translate>. Letters left after a frame's
+last whole codon are dropped without a warning, since five of the six frames
+always have some. The minus frames are numbered as scikit-bio and BLAST number
+them, which is EMBOSS C<transeq>'s C<-alternative>.
+
+=head2 find_orfs($seq, %args)
+
+The open reading frames of C<$seq> on both strands, as an array ref of hash
+refs in order of where they start:
+
+ my $orfs = find_orfs($plasmid, table => 11, min_length => 100, start => 'code');
+ printf "%d-%d %s %s...\n", @{ $_ }{qw(start end strand)}, substr $_->{protein}, 0, 10 for @{ $orfs };
+
+=over
+
+=item * C<table>: the genetic code, as for C<translate>.
+
+=item * C<start>: where a frame opens. C<any> (the default) is at the codon after a
+stop, or at the sequence's first, so that every stretch between stops is a
+frame. C<ATG> is at the first C<ATG> after that, and C<code> at the first of the
+genetic code's own start codons, which for code 11 include C<GTG> and C<TTG>;
+with either, the protein starts with C<M>, whatever the codon codes for
+elsewhere, and a stretch with no start codon is no frame.
+
+=item * C<min_length>: the fewest amino acids a frame may have, 10 by default.
+
+=item * C<strand>: C<both> (the default), C<+> or C<->.
+
+=back
+
+Each frame has C<start> and C<end>, its first and last base in C<$seq>, counted
+from 1, with C<start> the smaller on either strand and the stop codon left out;
+C<strand>, 1 or -1; C<frame>, as C<translate_six_frames> numbers them; C<length>,
+in amino acids; and C<protein>. A frame that reaches the end of the sequence
+without a stop is returned as far as it goes.
+
+This is what EMBOSS's C<getorf> finds: C<< start =E<gt> 'any' >> is its C<-find 0>,
+C<< start =E<gt> 'ATG' >> its C<-find 1> with its default table, and C<< start =E<gt> 'code' >>
+its C<-find 1> with C<-table>; its C<-minsize> is in nucleotides, three times
+C<min_length>.
+
+=head2 gc_content($seq, ambiguous => 'remove')
+
+The share of C<$seq> that is G or C, from 0 to 1, in either case; 0 for an
+empty sequence. C<S>, which is G or C, counts as one.
+
+ gc_content('ACTGN');                           # 0.5
+ gc_content('ACTGN', ambiguous => 'ignore');    # 0.4
+
+C<ambiguous> says what the other ambiguity letters count for: C<remove> (the
+default) leaves them out, so that the share is of the letters A, C, G, T, U, S
+and W; C<ignore> counts them in the length but not as G or C; and C<weighted>
+counts each as the share of its bases that are G or C, half for C<N> and
+two-thirds for C<B>. This is Biopython's C<gc_fraction>.
+
+=head2 kmer_count($seq, $k, %args)
+
+How many times each run of C<$k> letters occurs in C<$seq>, as a hash ref of
+k-mer => count. The letters are taken as they are: fold the case first if C<a>
+and C<A> should count together.
+
+ kmer_count('GATTACA', 3);                 # { GAT => 1, ATT => 1, TTA => 1, TAC => 1, ACA => 1 }
+ kmer_count('GATTACA', 3, overlap => 0);   # { GAT => 1, TAC => 1 }
+
+=over
+
+=item * C<overlap>: 1 (the default) counts the k-mer at every letter; 0 counts one
+every C<$k> letters, from the first, so that none overlaps another.
+
+=item * C<relative>: 1 gives each k-mer's share of all that were counted, which sum to
+1, in place of its count.
+
+=back
+
+A C<$k> longer than the sequence gives an empty hash. This is scikit-bio's
+C<kmer_frequencies>.
+
+=head2 assembly_stats($seqs)
+
+The statistics of a set of sequences, such as the contigs of an assembly, that
+C<assembly-stats> prints. C<$seqs> is a hash ref of name => sequence, as
+C<fasta2hash> returns, or an array ref of sequences.
+
+ my $s = assembly_stats(fasta2hash('contigs.fa'));
+ print "N50 $s->{n50} in $s->{l50} of $s->{number} contigs\n";
+
+It returns a hash ref of C<number>, how many sequences there are;
+C<total_length>, C<mean_length>, C<longest> and C<shortest>; C<n_count>, how many
+letters are C<N> or C<n>, and C<gaps>, how many runs of them there are; C<n50> and
+C<l50>; and C<nx> and C<lx>, hash refs of those two for every tenth from 10 to 100.
+N50 is the length of the sequence at which the lengths, added from the longest
+down, first reach half of their total, and L50 is how many sequences that took;
+C<< $s-E<gt>{nx}{90} >> and C<< $s-E<gt>{lx}{90} >> are the same for 90%. With no sequences
+every number is 0.
+
+=head2 molecular_weight($seq, %args)
+
+The weight of a molecule of DNA, RNA or protein, in daltons.
+
+ molecular_weight('AGC');                      # 949.6095
+ molecular_weight('AGC', type => 'RNA');       # 997.6077
+ molecular_weight('AGC', type => 'protein');   # 249.2874
+
+=over
+
+=item * C<type>: C<DNA> (the default), C<RNA> or C<protein>, in any case.
+
+=item * C<double_stranded>: 1 adds the weight of the strand that pairs with C<$seq>.
+
+=item * C<circular>: 1 for a molecule with no ends, which has one more bond.
+
+=item * C<monoisotopic>: 1 uses the weight of each element's commonest isotope, which
+is what a mass spectrometer resolves, rather than its average weight.
+
+=back
+
+A nucleic acid is weighed with a 5' phosphate. Only the plain letters have a
+weight -- C<ACGT>, C<ACGU>, or the 20 amino acids with C<O> (pyrrolysine) and C<U>
+(selenocysteine) -- so any other letter dies, as does an empty sequence;
+whitespace is dropped and case ignored. The weights are Biopython's, and this
+is its C<molecular_weight>.
+
+=head2 isoelectric_point($protein), protein_charge($protein, $pH)
+
+C<isoelectric_point> is the pH at which a protein has no net charge, and
+C<protein_charge> its charge at a pH you give.
+
+ isoelectric_point('INGAR');    # 9.75
+ protein_charge('INGAR', 7);    # 0.76
+
+The charge is that of the two ends of the chain and of every K, R, H, D, E, C
+and Y, each by the Henderson-Hasselbalch equation, with the pK values of
+Bjellqvist et al. (I<Electrophoresis> 14:1023, 1993, and 15:529, 1994), which
+depend on the residue at each end; these are the values ExPASy's Compute pI/Mw
+uses, and the method is that of Biopython's C<IsoelectricPoint>. The isoelectric
+point is found by bisection and is good to four decimal places. Other letters
+carry no charge, case is ignored, and an empty sequence dies.
+
+=head2 subseq($seq, $start, $end)
+
+The part of C<$seq> from C<$start> to C<$end>, counting from 1 with both
+included; C<$end> is the sequence's end when it is not given.
+
+ subseq('TTGGTGGCGTCAACT', 2, 5);   # TGGT
+
+A start of 0, a start after the end and an end past the sequence die, as they
+do in BioPerl's C<subseq>. For a part of a sequence in a file, see
+C<fasta_region>.
+
+=head2 motif_search($seq, $motif, %args)
+
+Where C<$motif> occurs in C<$seq>, as an array ref of hits in order of where
+they start, each a hash ref of C<start> and C<end> (counted from 1, both
+included), C<strand> (1 or -1) and C<match>, the letters that matched. Hits that
+overlap are all found.
+
+ my $hits = motif_search($seq, 'GRATYC', strand => 'both');   # EcoRI and BamHI sites
+ my $glyc = motif_search($protein, qr/N[^P][ST][^P]/, type => 'protein');
+
+C<$motif> is a string of IUPAC letters or a C<qr//> pattern. In a string of
+nucleotide letters, each ambiguity letter matches any of its bases (C<R> is C<A>
+or C<G>, C<N> any of the four), C<T> and C<U> match each other, and case is
+ignored; in a protein's, C<B> is C<D> or C<N>, C<Z> is C<E> or C<Q>, C<J> is C<I> or
+C<L>, and C<X> is anything. A pattern is used as it is written.
+
+=over
+
+=item * C<type>: C<DNA> (the default), C<RNA> or C<protein>.
+
+=item * C<strand>: C<+> (the default), C<-> or C<both>. The minus strand is searched as
+its own sequence, the reverse complement of C<$seq>, so a hit there has the
+motif as its C<match>, while its C<start> and C<end> are still positions in
+C<$seq>. A motif that is its own reverse complement is found on both strands
+at each site.
+
+=back
 
 =head2 get_best_alignment_hit($json_file, $sort_criterion)
 

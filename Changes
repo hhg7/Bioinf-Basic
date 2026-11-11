@@ -148,6 +148,31 @@ Revision history for Cn-Bioinf
    with MMseqs2, so the scores are MMseqs2's, not blastp's. It needs the
    network and HTTPS, so IO::Socket::SSL and Net::SSLeay are recommended,
    and HTTP::Tiny 0.056 is now required.
+ - The everyday operations on a sequence held as a string: complement,
+   reverse_complement, transcribe and back_transcribe; translate, under
+   any of NCBI's 27 genetic codes by number or name, with "to_stop",
+   "cds", "gap" and "stop_symbol"; translate_six_frames; find_orfs, which
+   finds the frames between stops or from a start codon on both strands;
+   gc_content; kmer_count; assembly_stats, for N50, L50 and the rest;
+   molecular_weight of DNA, RNA or protein; isoelectric_point and
+   protein_charge; subseq; and motif_search, for a motif of IUPAC letters
+   or a pattern on either strand. An ambiguous codon is translated as far
+   as its codons agree (B, Z, J or X otherwise), by Biopython's rules. XS
+   translates and counts k-mers: 10 million bases were translated in 0.09
+   s and their 8-mers counted in 0.5 s. The genetic codes ship as
+   share/genetic_codes.tsv, written by share/make_genetic_codes.pl from
+   NCBI's gc.prt, version 4.6.
+ - fasta_index writes the .fai index that samtools faidx writes, and
+   fasta_region fetches parts of a FASTA by name and range
+   ("chr1:1,000-2,000") without reading the rest of it, using that index
+   when it is there. A range past a sequence's end is cut short, as
+   samtools cuts it.
+ - The tests of those functions take every expected value from another
+   package: the test suites of Biopython 1.87, scikit-bio 0.7.4, BioPerl,
+   htslib 1.25 and assembly-stats 1.0.1, and the output of EMBOSS 6.6.0
+   (getorf, transeq, fuzznuc, wordcount, revseq, extractseq, geecee) and
+   samtools 1.19.2 for the same input. They need none of Alien::Bioinf's
+   programs, so they run wherever the module builds.
  - plot_msa and plot_phylo take "fh" and "execute", as Matplotlib::Simple's
    plt does. Each image is drawn by a Python script that stands alone,
    appended to "fh", a File::Temp, when one is given; "execute => 0"

@@ -1,6 +1,7 @@
-/*FASTA reading and writing for Cn::Bioinf, and the genotype counts behind its
+/*FASTA reading and writing for Cn::Bioinf, the genotype counts behind its
 sex_check, parent, relatedness, concordance, hirisplex_genotypes and
-blood_type.
+blood_type, and (since 2026-11-11) the codon and k-mer loops behind translate,
+translate_six_frames, find_orfs and kmer_count.
 
 fasta2hash() and hash2fasta_file() used to be pure perl in ~/Scripts/bioinf.pm:
 one readline, chomp and string append per line in, and one substr-sized SV per
@@ -18,9 +19,9 @@ began on 2026-10-17, costs about 15%: a made-up file of the same shape (938 MB,
 perl side (lib/Cn/Bioinf.pm) opens and closes the files.
 
 Every croak() and warn() here starts with C99's __func__, so a message names
-the C function that raised it (read_fasta, write_fasta, or one of the vcf_,
-sex_, parent_, rel_, conc_, hps_ and bt_ ones) and stays right if one is
-renamed.*/
+the C function that raised it (read_fasta, write_fasta, translate_codons,
+kmer_tally, or one of the vcf_, sex_, parent_, rel_, conc_, hps_ and bt_ ones)
+and stays right if one is renamed.*/
 #define PERL_NO_GET_CONTEXT
 #include "EXTERN.h"
 #include "perl.h"
@@ -2174,6 +2175,154 @@ static HV *bt_tally_vcf(pTHX_ SV *next, const char *name, UV min_depth, AV *pane
 	return out;
 }
 
+/*---- translation and k-mers: translate(), translate_six_frames(), find_orfs()
+and kmer_count().
+
+A genetic code arrives as the 64 letters of one line of
+share/genetic_codes.tsv, which is NCBI's ncbieaa: the amino acid of each codon
+in the order TTT, TTC, TTA, TTG, TCT .. GGG, with '*' for a stop. The rules for
+a codon with an ambiguous base are Biopython 1.87's (Bio/Seq.py,
+_translate_str(), and AmbiguousForwardTable in Bio/Data/CodonTable.py), which
+t/seq.t checks against that library's own tests.*/
+
+/*The bases that the IUPAC nucleotide letter c stands for, as a set of bits in
+the codes' own base order: 1 = T or U, 2 = C, 4 = A, 8 = G; 0 when c is not a
+nucleotide letter. The letters are those of NC-IUB's "Nomenclature for
+incompletely specified bases in nucleic acid sequences" (1984), as Biopython
+1.87 lists them in ambiguous_dna_values of Bio/Data/IUPACData.py. That table
+also has X, kept there "for historical reasons although it is not an IUPAC
+nucleotide"; it is left out here, so a codon with an X is refused.*/
+static unsigned char nt_set(char c) {
+	switch (c) {
+		case 'T': case 't': case 'U': case 'u': return 1;
+		case 'C': case 'c': return 2;
+		case 'A': case 'a': return 4;
+		case 'G': case 'g': return 8;
+		case 'Y': case 'y': return 1 | 2; // C or T
+		case 'W': case 'w': return 1 | 4; // A or T
+		case 'K': case 'k': return 1 | 8; // G or T
+		case 'M': case 'm': return 2 | 4; // A or C
+		case 'S': case 's': return 2 | 8; // C or G
+		case 'R': case 'r': return 4 | 8; // A or G
+		case 'H': case 'h': return 1 | 2 | 4; // not G
+		case 'B': case 'b': return 1 | 2 | 8; // not A
+		case 'D': case 'd': return 1 | 4 | 8; // not C
+		case 'V': case 'v': return 2 | 4 | 8; // not T
+		case 'N': case 'n': return 1 | 2 | 4 | 8;
+		default: return 0;
+	}
+}
+
+/*Whether the base set s holds exactly one base.*/
+#define NT_ONE(s) (((s) & ((s) - 1)) == 0)
+/*The place in T, C, A, G order of the one base in the set s: 1, 2, 4, 8 give
+0, 1, 2, 3.*/
+#define NT_INDEX(s) (((s) >> 1) - ((s) >> 3))
+/*The bit that stands for the letter c of a code in codon_letter()'s set: one
+for each letter from 'A' on, and bit 63 for a stop. A 64-bit set rather than a
+32-bit one, so that it also holds on EBCDIC, where 'Z' - 'A' is 40.*/
+#define AA_BIT(c) (UINT64_C(1) << ((c) == '*' ? 63 : (c) - 'A'))
+
+/*The letter that a codon is translated to under code, where s1, s2 and s3 are
+nt_set() of its three letters, none of them 0: '*' for a stop.
+
+A codon of three plain bases is looked up. One with an ambiguous base stands
+for several codons, and is given what they agree on: their amino acid when they
+have one between them, '*' when every one is a stop, B for D and N together, Z
+for E and Q, J for I and L, and X for anything else, a mix of stops and amino
+acids included. Those are Biopython's rules: B, Z and J are the only letters of
+its extended_protein_values that stand for two amino acids, and X is its
+pos_stop.*/
+static char codon_letter(const char *code, unsigned char s1, unsigned char s2, unsigned char s3) {
+	if (NT_ONE(s1) && NT_ONE(s2) && NT_ONE(s3)) return code[16 * NT_INDEX(s1) + 4 * NT_INDEX(s2) + NT_INDEX(s3)];
+	uint64_t seen = 0; // AA_BIT() of every letter the codon could be
+	char last = 'X'; // one of those letters, which is the answer when there is only one
+	for (unsigned short int i = 0; i < 4; i++) {
+		if (!(s1 >> i & 1)) continue;
+		for (unsigned short int j = 0; j < 4; j++) {
+			if (!(s2 >> j & 1)) continue;
+			for (unsigned short int k = 0; k < 4; k++) {
+				if (!(s3 >> k & 1)) continue;
+				last = code[16 * i + 4 * j + k];
+				seen |= AA_BIT(last);
+			}
+		}
+	}
+	if (NT_ONE(seen)) return last;
+	if (seen == (AA_BIT('D') | AA_BIT('N'))) return 'B';
+	if (seen == (AA_BIT('E') | AA_BIT('Q'))) return 'Z';
+	if (seen == (AA_BIT('I') | AA_BIT('L'))) return 'J';
+	return 'X';
+}
+
+/*seq translated under code, as a new mortal SV: one letter for each three of
+seq's, a stop written as stop_symbol, and whatever is left after the last whole
+codon dropped. With to_stop, the translation ends before the first stop. With
+gap other than NULL, a codon of three *gap is written as *gap.
+
+A codon with any other letter that is not a nucleotide's dies, and names the
+codon. The SV is mortal so that dying then does not leak it.*/
+static SV *translate_codons(pTHX_ SV *seq, SV *code_sv, char stop_symbol, bool to_stop, const char *gap) {
+	STRLEN code_len, len;
+	const char *code = SvPV_const(code_sv, code_len); // not restrict: perl's buffer
+	if (code_len != 64) croak("%s: a genetic code is 64 letters, not %" UVuf, __func__, (UV)code_len);
+	for (unsigned short int i = 0; i < 64; i++) {
+		if (code[i] != '*' && !isUPPER(code[i])) croak("%s: letter %" UVuf " of the genetic code \"%s\" is neither a capital letter nor *", __func__, (UV)i + 1, code);
+	}
+	const char *p = SvPV_const(seq, len); // not restrict: perl's buffer
+	const size_t codons = len / 3;
+	SV *out = sv_2mortal(newSV(codons ? codons : 1));
+	SvPOK_only(out);
+	char *o = SvPVX(out);
+	size_t n = 0; // letters written, which is read after the loop
+	for (size_t i = 0; i < codons; i++) {
+		const char *c = p + 3 * i;
+		const unsigned char s1 = nt_set(c[0]), s2 = nt_set(c[1]), s3 = nt_set(c[2]);
+		if (!s1 || !s2 || !s3) {
+			if (gap && c[0] == *gap && c[1] == *gap && c[2] == *gap) {
+				o[n++] = *gap;
+				continue;
+			}
+			croak("%s: codon %" UVuf ", \"%.3s\", has a letter that isn't a nucleotide's", __func__, (UV)(i + 1), c);
+		}
+		const char aa = codon_letter(code, s1, s2, s3);
+		if (aa != '*') {
+			o[n++] = aa;
+		} else if (to_stop) {
+			break;
+		} else {
+			o[n++] = stop_symbol;
+		}
+	}
+	o[n] = '\0';
+	SvCUR_set(out, n);
+	return out;
+}
+
+/*How many times each run of k bytes occurs in seq, as a new hash of run =>
+count: the run at every step-th byte, so step 1 counts every k-mer and step k
+those that do not overlap. A k of 0 or longer than seq gives an empty hash.
+
+The runs are bytes, so lib/Cn/Bioinf.pm counts a string that holds a character
+above 255 itself. A hash key's length is an I32, and a negative one means a
+UTF-8 key, so a k beyond I32_MAX dies; perl refuses it first.*/
+static HV *kmer_tally(pTHX_ SV *seq, UV k, UV step) {
+	STRLEN len;
+	const char *p = SvPV_const(seq, len); // not restrict: perl's buffer
+	HV *h = (HV*)sv_2mortal((SV*)newHV());
+	if (k > (UV)I32_MAX) croak("%s: k is %" UVuf ", and a hash key can be no longer than %" IVdf, __func__, k, (IV)I32_MAX);
+	if (step == 0) croak("%s: a step of 0 would count the first k-mer for ever", __func__); // cannot happen: perl passes 1 or k
+	if (k == 0 || k > len) return h;
+	const size_t last = len - (size_t)k; // where the last k-mer starts
+	for (size_t i = 0; i <= last; i += (size_t)step) {
+		SV **count = hv_fetch(h, p + i, (I32)k, 1);
+		if (!count) croak("%s: couldn't count the k-mer at %" UVuf, __func__, (UV)i); // cannot happen: an lvalue fetch from a plain hash
+		sv_setuv(*count, SvOK(*count) ? SvUV(*count) + 1 : 1);
+		if (step > last - i) break; // i + step would pass the end, and could wrap
+	}
+	return h;
+}
+
 MODULE = Cn::Bioinf	PACKAGE = Cn::Bioinf
 PROTOTYPES: DISABLE
 
@@ -2418,3 +2567,29 @@ PPCODE:
 	PUSHs(sv_2mortal(newRV_noinc((SV*)deleted)));
 	PUSHs(sv_2mortal(newSVuv(flags[0])));
 	PUSHs(sv_2mortal(newSVuv(flags[1])));
+
+SV *
+_translate(seq, code, stop_symbol, to_stop, gap)
+	SV *seq
+	SV *code
+	char stop_symbol
+	UV to_stop
+	SV *gap
+CODE:
+	// On a line of its own: SvREFCNT_inc_simple_NN() is a macro that evaluates
+	// its argument twice, and would translate twice. The mortal is kept by
+	// taking a second reference to it.
+	SV *protein = translate_codons(aTHX_ seq, code, stop_symbol, to_stop ? TRUE : FALSE, SvOK(gap) ? SvPV_nolen(gap) : NULL);
+	RETVAL = SvREFCNT_inc_simple_NN(protein);
+OUTPUT:
+	RETVAL
+
+SV *
+_kmer_count(seq, k, step)
+	SV *seq
+	UV k
+	UV step
+CODE:
+	RETVAL = newRV_inc((SV*)kmer_tally(aTHX_ seq, k, step)); // inc, since the hash is mortal
+OUTPUT:
+	RETVAL
