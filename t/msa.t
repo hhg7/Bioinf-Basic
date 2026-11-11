@@ -109,7 +109,11 @@ is png($r->{'output_file'}), "\x89PNG\r\n\x1a\n", 'a PNG tree image from the seq
 		$r = plot_msa(fasta => $seqs, filename => $later, execute => 0);
 		open STDOUT, '>&', $saved or die $!;
 	}
-	is slurp($said), "will write $later\n", 'it says the image will be written, not that it was';
+	# Read in text mode, as STDOUT wrote it: on Windows each "\n" printed is
+	# "\r\n" in the file, which slurp, being :raw, would hand back as it is.
+	open my $said_fh, '<', $said or die "$said: $!";
+	is do { local $/; <$said_fh> }, "will write $later\n", 'it says the image will be written, not that it was';
+	close $said_fh;
 	my $kept = $r->{'python_file'};
 	ok -s $kept && !-e $later, 'plot_msa with "execute => 0" and no "fh": a script kept, and not run';
 	unlink $r->{'msa_file'} or die "can't remove $r->{'msa_file'}: $!";

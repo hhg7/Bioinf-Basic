@@ -51,6 +51,10 @@ sub dies_like {
 	eval { $code->(); 1 } and return fail($name);
 	like $@, $re, $name;
 }
+# What was printed through STDOUT to the file $_[0]. STDOUT is opened in text
+# mode, so on Windows each "\n" printed is "\r\n" in the file; reading the file
+# in text mode too gives "\n" back, which slurp, being :raw, would not.
+sub printed { open my $fh, '<', $_[0] or die "$_[0]: $!"; local $/; <$fh> }
 # what $code printed to STDOUT, and what it returned in list context
 sub stdout_of {
 	my ($code) = @_;
@@ -59,7 +63,7 @@ sub stdout_of {
 	open STDOUT, '>', $file or die $!;
 	my @r = $code->();
 	open STDOUT, '>&', $save or die $!;
-	my $text = slurp($file); # scalar context: an empty file is '', not an empty list
+	my $text = printed($file); # scalar context: an empty file is '', not an empty list
 	($text, @r);
 }
 sub warnings_of {

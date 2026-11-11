@@ -29,7 +29,7 @@ use File::Spec;
 use Sys::Hostname 'hostname';
 use Exporter 'import';
 use XSLoader;
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 our @EXPORT_OK = qw(
 	assembly_stats back_transcribe blood_type clustal_view_residues complement concordance fasta2hash fasta_index
 	fasta_region find_orfs gc_content get_best_alignment_hit hash2fasta_file hirisplex_genotypes isoelectric_point
@@ -3406,13 +3406,24 @@ sub _pdb_method {
 	($h->{methodology} // '') eq 'computational' ? 'model' : '-';
 }
 
+# $text, a number as perl wrote it, with an exponent of two digits where two
+# are enough, as C99's printf writes one. The C runtime under Strawberry Perl
+# 5.24.4 writes three, so pdb_search's report read "1.6e-089" there (CPAN
+# Testers report 620bc624-ddea-11f1-b231-87fe50e89311, 2026-11-11) and
+# "1.6e-89" everywhere else. An exponent that needs three digits keeps them.
+sub _two_digit_exponent {
+	my ($text) = @_;
+	$text =~ s/([eE][-+])0(\d\d)\z/$1$2/;
+	$text;
+}
+
 # pdb_search's report on @$hits, $total of which RCSB found: one line a hit,
 # best first.
 sub _pdb_report {
 	my ($r, $hits, $total) = @_;
 	my $text = "pdb_search: " . ($total == 0 ? 'no hits' : scalar(@{ $hits }) . " of $total hit" . ($total > 1 ? 's' : ''))
 		. " in RCSB's " . ($r->{computed} ? 'PDB and computed models' : 'PDB')
-		. " for a $r->{len}-residue $r->{type} sequence, at an E-value below $r->{evalue}"
+		. " for a $r->{len}-residue $r->{type} sequence, at an E-value below " . _two_digit_exponent("$r->{evalue}")
 		. ($r->{identity} > 0 ? " and $r->{identity}% identity or more" : '') . "\n";
 	return $text unless @{ $hits };
 	my @head = ('id', 'method', 'resolution', 'identity', 'cover', 'evalue', 'bits', 'oligomer', 'description');
@@ -3420,7 +3431,7 @@ sub _pdb_report {
 		[$_->{id}, _pdb_method($_),
 			defined $_->{resolution} ? sprintf('%.2f A', $_->{resolution}) : defined $_->{plddt} ? "pLDDT $_->{plddt}" : '-',
 			defined $_->{pident} ? sprintf('%.1f%%', $_->{pident}) : '-', defined $_->{query_cover} ? sprintf('%.0f%%', $_->{query_cover}) : '-',
-			sprintf('%.2g', $_->{evalue}), $_->{bit_score},
+			_two_digit_exponent(sprintf('%.2g', $_->{evalue})), $_->{bit_score},
 			$_->{oligomeric_state} // '-', $_->{description} // '-']
 	} @{ $hits };
 	my @w = map { length $head[$_] } 0 .. $#head;

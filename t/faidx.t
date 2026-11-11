@@ -58,7 +58,11 @@ sub stdout_of {
 	$code->();
 	close STDOUT;
 	open STDOUT, '>&', $saved or die $!;
-	slurp($said);
+	# Read in text mode, as STDOUT wrote it: on Windows each "\n" printed is
+	# "\r\n" in the file, which slurp, being :raw, would hand back as it is.
+	open my $fh, '<', $said or die "$said: $!";
+	local $/;
+	my $all = <$fh>;
 }
 
 # The fixture has a part with CRLF line endings, and its offsets are bytes, so

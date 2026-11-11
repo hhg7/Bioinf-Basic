@@ -96,10 +96,18 @@ is_deeply [sort keys %{ $_ }], \@fields, "$_->{id} has every field" foreach @{ $
 my %h = map { $_->{id} => $_ } @{ $hits };
 
 # 1CH4_1: three gap openings, eight gap columns
-is_deeply { map { $_ => $h{'1CH4_1'}{$_} } qw(evalue bit_score align_len identity mismatches gaps gap_opens query_from query_to query_len hit_from hit_to hit_len) },
-	{ evalue => 9.682e-47, bit_score => 168, align_len => 146, identity => 89, mismatches => 49, gaps => 8, gap_opens => 3,
+is_deeply { map { $_ => $h{'1CH4_1'}{$_} } qw(bit_score align_len identity mismatches gaps gap_opens query_from query_to query_len hit_from hit_to hit_len) },
+	{ bit_score => 168, align_len => 146, identity => 89, mismatches => 49, gaps => 8, gap_opens => 3,
 		query_from => 3, query_to => 142, query_len => 142, hit_from => 3, hit_to => 146, hit_len => 146 },
 	'a gapped alignment: RCSB\'s numbers, and the identities and gaps counted from its sequences';
+# The E-value is RCSB's 9.682e-47 to within a relative 1e-12, rather than equal
+# to it: it reaches pdb_search through whichever JSON decoder JSON::MaybeXS
+# found, and not every decoder rounds a number correctly. On Strawberry Perl
+# 5.24.4 it came back as 9.6820000000001e-47, a relative error of about 1e-14
+# (CPAN Testers report 620bc624-ddea-11f1-b231-87fe50e89311, 2026-11-11), so
+# 1e-12 is a hundred times what was seen. The fixture's nearest other E-value,
+# 1.062e-47, is a factor of 9 away, so the wrong hit's would still fail.
+cmp_ok abs($h{'1CH4_1'}{evalue} / 9.682e-47 - 1), '<', 1e-12, 'and RCSB\'s E-value, as nearly as the JSON decoder gives it';
 cmp_ok abs($h{'1CH4_1'}{pident} - 60.9589041096), '<', 1e-9, 'pident is 100 * identity / align_len';
 cmp_ok abs($h{'1CH4_1'}{query_cover} - 98.5915492958), '<', 1e-9, 'query_cover is the share of the query aligned';
 is_deeply [@{ $h{'6IYI_1'} }{qw(identity gaps gap_opens align_len)}], [86, 1, 1, 141], 'one gap';
@@ -136,6 +144,17 @@ like $out, qr/^id +method +resolution +identity +cover +evalue +bits +oligomer +
 like $out, qr/^1BZ1_1 +X-ray +1\.59 A +100\.0% +100% +1\.6e-89 +291 +Hetero 4-mer +PROTEIN \(HEMOGLOBIN ALPHA CHAIN\)$/m, 'a line for an X-ray structure';
 like $out, qr/^AF_AFP69905F1_1 +model +pLDDT 98\.06 /m, 'a computed model shows its pLDDT in place of a resolution';
 like $out, qr/^1CH4_1 +X-ray +2\.50 A +61\.0% +99% +9\.7e-47 +168 +Homo 4-mer /m, 'and a gapped hit its identity and cover';
+# The C runtime under Strawberry Perl 5.24.4 writes an exponent with three
+# digits, and up to 2026-11-11 the report showed it: "1.6e-089" (CPAN Testers
+# report 620bc624-ddea-11f1-b231-87fe50e89311). No perl here writes one, so the
+# three-digit forms are given to the function that now shortens them.
+is_deeply [map { Cn::Bioinf::_two_digit_exponent($_) } qw(1.6e-089 9.7e-047 1e+005 1.5E-007)], [qw(1.6e-89 9.7e-47 1e+05 1.5E-07)],
+	'an exponent that a C runtime wrote with three digits is shown with two, rather than as "1.6e-089"';
+is_deeply [map { Cn::Bioinf::_two_digit_exponent($_) } qw(1.6e-89 1e-100 2.5e+308 0.011 5 0)], [qw(1.6e-89 1e-100 2.5e+308 0.011 5 0)],
+	'and an exponent of two digits, one that needs three, and a number with none are left as they are';
+(undef, undef, undef, $out) = replay(undef, seq => $alpha, evalue => 1e-5);
+like $out, qr/, at an E-value below 1e-05\n/, 'the E-value asked for is shown in the same form';
+(undef, undef, undef, $out) = replay(undef, seq => $alpha);
 # Without the utf8::encode in pdb_search (checked 2026-10-21 by deleting it), a
 # character above 255 in RCSB's text is printed as a "Wide character", which
 # kills a caller under FATAL warnings.

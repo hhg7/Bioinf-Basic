@@ -1,5 +1,34 @@
 Revision history for Cn-Bioinf
 
+0.02 2026-11-11 CST
+
+ [Test fixes]
+
+ - On Windows, t/blood.t, t/concordance.t, t/faidx.t, t/parent.t,
+   t/relatedness.t and t/sex.t failed 19 subtests between them, and
+   t/msa.t would have failed one where Alien::Bioinf is installed. Each
+   test sent STDOUT to a file in text mode, so every "\n" the module
+   printed was "\r\n" in the file, and then read that file back with
+   :raw. The module was right; the tests now read the file in text mode.
+   Found by CPAN Testers reports 620bc624-ddea-11f1-b231-87fe50e89311
+   (Strawberry Perl 5.24.4) and 666d71f4-ddea-11f1-b231-87fe50e89311
+   (Strawberry Perl 5.42.3) on 0.01-TRIAL, and reproduced on Linux with
+   PERLIO=:unix:crlf.
+
+ - t/pdb.t compared an E-value from its JSON fixture exactly, and JSON::PP
+   2.97001 under Strawberry Perl 5.24.4 decoded 9.682e-47 as
+   9.6820000000001e-47, which failed one subtest. The test now allows a
+   relative error of 1e-12, a hundred times what that report showed.
+
+ [Bug fixes]
+
+ - pdb_search's report wrote E-values with three exponent digits
+   ("1.6e-089") on Strawberry Perl 5.24.4, whose C runtime prints them
+   that way, and with two ("1.6e-89") everywhere else. It now writes two
+   on every platform, keeping a third only where the exponent needs it.
+   The same report (620bc624) found it in three subtests of t/pdb.t,
+   which now tests the shortening directly.
+
 0.01 2026-09-30 CDT
 
  [First release]
