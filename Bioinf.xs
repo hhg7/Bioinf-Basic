@@ -1,5 +1,6 @@
 /*FASTA reading and writing for Cn::Bioinf, and the genotype counts behind its
-sex_check, parent, relatedness and concordance.
+sex_check, parent, relatedness, concordance, hirisplex_genotypes and
+blood_type.
 
 fasta2hash() and hash2fasta_file() used to be pure perl in ~/Scripts/bioinf.pm:
 one readline, chomp and string append per line in, and one substr-sized SV per
@@ -18,7 +19,8 @@ perl side (lib/Cn/Bioinf.pm) opens and closes the files.
 
 Every croak() and warn() here starts with C99's __func__, so a message names
 the C function that raised it (read_fasta, write_fasta, or one of the vcf_,
-sex_, parent_, rel_ and conc_ ones) and stays right if one is renamed.*/
+sex_, parent_, rel_, conc_, hps_ and bt_ ones) and stays right if one is
+renamed.*/
 #define PERL_NO_GET_CONTEXT
 #include "EXTERN.h"
 #include "perl.h"
@@ -141,9 +143,21 @@ gets each defline in file order.
 
 A repeated defline is warned about and its sequences concatenated, which is
 what bioinf.pm did: it is the file that is wrong, and nothing here can say
-which of the two records was meant. With key given, only a repeat of key is
-looked for. Finding the others would mean keeping every defline read on the way
-to key: a hash of 400,000 keys, for one record of a proteome.*/
+which of the two records was meant. With key given, reading stops at the
+defline after key's record, so the only repeat seen, and concatenated, is one
+that follows it directly; a second record of key further on is never read,
+and the one sequence returned is the first's alone. That is the price of
+stopping early, and README.md says so. A repeat of any other defline is not
+looked for either: finding it would mean keeping every defline read on the way
+to key, a hash of 400,000 keys for one record of a proteome.
+
+A defline with a CR inside it, once the whitespace at its end is gone, dies:
+it is what a file whose lines end in CR alone (classic Mac OS) has, since with
+no LF the whole file is one line, and up to 2026-11-10 such a file came back as
+one record named by all of it, with no sequence. Biopython, which opens a file
+in Python's universal-newlines mode, reads one; here it is refused, by one
+memchr() a defline, rather than every CR being tested for as the file is
+read.*/
 static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 	HV *out = (HV*)sv_2mortal((SV*)newHV());
 	SV *hdr = sv_2mortal(newSVpvs(""));
@@ -187,6 +201,8 @@ static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 			in_hdr = FALSE;
 			chop_space(hdr);
 			if (!SvCUR(hdr)) croak("%s: %s line %" UVuf " is a defline with no name", __func__, name, line);
+			if (memchr(SvPVX(hdr), '\r', SvCUR(hdr)))
+				croak("%s: %s line %" UVuf " has a carriage return inside its defline, as a file whose lines end in CR alone (classic Mac OS) does; convert its line endings to LF first", __func__, name, line);
 			if (seq) SvPV_shrink_to_cur(seq);
 			bool is_key = key && sv_eq(hdr, key);
 			if (key && !is_key && hv_exists_ent(out, key, 0)) {
@@ -227,7 +243,14 @@ static const char *fasta_bytes(pTHX_ SV *sv, SV *scratch, STRLEN *len) {
 }
 
 /*Each key of h named in order, as ">key" and then its sequence broken into
-lines of width characters; width 0 puts each sequence on one line.*/
+lines of width characters; width 0 puts each sequence on one line.
+
+A key that is empty or holds a line feed dies, since read_fasta() could not
+read its record back: the one is a defline with no name, and the other ends
+the defline at the line feed and makes the rest of the key sequence. So does a
+sequence that is a reference, unless it is an object that overloads its own
+text. Up to 2026-11-10 all three were written, the reference as
+"ARRAY(0x5ea732db32c8)".*/
 static void write_fasta(pTHX_ PerlIO *fh, HV *h, AV *order, STRLEN width) {
 	SV *kbuf = sv_newmortal(), *sbuf = sv_newmortal(); // fasta_bytes()'s scratch copies, of the key and of its sequence
 	for (SSize_t i = 0; i <= av_len(order); i++) {
@@ -238,7 +261,10 @@ static void write_fasta(pTHX_ PerlIO *fh, HV *h, AV *order, STRLEN width) {
 		// kp and sp not restrict: a defline and its sequence may share one COW buffer
 		const char *kp = fasta_bytes(aTHX_ *k, kbuf, &kl);
 		if (!kp) croak("%s: \"%s\" has a character above 255, so it has to be encoded (with Encode::encode('UTF-8', ...), say) before it is written", __func__, SvPV_nolen(*k));
+		if (!kl) croak("%s: element %" IVdf " of the order is an empty name, which a defline can't be", __func__, (IV)i);
+		if (memchr(kp, '\n', kl)) croak("%s: \"%s\" has a line feed in it, which would end the defline there", __func__, kp);
 		if (!he || !SvOK(HeVAL(he))) croak("%s: \"%s\" has no sequence in the hash", __func__, kp);
+		if (SvROK(HeVAL(he)) && !SvAMAGIC(HeVAL(he))) croak("%s: the sequence of \"%s\" is a reference, not a string of residues", __func__, kp);
 		const char *sp = fasta_bytes(aTHX_ HeVAL(he), sbuf, &sl);
 		if (!sp) croak("%s: the sequence of \"%s\" has a character above 255, so it has to be encoded before it is written", __func__, kp);
 		PerlIO_putc(fh, '>');
@@ -253,7 +279,8 @@ static void write_fasta(pTHX_ PerlIO *fh, HV *h, AV *order, STRLEN width) {
 	if (PerlIO_error(fh)) croak("%s: error writing FASTA: %s", __func__, Strerror(errno));
 }
 
-/*Reading a VCF, for sex_check(), parent(), relatedness() and concordance().
+/*Reading a VCF, for sex_check(), parent(), relatedness(), concordance(),
+hirisplex_genotypes() and blood_type().
 
 The file is read by perl, which knows gzip and bzip2 through IO::Uncompress
 (linking zlib and libbz2 here would be a build dependency on every platform),
@@ -450,6 +477,8 @@ static void vcf_header(pTHX_ vcf_reader *r, const char *p, const char *e) {
 	if (p > e) croak("%s: %s has no samples: its #CHROM line (line %" UVuf ") ends at %s", __func__, r->name, r->line, col < 9 ? "INFO or before" : "FORMAT");
 	while (p <= e) {
 		const char *f = vcf_field_end(p, e);
+		// up to 2026-11-10 a tab at the end of the line made a sample named ""
+		if (f == p) croak("%s: %s has an empty sample name in its #CHROM line (line %" UVuf "), column %" UVuf "; a tab at the end of the line, or two together, makes one", __func__, r->name, r->line, (UV)(r->n + 10));
 		SV *name = newSVpvn(p, (STRLEN)(f - p));
 		if (hv_exists_ent(r->samples, name, 0)) {
 			// mortal on a line of its own: SvPV_nolen() is a macro that evaluates its
@@ -1738,12 +1767,8 @@ static const hps_site *hps_find(const hps_reader *t, unsigned short int chrom, U
 	return NULL;
 }
 
-/*The marker whose rs number is the ID field p..f, or NULL. An ID of several
-names, which the VCF specification separates with semicolons, is matched on
-its first.*/
-static const hps_site *hps_find_id(const hps_reader *t, const char *p, const char *f) {
-	const char *semi = (const char*)memchr(p, ';', (size_t)(f - p));
-	if (semi) f = semi;
+/*The marker whose rs number is the one name p..f, or NULL.*/
+static const hps_site *hps_find_name(const hps_reader *t, const char *p, const char *f) {
 	size_t n = (size_t)(f - p);
 	if (n == 0 || n >= HPS_ID) return NULL;
 	size_t lo = 0, hi = t->entries;
@@ -1757,6 +1782,20 @@ static const hps_site *hps_find_id(const hps_reader *t, const char *p, const cha
 		else hi = mid;
 	}
 	return NULL;
+}
+
+/*The marker whose rs number is in the ID field p..f, or NULL. An ID of several
+names, which the VCF specification separates with semicolons ("Semicolon-
+separated list of unique identifiers where available", VCFv4.2 section 1.4.1,
+field 3), is matched on the first of them that is a marker's. Up to 2026-11-10
+only its first name was looked at, so that "foo;rs12913832" matched nothing.*/
+static const hps_site *hps_find_id(const hps_reader *t, const char *p, const char *f) {
+	for (;;) {
+		const char *semi = (const char*)memchr(p, ';', (size_t)(f - p));
+		const hps_site *s = hps_find_name(t, p, semi ? semi : f);
+		if (s || !semi) return s;
+		p = semi + 1;
+	}
 }
 
 /*Whether the ALT a..ae is the REF r..re with the one base put in, in either
@@ -1951,6 +1990,187 @@ static HV *hps_dosage_vcf(pTHX_ SV *next, const char *name, UV min_depth, AV *pa
 	for (size_t k = 0; k < t.sites; k++) av_push(was, newSVuv(t.seen[k] ? 1 : 0));
 	*names = t.r.names;
 	*seen = was;
+	return out;
+}
+
+/*The genotypes behind blood_type().
+
+Its markers are a panel like hirisplex_genotypes()'s -- three of ABO and the
+sites of RHD at which somebody who has the gene almost always differs from
+the reference -- so hps_record() reads them, and this adds the two things a
+panel of markers cannot say.
+
+One is a record of a deletion that covers the whole RHD gene, which is how
+1000 Genomes' phase 3 writes the usual cause of RhD negative (1:25592642,
+ALT <CN0>, END=25661222): its genotype is the answer, where the SNVs can only
+say whether a sample has the gene at all. A deletion is an ALT of <CN0>,
+<DEL> or <DEL:...>, the VCF specification's symbolic alleles, and how far it
+runs is INFO's END, or else POS plus SVLEN (VCFv4.2, "INFO keys used for
+structural variants").
+
+The other is what the file could have shown. A VCF of one genome usually
+lists only the sites where its sample carries an ALT allele, so perl takes a
+marker with no record as homozygous REF; that is wrong for a file that could
+not have held the record, so each chromosome a marker is on is noted when any
+record of it is read, and again when a record of it has an allele longer than
+one base, without which a file cannot have held ABO's insertion.
+
+What is kept is hps_reader's byte a sample a marker and one more byte a
+sample for the deletion.*/
+
+typedef struct {
+	hps_reader h;             // first, so that the vcf_reader * bt_header() and bt_record() are given is this, and is what hps_record() takes
+	unsigned short int chrom; // the gene's chromosome, in vcf_chrom()'s numbering
+	UV start, end;            // the gene, 1-based and inclusive, which a deletion has to cover
+	uint32_t chroms;          // bit c set for each chromosome c that a marker or the gene is on; a record of any other is read no further than CHROM
+	uint32_t seen;            // bit c set once a record of chromosome c has been read
+	uint32_t longer;          // bit c set once a record of chromosome c had a REF or an ALT longer than one base
+	unsigned char *deleted;   // one per sample: how many copies of a deletion covering the gene it has, 0 to 2, or HPS_ABSENT or HPS_NO_CALL
+} bt_reader;
+
+static void bt_header(pTHX_ vcf_reader *r) {
+	bt_reader *t = (bt_reader*)r;
+	hps_header(aTHX_ r);
+	Newx(t->deleted, r->n, unsigned char);
+	SAVEFREEPV(t->deleted); // freed at the caller's LEAVE, croak or not; see vcf_read()'s block
+	memset(t->deleted, HPS_ABSENT, r->n);
+}
+
+/*Whether any allele of the ALT field p..e is longer than one base. A symbolic
+allele ("<DEL>", "<NON_REF>") is a name, not bases, and is not one.*/
+static bool bt_longer(const char *p, const char *e) {
+	for (const char *q = p; q < e;) {
+		const char *c = (const char*)memchr(q, ',', (size_t)(e - q));
+		const char *ce = c ? c : e;
+		if (ce - q > 1 && *q != '<') return TRUE;
+		if (!c) break;
+		q = ce + 1;
+	}
+	return FALSE;
+}
+
+/*Where a deletion is among the alleles of the ALT field p..e: 1 for the first
+ALT, 2 for the second and so on, or -1 when none of them is one.*/
+static short int bt_deletion(const char *p, const char *e) {
+	short int i = 1;
+	for (const char *q = p; q < e; i++) {
+		const char *c = (const char*)memchr(q, ',', (size_t)(e - q));
+		const char *ce = c ? c : e;
+		const size_t n = (size_t)(ce - q);
+		if ((n == 5 && (memcmp(q, "<CN0>", 5) == 0 || memcmp(q, "<DEL>", 5) == 0)) || (n > 5 && memcmp(q, "<DEL:", 5) == 0)) return i;
+		if (!c || i == 127) break; // a short int holds no more, and no record has so many ALTs
+		q = ce + 1;
+	}
+	return -1;
+}
+
+/*The whole number that key, which ends in its "=", has in the INFO field
+p..e, in *v, or FALSE when INFO lacks the key or its value is not one. A "-"
+before the number is passed over, since SVLEN is negative for a deletion, and
+the number ends at a comma, since SVLEN has a value for each ALT.*/
+static bool bt_info(const char *p, const char *e, const char *key, UV *v) {
+	const size_t kl = strlen(key);
+	for (const char *q = p; q < e;) {
+		const char *semi = (const char*)memchr(q, ';', (size_t)(e - q));
+		const char *qe = semi ? semi : e;
+		if ((size_t)(qe - q) > kl && memcmp(q, key, kl) == 0) {
+			const char *s = q + kl;
+			if (s < qe && *s == '-') s++;
+			if (s == qe || *s < '0' || *s > '9') return FALSE;
+			UV n = 0;
+			for (; s < qe && *s != ','; s++) {
+				if (*s < '0' || *s > '9' || n > (UV_MAX - 9) / 10) return FALSE;
+				n = n * 10 + (UV)(*s - '0');
+			}
+			*v = n;
+			return TRUE;
+		}
+		if (!semi) break;
+		q = qe + 1;
+	}
+	return FALSE;
+}
+
+static void bt_record(pTHX_ vcf_reader *r, const char *p, const char *e) {
+	bt_reader *t = (bt_reader*)r;
+	const char *f = vcf_field_end(p, e);
+	const unsigned short int chrom = vcf_chrom(p, f);
+	if (chrom == 0) return;
+	const uint32_t bit = (uint32_t)1 << chrom; // chrom is 24 at most
+	if (!(t->chroms & bit)) return;
+	t->seen |= bit;
+	const char *col[9];
+	const char *format_end = vcf_columns(aTHX_ r, p, f, e, col);
+	const char *alt = col[4], *alt_end = col[5] - 1;
+	if (col[4] - 1 - col[3] > 1 || bt_longer(alt, alt_end)) t->longer |= bit;
+	if (t->h.chroms & bit) hps_record(aTHX_ r, p, e);
+	if (chrom != t->chrom) return;
+	const short int idx = bt_deletion(alt, alt_end);
+	if (idx < 0) return;
+	const UV pos = vcf_pos(aTHX_ r, col[1], col[2] - 1);
+	const char *info = col[7], *info_end = col[8] - 1;
+	UV end = 0, len = 0;
+	if (!bt_info(info, info_end, "END=", &end) && bt_info(info, info_end, "SVLEN=", &len)) end = pos + len;
+	if (pos > t->start || end < t->end) return; // some other deletion, which leaves part of the gene
+	size_t gt, dp;
+	vcf_format(col[8], format_end, &gt, &dp);
+	p = format_end + 1;
+	for (size_t i = 0; i < r->n; i++) {
+		const char *se = vcf_sample(aTHX_ r, p, e, i);
+		// the first record that calls a sample is kept, should a file hold two
+		if (t->deleted[i] > 2) t->deleted[i] = hps_dose(r, p, se, gt, dp, idx);
+		p = se + 1;
+	}
+	vcf_samples_end(aTHX_ r, p, e);
+}
+
+/*blood_type()'s panel for every sample of the VCF name, which next returns a
+block of at a time. panel and markers are hps_panel()'s; chrom, start and end
+are the gene a deletion has to cover. Returns, as hps_dosage_vcf() does,
+sample => an array of one value for each marker, and sets *names and *seen as
+it does. *deleted is one value for each sample, in file order: how many copies
+of a deletion covering the gene it has, or undef where the file has no such
+record or the sample no call of it. flags[0] has bit c set for each
+chromosome c of the panel that the file has a record of, and flags[1] for each
+that it has an allele longer than one base on.*/
+static HV *bt_tally_vcf(pTHX_ SV *next, const char *name, UV min_depth, AV *panel, size_t markers, UV chrom, UV start, UV end, AV **names, AV **seen, AV **deleted, UV *flags) {
+	if (chrom < 1 || chrom > 24 || start < 1 || start > end)
+		croak("%s: the gene is chromosome %" UVuf ", %" UVuf " to %" UVuf ", which isn't a stretch of a chromosome", __func__, chrom, start, end);
+	bt_reader t;
+	Zero(&t, 1, bt_reader);
+	t.h.r.name = name;
+	t.h.r.min_depth = min_depth;
+	t.h.r.on_header = bt_header;
+	t.h.r.on_record = bt_record;
+	t.chrom = (unsigned short int)chrom;
+	t.start = start;
+	t.end = end;
+	hps_panel(aTHX_ &t.h, panel, markers);
+	t.chroms = t.h.chroms | ((uint32_t)1 << t.chrom);
+	vcf_read(aTHX_ next, &t.h.r);
+	HV *out = t.h.r.samples;
+	AV *lost = newAV();
+	av_extend(lost, (SSize_t)t.h.r.n - 1);
+	for (size_t i = 0; i < t.h.r.n; i++) {
+		SV **sample = av_fetch(t.h.r.names, (SSize_t)i, 0);
+		if (!sample) croak("%s: sample %" UVuf " of %s has lost its name", __func__, (UV)i, name); // cannot happen: every sample read was pushed
+		AV *row = newAV();
+		av_extend(row, (SSize_t)t.h.sites - 1);
+		for (size_t k = 0; k < t.h.sites; k++) {
+			const unsigned char d = t.h.dose[i * t.h.sites + k];
+			av_push(row, d <= 2 ? newSVuv(d) : newSV(0));
+		}
+		(void)hv_store_ent(out, *sample, newRV_noinc((SV*)row), 0); // in place of the column vcf_header() stored
+		av_push(lost, t.deleted[i] <= 2 ? newSVuv(t.deleted[i]) : newSV(0));
+	}
+	AV *was = newAV();
+	av_extend(was, (SSize_t)t.h.sites - 1);
+	for (size_t k = 0; k < t.h.sites; k++) av_push(was, newSVuv(t.h.seen[k] ? 1 : 0));
+	*names = t.h.r.names;
+	*seen = was;
+	*deleted = lost;
+	flags[0] = (UV)t.seen;
+	flags[1] = (UV)t.longer;
 	return out;
 }
 
@@ -2174,3 +2394,27 @@ PPCODE:
 	PUSHs(sv_2mortal(newRV_inc((SV*)out)));
 	PUSHs(sv_2mortal(newRV_inc((SV*)names)));
 	PUSHs(sv_2mortal(newRV_noinc((SV*)seen)));
+
+void
+_blood_type_tally(next, name, min_depth, panel, markers, chrom, start, end)
+	SV *next
+	const char *name
+	UV min_depth
+	AV *panel
+	UV markers
+	UV chrom
+	UV start
+	UV end
+PPCODE:
+	AV *names, *seen, *deleted;
+	UV flags[2]; // bt_tally_vcf()'s: the chromosomes read, and those with an allele longer than a base
+	PUTBACK;
+	HV *out = bt_tally_vcf(aTHX_ next, name, min_depth, panel, (size_t)markers, chrom, start, end, &names, &seen, &deleted, flags);
+	SPAGAIN;
+	EXTEND(SP, 6);
+	PUSHs(sv_2mortal(newRV_inc((SV*)out)));
+	PUSHs(sv_2mortal(newRV_inc((SV*)names)));
+	PUSHs(sv_2mortal(newRV_noinc((SV*)seen)));
+	PUSHs(sv_2mortal(newRV_noinc((SV*)deleted)));
+	PUSHs(sv_2mortal(newSVuv(flags[0])));
+	PUSHs(sv_2mortal(newSVuv(flags[1])));

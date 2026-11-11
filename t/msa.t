@@ -255,7 +255,11 @@ foreach my $bad (
 	[{ filename => $img, fasta => [] }, qr/"fasta" must be a FASTA file name or a hash ref/],
 	[{ filename => $img, 'alignment_json' => $json, metric => 'hseq' }, qr/"hseq" isn't one of the metrics/],
 	[{ filename => $img, 'alignment_json' => catfile($dir, 'new.json') }, qr/needs "fasta" to align, or an existing "alignment_json" \(.+new\.json doesn't exist yet\)/],
-	[{ filename => $img, 'alignment_json' => $json, order => ['nodot'] }, qr/can't get a genus and species from "nodot"/],
+	# a sequence the report holds: since 2026-11-10 a name in "order" that it
+	# lacks, as "nodot" was here, dies of that first (t/checks.t)
+	[{ filename => $img, 'alignment_json' => { BlastOutput2 => [{ report => { results => { bl2seq => [{ query_title => 'nodot',
+		hits => [{ description => [{ title => 'nodot' }], hsps => [{ score => 1 }] }] }] } } }] } }, qr/can't get a genus and species from "nodot"/],
+	[{ filename => $img, 'alignment_json' => $json, order => ['nodot'] }, qr/"order" names sequences that aren't in the BLAST report: nodot/],
 ) {
 	eval { msa_quality_table(%{ $bad->[0] }) };
 	like $@, $bad->[1], "dies: $bad->[1]";

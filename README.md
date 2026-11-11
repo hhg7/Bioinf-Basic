@@ -38,6 +38,10 @@
     my $conc = concordance(truth => 'NA12878.truth.vcf.gz', test => 'NA12878.run42.vcf.gz');
     print $conc->{'NA12878'}{metrics}{genotype_concordance};
 
+    # each sample's ABO and RhD blood type, and the genotype behind each
+    my $blood = blood_type(vcf => 'exome.vcf.gz');
+    print "$blood->{'NA12878'}{type} ($blood->{'NA12878'}{abo}{genotype})\n"; # A+ (AO)
+
     # the 41 HIrisPlex-S markers, as the webtool's CSV wants them
     my $g = hirisplex_genotypes(vcf => 'genome.vcf.gz', file => 'hirisplexs.csv');
 
@@ -48,13 +52,13 @@
 # DESCRIPTION
 
 FASTA I/O in XS, BLAST hit ranking, a search of the PDB's structures for a
-sequence, and multiple-sequence-alignment plots and LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, how every two people are related, how well one VCF's calls agree with another's, and the genotypes of the HIrisPlex-S eye, hair and skin colour panel, with a trait predictor for any multinomial logistic model you supply.
+sequence, and multiple-sequence-alignment plots and LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, how every two people are related, how well one VCF's calls agree with another's, each sample's ABO and RhD blood type, and the genotypes of the HIrisPlex-S eye, hair and skin colour panel, with a trait predictor for any multinomial logistic model you supply.
 
 Nothing is exported by default; ask for functions by name or with `:all`.
 Every function dies (via `Carp::croak`) on bad arguments, with a message that
 starts with the name of the function that raised it, as in
 `fasta2hash: couldn't find "four" in x.fa`. `pdb_search`, `pgs_score`, `sex_check`,
-`parent`, `relatedness`, `concordance`, `hirisplex_genotypes`, `trait_predict`, `plot_msa`, `plot_phylo`, `msa_quality_table` and `clustal_view_residues`
+`parent`, `relatedness`, `concordance`, `blood_type`, `hirisplex_genotypes`, `trait_predict`, `plot_msa`, `plot_phylo`, `msa_quality_table` and `clustal_view_residues`
 take `name => value` pairs, not a hash ref.
 
 ## Alien::Bioinf
@@ -139,8 +143,12 @@ Reads a FASTA file (gzip-compressed if its name ends in `.gz`, in any case,
 which needs a `gzip` program on `PATH`). Returns a hash ref of defline (without the `>`) =>
 sequence, or, with `$key`, just the sequence of that defline, reading no
 further than the record after it. A defline that appears twice is warned about
-and its sequences concatenated; with `$key`, only a repeat of `$key` is looked
-for. Line endings may be `\n` or `\r\n`. Whitespace (space, tab, `\r`, `\f`
+and its sequences concatenated. With `$key`, reading stops at the defline
+after that record, so only a repeat that follows it directly is seen; a second
+record of that name further on is not read, and the first's sequence comes
+back alone, with no warning. Read the whole file where that matters. Line
+endings may be `\n` or `\r\n`; a file whose lines end in `\r` alone (classic
+Mac OS) dies, since without a `\n` it is all one line. Whitespace (space, tab, `\r`, `\f`
 and `\x0b`) is dropped from sequences and from the end of deflines, as
 Biopython drops it, so a defline of `x` and a space is found as `x`. Deflines and sequences are bytes,
 just as they are in the file. A `.gz` that gzip cannot read to its end, such as
@@ -156,7 +164,10 @@ wrapped at `$width` columns (default 80; 0 for one line each). Returns
 on cyan when STDOUT is a terminal. Keys and sequences are written as bytes, as `print` to a `:raw`
 handle writes them, so a string that perl holds as UTF-8 is written as the
 characters in it. A character above 255 has no single byte and dies; encode
-such a string first, as with `Encode::encode('UTF-8', $name)`.
+such a string first, as with `Encode::encode('UTF-8', $name)`. A key that is
+empty or holds a line feed dies, as does a sequence that is a reference
+(unless it is an object that overloads its own text), since `fasta2hash` could
+not read any of them back as what was given.
 
 ## get_best_alignment_hit($json_file, $sort_criterion)
 
@@ -608,7 +619,13 @@ sites that one of the two never had sequenced. The report gives the sites in
 each file alone for that reason, and `parent` warns when one file has more
 than twice as many as the other: the three pairs of the family above had
 ratios of 1.13 at most, an exome of another kit had 3.0 to 13 against them,
-and a genome against an exome 58 (with a kinship of -19.8). A VCF
+and a genome against an exome 58 (with a kinship of -19.8). The difference
+must also be 50 sites or more, which chance does not give (a ratio over 2 with
+a difference of 50 has a chance of 4.8e-5 at most, were a site as likely to be
+in either file alone), and 0.9% or more of the sites compared, since fewer
+could not carry the parent and child above over `max_ibs0` even if every one
+were an opposite homozygote; so two VCFs that list every site and differ by 3
+sites against 1 are not warned of. A VCF
 that leaves out filtered calls has holes that look hom-REF too.
 
 `parent` dies, rather than return a 0 or 1 that it has no grounds for, when
@@ -950,6 +967,170 @@ schemes for the chromosomes other than `chr`.
 
 A BCF is not read; convert it with `bcftools view -Oz`.
 
+## blood_type(%args)
+
+Tells each sample's ABO blood group and whether it is RhD positive or
+negative from a VCF, with the genotype behind each:
+
+    use Cn::Bioinf 'blood_type';
+
+    my $b = blood_type(vcf => 'exome.vcf.gz');
+    print $b->{NA12878}{type};               # A+
+    print $b->{NA12878}{abo}{genotype};      # AO
+    print $b->{NA12878}{rhesus}{phenotype};  # positive
+
+and prints
+
+    blood_type: exome.vcf.gz
+    ABO from rs8176719 (O's deletion), rs8176746 (B) and rs41302905 (O2); RhD from 15 sites of RHD, or a record of the gene's deletion; matched by position on b37; genotypes of DP below 7 not counted
+    sample   type  ABO  ABO genotype  RhD       RhD genotype  RHD sites
+    NA12878  A+    A    AO            positive  D.                 2/15
+    "RHD sites" is how many of the sites the sample has an ALT allele at; one is enough for RhD positive
+    not in the file, and taken as homozygous for the reference allele: rs8176746, rs41302905, 13 of the 15 RHD sites
+
+with one row for each sample, in the VCF's order.
+
+**This is not a blood test, and must not be used to choose blood for a
+transfusion or for any other clinical purpose.** It reads the common alleles
+and nothing else: a weak or partial D, an *RHD* gene that is present but does
+not work (the *RHD* pseudogene, common in people of African ancestry, makes
+somebody RhD negative whom this calls positive), a hybrid of *RHD* and *RHCE*,
+the A2 and other subgroups, cis-AB and the rare O alleles are all outside it.
+
+An exome's 22 MB `.vcf.gz` took 0.8 s and 20 MB, and a whole genome's 155 MB
+6.1 s and 47 MB (perl 5.44.0, 2026-11-10). The markers are in
+`share/blood_type_panel.tsv`, which `share/make_blood_type_panel.pl` writes;
+its header comment says where each comes from, and the module never runs it.
+
+### ABO
+
+Three markers are read. `rs8176719` is the single-base deletion that makes the
+common O alleles; the reference genome carries the deletion, on GRCh37 and on
+GRCh38, so a VCF writes a working gene there as an insertion, and a chromosome
+with that insertion is A or B. `rs8176746` is one of the changes that make
+the B enzyme, and `rs41302905` is the O2 allele, an O with no deletion, which
+would otherwise be read as A. So a chromosome without the insertion is O,
+whatever else it carries; one with it is B with `rs8176746`'s T, O with
+`rs41302905`'s T, and otherwise A. The genotype is the two letters, A before B
+before O (`AO`, `BO`, `AB`, `OO`), and the phenotype is what they make: `A`,
+`B`, `AB` or `O`.
+
+The genotypes are not phased, so somebody heterozygous at both `rs8176719`
+and `rs8176746` is read as `BO`, the B allele being taken to be on the
+chromosome with the working gene. Of the 5,008 haplotypes of 1000 Genomes'
+phase 3, 721 carried both and 44 the B allele without the insertion, which
+makes that reading right 98.1% of the time.
+
+Checked against 1000 Genomes on 2026-11-10: the ABO genotype read from phase
+3's calls on GRCh37 and the one read from the New York Genome Center's 30x
+resequencing of the same people, called afresh on GRCh38, were the same for
+all 2,504 of them.
+
+### RhD
+
+Most people who are RhD negative have no *RHD* gene on either chromosome, and
+a VCF of SNVs has no record for a gene that is not there. `blood_type` reads
+it in one of two ways.
+
+Where the file has a record of a deletion that covers the whole gene, as 1000
+Genomes' phase 3 does (`1:25592642 <CN0>`, `END=25661222`), the sample's
+genotype there is the answer: `DD`, `Dd` or `dd`. A deletion is an ALT of
+`<CN0>`, `<DEL>` or `<DEL:...>`, and has to start at or before the gene and
+end, by `END` or `SVLEN`, at or after it.
+
+Otherwise it reads 15 sites inside the gene at which the reference genome
+carries a rare allele, so that almost everybody who has the gene has an ALT
+call there, and nobody without it has. One such call makes a sample RhD
+positive, written `D.`, since SNVs cannot say whether the second chromosome
+has the gene too: the ratio of heterozygous to homozygous-ALT calls inside the
+gene, which tells sex on X, got a tenth to a quarter of 2,343 people wrong at
+any cutoff. No such call makes a sample `dd`, RhD negative.
+
+The sites were chosen, and counted, in 1000 Genomes: the 30x calls of the
+2,493 people whose deletion genotype phase 3 gives. Of the 150 with no gene,
+none had a call at any of the 15; of the 2,343 with one or two, 5 had a call
+at none, and so are called negative, and 2 at only one. Choosing the sites
+on a random half of the people and counting on the other half chose the same
+15 and gave the same counts.
+
+An exome sees little of this: the capture kit of the three exomes tried
+reached 2 of the 15 sites, at a depth of 13. The types of those three are
+known from the depth of their reads: two cover *RHD*'s exons at a mean depth
+of 3 and 2 against 90 and 97 over *RHCE*'s, and the third at 30 against 84;
+`blood_type` called them negative, negative and positive. A kit that reaches
+none of the 15 sites would call everybody
+negative, and `carried` and `listed`, below, are returned so that an answer
+from few sites can be seen for what it is.
+
+### A marker the file has no record of
+
+A VCF of one person usually lists only the sites where that person carries an
+ALT allele, so that somebody who is OO, or has no B allele, or has no *RHD*
+gene, simply has no record at those markers. By default a marker with no
+record is therefore read as homozygous for the reference allele, and each
+answer says which markers that was done for. Two things are not read that
+way, because the file could not have held the record:
+
+- a marker on a chromosome the file has no record on at all;
+- `rs8176719`, an insertion, in a file with no allele longer than one base on
+  chromosome 9. Such a file holds SNVs only, and reading the insertion's
+  absence as REF would call everybody O; no ABO type is given, and `why` says
+  so.
+
+A file of every site, a cohort's, or a genotyping array's does have a record
+where a sample is homozygous REF, and `assume_ref => 0` makes a marker with
+no record a marker with no genotype.
+
+### Arguments
+
+- `vcf` (required): a `.vcf`, `.vcf.gz`, `.vcf.bgz` or `.vcf.bz2` file. As
+  `sex_check` does, it may be given first and on its own:
+  `blood_type('genome.vcf.gz')`.
+- `assume_ref`: 1 (the default) reads a marker the file has no record of as
+  homozygous for the reference allele, as above; 0 leaves it without a
+  genotype.
+- `build`: `hg19`, `b37`, `hg38` or `b38`, saying which of the panel's two sets
+  of coordinates to match on. By default it is read from the VCF's `##contig`
+  lengths, as `hirisplex_genotypes` reads it, and `blood_type` dies asking for
+  it when the header gives no length it knows.
+- `min_depth`: a genotype whose FORMAT `DP` is below this is not counted.
+  Defaults to 7, which is `sex_check`'s and the depth the RhD sites were chosen
+  at; 0 counts every call whatever its depth. A genotype with no `DP` is
+  always counted.
+- `report`: 1 (the default) prints the table to STDOUT; 0 returns the answers
+  only.
+
+### What it returns
+
+A hash ref keyed by sample name, each holding:
+
+- `type`: the two together, as `A+` or `O-`, or `undef` when either is not
+  known.
+- `abo`: a hash ref of
+    - `genotype` and `phenotype`: as above, or `undef`;
+    - `markers`: a hash ref of rs number => 0, 1 or 2 copies of the allele
+      counted, or `undef` where the sample has no genotype;
+    - `assumed_ref`: an array ref of the markers the file has no record of
+      that were read as homozygous REF;
+    - `why`: `undef`, or why no type could be given.
+- `rhesus`: a hash ref of
+    - `genotype`: `DD`, `Dd` or `dd` from a record of the deletion; `D.` or
+      `dd` from the sites; or `undef`;
+    - `phenotype`: `positive`, `negative` or `undef`;
+    - `basis`: `deletion` or `sites`, saying which of the two it was read
+      from, or `undef`;
+    - `sites`, `listed` and `carried`: how many RhD sites the panel has, how
+      many of them the file has a record of, and at how many this sample has
+      an ALT allele;
+    - `deleted`: the copies of the deletion the sample has, 0 to 2, or `undef`
+      when the file has no record of it that calls the sample;
+    - `why`: `undef`, or why no type could be given.
+
+A genotype is counted only when the call is diploid and complete, as
+`hirisplex_genotypes` counts one. `blood_type` warns when the file has no
+record on chromosome 1 or on chromosome 9, which usually means the wrong
+build.
+
 ## hirisplex_genotypes(%args)
 
 Reads the 41 markers of the HIrisPlex-S eye, hair and skin colour panel out of
@@ -1005,7 +1186,9 @@ regardless of case.
   `hirisplex_genotypes('genome.vcf.gz')`.
 - `match`: `position` (the default) matches CHROM and POS against the panel's
   coordinates; `id` matches the ID column against the markers' rs numbers,
-  which finds nothing in a VCF whose ID column is `.`.
+  which finds nothing in a VCF whose ID column is `.`. An ID of several
+  names, separated by semicolons as the VCF specification has them, matches
+  when any of them is a marker's.
 - `build`: `hg19`, `b37`, `hg38` or `b38`, saying which of the panel's two sets
   of coordinates to match on. By default it is read from the VCF's `##contig`
   lengths, and `hirisplex_genotypes` dies asking for it when the header gives
@@ -1249,7 +1432,10 @@ Draws an all-against-all BLAST score table with matplotlib, and returns
   `cb_max`, `cblogscale`, `show_numbers`: the sequences to show, in order; a
   number added to every value; the value of a pair with no hit (otherwise
   drawn grey); the title; the colour bar's label, lower and upper ends, and
-  whether it is logarithmic; and whether each cell shows its number.
+  whether it is logarithmic; and whether each cell shows its number. A name
+  in `order` that the report does not hold dies, and so does a
+  `logscale_add`, `default_undefined`, `cb_min`, `cb_max` or `normalize` that
+  is not a number.
 
 `msa_file` is accepted and ignored, for old callers.
 

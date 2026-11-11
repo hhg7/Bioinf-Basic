@@ -330,6 +330,22 @@ score_is pgs_score(vcf => $vcf, weights => $weights, match => 'id'), {
 	is_deeply \@warned, [], 'and nothing else was warned';
 }
 
+# Found by review on 2026-11-10, and failing against the code of that day: a
+# failure of PLINK 2 was raised again with croak, which gave the message a
+# second "at ... line", after the "End time:" that PLINK 2 ends every run with.
+# The period after the line number is optional, since Carp before 1.25 (perl
+# 5.12.5's) writes none.
+{
+	my $dir = tempdir(CLEANUP => 1);
+	my $bad = catfile($dir, 'bad.vcf');
+	open my $fh, '>', $bad or die "$bad: $!";
+	print {$fh} "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n1\tabc\t.\tA\tG\t.\t.\t.\tGT\t0/1\n";
+	close $fh or die "$bad: $!";
+	eval { pgs_score(vcf => $bad, weights => $weights) };
+	like $@, qr/\Apgs_score: .+ failed \(exit [0-9]+\): Error: Invalid POS on line 3 of --vcf file\. at \Q${\ __FILE__}\E line [0-9]+\.?\n\z/,
+		"a failure of PLINK 2 ends with its error and the caller's line, once";
+}
+
 # ---- against Stats::LikeR's read_table ------------------------------------------
 
 SKIP: {

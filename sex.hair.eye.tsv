@@ -1,0 +1,7 @@
+sample	role	genotypes_from	sex	X_het_over_hom_ALT	hair	p_blond	p_brown_hair	p_red	p_black	hair_markers_called	hair_markers_missing	eye	p_blue	p_intermediate	p_brown_eye	eye_markers_called	eye_markers_missing	panel_markers_called
+3025170	mother	exome CRAM	female	1.712	blond	0.469	0.288	0.043	0.201	9/13	rs2378249_C,rs2402130_G,rs28777_C,rs4959270_A	brown	0.007	0.109	0.884	5/6	rs1393350_T	26/41
+3025181	father	exome CRAM	male	0.201	blond	0.593	0.102	0.166	0.139	9/13	rs2378249_C,rs2402130_G,rs28777_C,rs4959270_A	brown	0.092	0.210	0.698	5/6	rs1393350_T	26/41
+3028904	daughter	exome CRAM	female	1.660	blond	0.386	0.234	0.005	0.375	9/13	rs2378249_C,rs2402130_G,rs28777_C,rs4959270_A	brown	0.007	0.109	0.884	5/6	rs1393350_T	26/41
+56001801066929_WGZ	father	WGS VCF alone	male	0.029	blond	0.603	0.113	0.075	0.209	6/13	MC1R_r,rs1042602_T,rs12203592_T,rs12821256_G,rs1800407_A,rs2402130_G,rs4959270_A	brown	0.321	0.201	0.479	3/6	rs12203592_T,rs12896399_G,rs1800407_A	16/41
+56001801066929_WGZ	father	WGS VCF, unlisted sites taken as REF	male	0.029	black	0.370	0.155	0.073	0.401	13/13	none	brown	0.131	0.246	0.623	6/6	none	41/41
+56001801066929_WGZ	father	WGS VCF + 3025181 exome CRAM	male	0.029	blond	0.511	0.090	0.256	0.143	11/13	rs2402130_G,rs4959270_A	brown	0.131	0.246	0.623	6/6	none	34/41

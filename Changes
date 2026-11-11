@@ -123,6 +123,21 @@ Revision history for Cn-Bioinf
    returned with every prediction so that one made from few markers can be
    reported as such. A trait that hirisplex_genotypes says cannot be
    predicted is not, unless "force" is 1.
+ - blood_type tells each sample's ABO and RhD blood type from a VCF, and
+   returns a hash of "abo" and "rhesus", each with a genotype and a
+   phenotype (AO and A, dd and negative), and "type" (A-). ABO is read
+   from the O deletion (rs8176719), the B marker (rs8176746) and the O2
+   allele (rs41302905). RhD is read from a record of the RHD gene's
+   deletion where the file has one, and otherwise from 15 sites inside the
+   gene, chosen from 1000 Genomes by share/make_blood_type_panel.pl, at
+   which somebody who has the gene almost always carries an ALT allele: of
+   2,343 such people 5 carried none, and of 150 with no gene none carried
+   any. A marker the file has no record of is read as homozygous REF, as a
+   VCF of one person's variants means it, unless the file could not have
+   held it ("assume_ref" turns that off); a file of SNVs only is given no
+   ABO type, since it cannot show the O deletion. It is not a blood test,
+   and sees no weak or partial D, RHD pseudogene or rare ABO allele. An
+   exome took 0.8 s and a whole genome 6.1 s.
  - pdb_search searches the RCSB PDB's structures for a sequence, and
    returns the matching polymer entities best first, each with how well it
    aligns (E-value, bit score, identity, coverage, gaps and the aligned
@@ -212,3 +227,61 @@ Revision history for Cn-Bioinf
    that block; it now ends at the block's end. A tracked protein that
    "order" leaves out was counted as having a track row, so a table held
    fewer blocks than "split" said. Found by review on 2026-11-02.
+ - parent and relatedness warned that two people's VCFs were "probably not
+   sequenced over the same regions" whenever one had over twice as many
+   sites alone as the other, however few: two VCFs of 3,000 sites that
+   differed by 3 sites against 1 were told that their IBS0 and kinship were
+   not to be trusted. The difference must now also be 50 sites or more,
+   which chance does not give, and 0.9% or more of the sites compared, below
+   which it cannot change the answer. Found by review on 2026-11-10.
+ - An error raised while a FASTA file or a VCF was being read or written
+   gave the line of Cn/Bioinf.pm that it was raised from. It now gives the
+   caller's line, as every other error does. Found by review on 2026-11-10.
+ - pgs_score's message for a failure of PLINK 2 ended with a second
+   "at ... line", and with PLINK 2's "End time:". It now ends with PLINK
+   2's error and the caller's line, once. Found by review on 2026-11-10.
+ - plot_msa(filename => []) wrote an image named "ARRAY(0x5ea732db32c8)".
+   A file name given to plot_msa, plot_phylo, msa_quality_table or
+   clustal_view_residues that is a reference or empty now dies, naming the
+   function and the option; so does a "threads" that is not a whole number,
+   1 or more, which used to reach clustalo and fail there under "_run".
+   Found by review on 2026-11-10.
+ - sex_check and hirisplex_genotypes warned "Use of uninitialized value"
+   when their first argument was undef, and every function that takes
+   name => value pairs did when a name was undef, before dying of something
+   else. The undef name is now what they die of, with no warning. Found by
+   review on 2026-11-10.
+ - get_best_alignment_hit died with perl's "Not an ARRAY reference" for a
+   report whose "hits" was not an array, and msa_quality_table with "Can't
+   use string as a HASH ref" for one that was not an object, neither naming
+   a function; each now dies naming itself and the part that is wrong.
+   get_best_alignment_hit warned "uninitialized" for an hsp with no
+   bit_score, which now ties, and for a hit with no description, whose
+   title, id and accession are undef and whose "descriptions" is now an
+   empty array, where it held one empty hash. Found by review on
+   2026-11-10.
+ - msa_quality_table drew a name in "order" that the BLAST report does not
+   hold, a misspelt one say, as a row and a column of grey cells. It now
+   dies naming it. A "cb_min", "cb_max", "logscale_add", "default_undefined"
+   or "normalize" that is not a number dies too, where it warned "isn't
+   numeric" and was drawn as 0. Found by review on 2026-11-10.
+ - hirisplex_genotypes, matching by rs number, looked only at the first
+   name of an ID that held several, so "foo;rs12913832" matched nothing. It
+   now matches when any of the names is a marker's. Found by review on
+   2026-11-10.
+ - fasta2hash read a file whose lines end in CR alone (classic Mac OS) as
+   one record, named by the whole file and with no sequence. It now dies,
+   saying so. It ran gzip on a .gz file without "--", so a name that
+   started with "-" was read as gzip's options. Its documentation said that
+   with a key a repeat of that key is looked for; only one that follows
+   the record directly is, since reading stops there, and the
+   documentation now says so. Found by review on 2026-11-10.
+ - hash2fasta_file wrote a sequence that was a reference as
+   "ARRAY(0x...)", a key holding a line feed as a defline and a line of
+   sequence, and an empty key as a defline with no name. Each now dies; an
+   object that overloads its own text is still written as that text. Found
+   by review on 2026-11-10.
+ - sex_check, parent, relatedness, concordance and hirisplex_genotypes read
+   a #CHROM line that ended in a tab as naming one more sample, called "".
+   An empty sample name now dies, giving its column. Found by review on
+   2026-11-10.

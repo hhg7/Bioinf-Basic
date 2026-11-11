@@ -202,6 +202,16 @@ foreach my $case (
 	my ($content, $re, $name) = @{ $case };
 	dies_like(sub { sex_check(vcf => spew('bad.vcf', $content)) }, $re, $name);
 }
+# Found by review on 2026-11-10, and failing against the code of that day: a
+# tab at the end of the #CHROM line made a sample named "", and an error
+# raised in Bioinf.xs was placed at the line of Cn/Bioinf.pm that called it.
+# The period after the line number is optional, since Carp before 1.25 (perl
+# 5.12.5's) writes none.
+dies_like(sub { sex_check(vcf => spew('tab.vcf', "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tA\t\n$x\t0/1\t\n")) },
+	qr/^vcf_header: .+? has an empty sample name in its #CHROM line \(line 1\), column 11; a tab at the end of the line/,
+	'a #CHROM line that ends in a tab dies, rather than naming a sample ""');
+dies_like(sub { sex_check(vcf => spew('bad.vcf', "$hdr$x\t0/1\n")) }, qr/^vcf_sample: .+? line 2 has 1 samples, and the #CHROM line names 2 at \Q${\ __FILE__}\E line \d+\.?\n\z/,
+	"an error raised in Bioinf.xs is placed at the caller's line, not at Cn/Bioinf.pm's");
 # a record on another chromosome is not looked at, so a short one cannot die
 {
 	(my $text = "$hdr$x\t0/1\n") =~ s/chrX/chr1/;

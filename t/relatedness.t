@@ -368,6 +368,39 @@ my %two = ( # first, second => t, in; from parent_reference.py
 	is scalar(@w), 0, 'give no warning';
 }
 
+# Found by review on 2026-11-10, and failing against the code of that day: as
+# in t/parent.t, two VCFs that list every site and differ by 3 sites against 1
+# were warned of as an exome against a genome is. The counts are by
+# construction.
+{
+	my $hdr = "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT";
+	# the child's call and the parent's, in turn: every site has an ALT in one
+	# of them, and none is an opposite homozygote
+	my @gt = (['0/1', '0/1'], ['0/0', '0/1'], ['1/1', '0/1'], ['0/1', '0/0'], ['0/1', '1/1'], ['1/1', '1/1']);
+	# $who's VCF (0 = the child C, 1 = the parent P): $n sites that both list,
+	# and $alone of its own, from position $from on chromosome 2
+	my $own = sub {
+		my ($who, $n, $alone, $from) = @_;
+		"$hdr\t" . ('C', 'P')[$who] . "\n"
+			. join('', map { "1\t" . (1000 * $_) . "\t.\tA\tG\t.\t.\t.\tGT\t$gt[$_ % @gt][$who]\n" } 1 .. $n)
+			. join('', map { "2\t" . ($from + $_) . "\t.\tA\tG\t.\t.\t.\tGT\t0/1\n" } 1 .. $alone);
+	};
+	foreach my $case (
+		# sites in both, in the child's alone, in the parent's alone, warnings, why
+		[1200, 3, 1, 0, 'a difference of 2 sites, which chance gives'],
+		[1200, 40, 10, 0, 'a difference of 30 sites, under the 50 that chance does not give'],
+		[9000, 60, 5, 0, 'a difference of 55 sites that is under 0.9% of the 9,065 compared'],
+		[1200, 60, 5, 1, 'a difference of 55 sites that is 4% of the 1,265 compared'],
+	) {
+		my ($n, $c, $p, $warned, $why) = @{ $case };
+		my ($child, $parent) = (spew('own.C.vcf', $own->(0, $n, $c, 1000)), spew('own.P.vcf', $own->(1, $n, $p, 5000)));
+		my $r;
+		my @w = warnings_of(sub { $r = relatedness($child, $parent, report => 0) });
+		is_deeply [$r->{C}{P}{in_both}, @{ $r->{C}{P}{only} }{qw(C P)}], [$n, $c, $p], "$n sites in both VCFs, $c in C's alone and $p in P's";
+		is scalar(@w), $warned, ($warned ? 'warns' : 'does not warn') . " that the two differ in their regions: $why";
+	}
+}
+
 # ---- what relatedness refuses, once it reads the files
 
 {

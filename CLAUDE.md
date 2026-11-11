@@ -16,11 +16,14 @@ functions (`sex_check` and `parent` since 2026-10-18, `relatedness` and
 `concordance` since 2026-10-19), and the genotypes of the HIrisPlex-S eye,
 hair and skin colour panel (`hirisplex_genotypes`, read by the same VCF
 reader) with a predictor for any multinomial logistic model the caller
-supplies (`trait_predict`), both since 2026-10-20, and a search of the RCSB
-PDB's structures for a sequence (`pdb_search`, since 2026-10-21), which asks
-RCSB's search and data APIs over HTTPS with HTTP::Tiny and is tested offline
-by replaying `t/data/pdb_search.json`. It is meant for CPAN, so it has to work
-on perls and platforms that are not this one.
+supplies (`trait_predict`), both since 2026-10-20, and each sample's ABO and
+RhD blood type (`blood_type`, since 2026-11-10, read by the same VCF reader
+from the markers in `share/blood_type_panel.tsv`, which
+`share/make_blood_type_panel.pl` chose from 1000 Genomes), and a search of
+the RCSB PDB's structures for a sequence (`pdb_search`, since 2026-10-21),
+which asks RCSB's search and data APIs over HTTPS with HTTP::Tiny and is
+tested offline by replaying `t/data/pdb_search.json`. It is meant for CPAN,
+so it has to work on perls and platforms that are not this one.
 
 ## No prediction model ships
 
@@ -64,6 +67,11 @@ and `warn` in perl and `croak()` and `warn()` in C, including new ones.
   residue number, 1 or more, not "0"` is the model.
 - Tests match messages with `like`, so a new prefix should not break them; if a
   test pins the start of a message, update it to include the prefix.
+- Call every XSUB through `_located(sub { ... })` (since 2026-11-10). C's
+  `croak()` gives the line of `lib/Cn/Bioinf.pm` that called the XSUB, and
+  `_located` raises the error again at the caller's line, as `croak` in perl
+  does. A test that pins the location allows for no period after the line
+  number (`line \d+\.?\n`), since Carp before 1.25, perl 5.12.5's, writes none.
 
 ## Generated files: edit the source, never the copy
 
@@ -424,7 +432,10 @@ default), `perl-5.42.3` (threaded), `perl-5.32.1`, `perl-5.12.5` (long double),
 `perl-5.10.1`, `5.44.0-quadmath`, `5.44.0-i686` (32-bit, so `IV_MAX` is
 2147483647), and `5.16.3-thr-ld` (threaded, long double, older than 5.20). By
 2026-11-02 `perl-5.18.4` had been added; it has no Alien::Bioinf, so
-`test.all.perls.pl` will try to install it there.
+`test.all.perls.pl` will try to install it there. On 2026-11-10
+`5.44.0-i686-64int` was there too, and neither it nor `perl-5.18.4` had
+File::ShareDir::Install, so both failed at `perl Makefile.PL` under
+`./test.all.perls.pl --no-install --no-alien`; `--deps` would install it.
 
 `./test.all.perls.pl` builds and tests against all of them, installing
 Alien::Bioinf into any perl that lacks it, and with `-p` against chosen ones.

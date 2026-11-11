@@ -30,7 +30,7 @@ use Sys::Hostname 'hostname';
 use Exporter 'import';
 use XSLoader;
 our $VERSION = '0.01';
-our @EXPORT_OK = qw(clustal_view_residues concordance fasta2hash get_best_alignment_hit hash2fasta_file hirisplex_genotypes msa_quality_table parent pdb_search pgs_score plot_msa plot_phylo relatedness sex_check trait_predict);
+our @EXPORT_OK = qw(blood_type clustal_view_residues concordance fasta2hash get_best_alignment_hit hash2fasta_file hirisplex_genotypes msa_quality_table parent pdb_search pgs_score plot_msa plot_phylo relatedness sex_check trait_predict);
 our @EXPORT = @EXPORT_OK;
 our %EXPORT_TAGS = (all => \@EXPORT_OK);
 XSLoader::load('Cn::Bioinf', $VERSION);
@@ -52,6 +52,9 @@ sub _args {
 	my ($list, $sub, $required, $optional) = @_;
 	croak "$sub: takes name => value pairs, not a hash ref" if @{ $list } == 1 && ref $list->[0] eq 'HASH';
 	croak "$sub: takes name => value pairs, and was given an odd number of arguments" if @{ $list } % 2;
+	# an undef name would only warn, as a hash key, and then be reported as ""
+	my ($nameless) = grep { !defined $list->[2 * $_] } 0 .. @{ $list } / 2 - 1;
+	croak "$sub: takes name => value pairs, and the name of pair " . ($nameless + 1) . ' is undef' if defined $nameless;
 	my $args = { @{ $list } };
 	my @missing = grep { !defined $args->{$_} } @{ $required };
 	croak "$sub: needs " . join(', ', map { "\"$_\"" } @missing) if @missing;
@@ -79,6 +82,48 @@ sub _refs {
 		next if !defined $args->{$k} || ref $args->{$k} eq $type;
 		croak "$sub: \"$k\" must be " . ($type eq 'ARRAY' ? 'an array' : 'a hash') . ' ref, not ' . _what($args->{$k});
 	}
+}
+
+# Dies unless each of @keys of $args that was given is a file name: a string
+# that is not empty, naming $sub, the public function whose arguments they are.
+# Up to 2026-11-10 a reference was used as its text, so that
+# plot_msa(filename => []) wrote an image named "ARRAY(0x5ea732db32c8)".
+sub _file_names {
+	my ($sub, $args, @keys) = @_;
+	foreach my $k (@keys) {
+		next unless defined $args->{$k};
+		croak "$sub: \"$k\" must be a file name, not " . _what($args->{$k}) if ref $args->{$k} || $args->{$k} eq '';
+	}
+}
+
+# Dies unless "threads" of $sub's $args, clustalo's --threads, is a whole
+# number, 1 or more, or was not given. Up to 2026-11-10 anything else reached
+# clustalo, which refused it under _run's name once the sequences were written.
+sub _threads {
+	my ($sub, $args) = @_;
+	croak "$sub: \"threads\" must be a whole number, 1 or more, not " . _what($args->{threads})
+		if defined $args->{threads} && (ref $args->{threads} || $args->{threads} !~ /\A[1-9][0-9]*\z/);
+}
+
+# The error that Bioinf.xs's croak() ends with when it is raised in this file,
+# which is where every XSUB is called from; compiled once, since perl 5.32
+# leaks a pattern that is compiled at run time.
+my $Located_here = qr/ at \Q${\ __FILE__}\E line [0-9]+\.\n\z/;
+
+# What $code, a call of one of Bioinf.xs's XSUBs, returns, in list context. An
+# error that Bioinf.xs raised is raised again at the caller's line, as croak
+# raises this file's own: C's croak() gives the line of this file that called
+# the XSUB, which up to 2026-11-10 was all a caller was told. Any other error,
+# such as one a VCF's reader croaked with, has its place already and is passed
+# on as it is. $@ is not localized, since before perl 5.14 leaving that scope
+# by die restored it, and lost the error.
+sub _located {
+	my ($code) = @_;
+	my @r;
+	return @r if eval { @r = $code->(); 1 };
+	my $error = $@;
+	die $error if ref $error || $error !~ s/$Located_here//;
+	croak $error;
 }
 
 # $s as characters. A string perl holds as characters is taken as it is; one it
@@ -311,7 +356,7 @@ sub _fasta_ordered {
 	my ($file) = @_;
 	my @order;
 	my $fh = _open_fasta($file);
-	my $h = _read_fasta($fh, undef, $file, \@order);
+	my ($h) = _located(sub { _read_fasta($fh, undef, $file, \@order) });
 	close $fh;
 	($h, \@order);
 }
@@ -324,7 +369,8 @@ sub _open_fasta {
 	if ($file =~ /\.gz\z/i) { # any case, as _weight_rows takes it
 		# in an eval, since a perl without list-form piped open (MSWin32 before
 		# 5.22) dies in open itself, with no function name in the message
-		eval { open $fh, '-|', 'gzip', '-dc', $file } or croak "_open_fasta: can't run gzip on $file: " . ($@ || $!);
+		# "--", or gzip would read a name that starts with "-" as its options
+		eval { open $fh, '-|', 'gzip', '-dc', '--', $file } or croak "_open_fasta: can't run gzip on $file: " . ($@ || $!);
 	} else {
 		open $fh, '<:raw', $file or croak "_open_fasta: can't read $file: $!";
 	}
@@ -363,7 +409,7 @@ sub _abbreviated_labels {
 sub fasta2hash {
 	my ($file, $key) = @_;
 	my $fh = _open_fasta($file);
-	my $r = _read_fasta($fh, $key, $file);
+	my ($r) = _located(sub { _read_fasta($fh, $key, $file) });
 	# A gzip that fails part-way, on a truncated or corrupt .gz, has merely
 	# stopped writing, so its exit status is the only sign of it. That is
 	# checked unless $key was found, when reading may have stopped early and
@@ -398,7 +444,7 @@ sub hash2fasta_file {
 sub _fasta_file {
 	my ($sub, $hash, $filename, $order, $width) = @_;
 	open my $fh, '>:raw', $filename or croak "$sub: can't write $filename: $!";
-	_write_fasta($fh, $hash, $order, $width);
+	_located(sub { _write_fasta($fh, $hash, $order, $width) });
 	close $fh or croak "$sub: can't write $filename: $!";
 	$filename;
 }
@@ -437,11 +483,23 @@ sub get_best_alignment_hit {
 		# query_id alone.
 		my $query = $search->{query_title} // $search->{query_id};
 		croak "get_best_alignment_hit: report " . ($i + 1) . " of $json_file names no query: it has no query_title or query_id" unless defined $query;
+		# Each hit's shape is checked before it is read. Up to 2026-11-10 "hits"
+		# as an object died with perl's "Not an ARRAY reference", naming no
+		# function, and an hsp with no bit_score, which BLAST always writes,
+		# warned "uninitialized" each time it broke a tie; it now ties.
+		my $listed = $search->{hits} // [];
+		croak "get_best_alignment_hit: report " . ($i + 1) . " of $json_file has \"hits\" that isn't an array, but " . _what($listed)
+			unless ref $listed eq 'ARRAY';
 		my @hits;
-		foreach my $hit (@{ $search->{hits} // [] }) {
+		foreach my $h (0 .. $#{ $listed }) {
+			my $hit = $listed->[$h];
+			croak "get_best_alignment_hit: hit " . ($h + 1) . " of report " . ($i + 1) . " of $json_file isn't a hit, which is an object whose \"description\" and \"hsps\" are arrays of objects"
+				unless ref $hit eq 'HASH' && ref($hit->{description} // []) eq 'ARRAY' && ref($hit->{hsps} // []) eq 'ARRAY'
+					&& !grep { ref $_ ne 'HASH' } @{ $hit->{description} // [] }, @{ $hit->{hsps} // [] };
+			my $first = ($hit->{description} // [])->[0] // {}; # the description the hit is named by; empty when it has none
 			my $best; # undef until an hsp is seen; a hit with no hsps has nothing to record
-			foreach my $hsp (@{ $hit->{hsps} }) {
-				croak "get_best_alignment_hit: an hsp of \"$hit->{description}[0]{title}\" in $json_file has no \"$sort_criterion\" to sort on"
+			foreach my $hsp (@{ $hit->{hsps} // [] }) {
+				croak "get_best_alignment_hit: an hsp of " . _what($first->{title}) . " in $json_file has no \"$sort_criterion\" to sort on"
 					unless defined $hsp->{$sort_criterion};
 				unless (defined $best) {
 					$best = $hsp;
@@ -449,7 +507,7 @@ sub get_best_alignment_hit {
 				}
 				my $cmp = $direction * ($hsp->{$sort_criterion} <=> $best->{$sort_criterion});
 				# BLAST rounds any strong e-value to 0, so ties are the rule; the bit score breaks them
-				$cmp = $hsp->{bit_score} <=> $best->{bit_score} if $cmp == 0 && $sort_criterion ne 'bit_score';
+				$cmp = ($hsp->{bit_score} // 0) <=> ($best->{bit_score} // 0) if $cmp == 0 && $sort_criterion ne 'bit_score';
 				$best = $hsp if $cmp > 0;
 			}
 			next unless defined $best;
@@ -462,18 +520,18 @@ sub get_best_alignment_hit {
 			# BLAST lists it, and every one is in "descriptions". Up to
 			# 2026-10-17 a hit with more than one died.
 			push @hits, { %{ $best },
-				accession => $hit->{description}[0]{accession},
-				descriptions => [map { +{ %{ $_ } } } @{ $hit->{description} }],
+				accession => $first->{accession},
+				descriptions => [map { +{ %{ $_ } } } @{ $hit->{description} // [] }],
 				hit_len   => $hit->{len},
-				id        => $hit->{description}[0]{id},
-				title     => $hit->{description}[0]{title},
+				id        => $first->{id},
+				title     => $first->{title},
 			};
 		}
 		# Indices are sorted so the last tiebreak can be BLAST's own order; the
 		# array runs best-first, hence $b before $a.
 		my @order = sort {
 			   ($direction * ($hits[$b]{$sort_criterion} <=> $hits[$a]{$sort_criterion}))
-			|| ($hits[$b]{bit_score} <=> $hits[$a]{bit_score})
+			|| (($hits[$b]{bit_score} // 0) <=> ($hits[$a]{bit_score} // 0))
 			|| ($a <=> $b)
 		} 0 .. $#hits;
 		# Two queries of one title would leave only the second's hits, so that
@@ -680,7 +738,8 @@ sub _plink2 {
 	# rewrites its progress lines with a CR
 	my @said;
 	if (open my $fh, '<', $log) {
-		@said = grep { /\S/ } map { (my $l = $_) =~ s/\s+\z//; $l } map { split /\r/ } <$fh>;
+		# less the "End time:" it ends every run with, which says nothing of why
+		@said = grep { /\S/ && !/\AEnd time: / } map { (my $l = $_) =~ s/\s+\z//; $l } map { split /\r/ } <$fh>;
 	}
 	my ($first) = grep { $said[$_] =~ /\AError/ } 0 .. $#said;
 	my $said = join ' ', defined $first ? @said[$first .. $#said] : @said ? $said[-1] : 'nothing';
@@ -810,7 +869,8 @@ sub pgs_score {
 		# PLINK 2 refuses a single-sample VCF with no 0/0 among its first 1,000
 		# called genotypes, as one that lists only the sites where the sample
 		# carries an ALT allele; scored, every other variant is missing.
-		croak $@ unless $@ =~ /contain at least one ALT allele/;
+		# die, not croak, which would give _plink2's message a second "at ... line"
+		die $@ unless $@ =~ /contain at least one ALT allele/;
 		carp "$sub: \"vcf\" lists only the sites where its sample carries an ALT allele, so every variant where it matches"
 			. ' the reference is missing, and its score is not comparable with one from a VCF of every site';
 		push @input, '--vcf-allow-no-nonvar';
@@ -835,7 +895,7 @@ sub pgs_score {
 	# imported; a --pfile is filtered later, and exits 13). Either is a result
 	# here: every variant is missing.
 	my $none = eval { _plink2($sub, $plink2, $dir, @import, '--make-pgen', '--out', $g); 0 }
-		// ($@ =~ /\((?:exit 13\): Error: No variants remaining|exit 7\): Error: All \d+ variant\(s\) in --vcf file excluded by --chr)/ ? 1 : croak $@);
+		// ($@ =~ /\((?:exit 13\): Error: No variants remaining|exit 7\): Error: All \d+ variant\(s\) in --vcf file excluded by --chr)/ ? 1 : die $@);
 
 	my @samples; # in PLINK 2's order
 	open my $psam, '<', "$samples.psam" or croak "$sub: can't read $samples.psam: $!";
@@ -1093,8 +1153,8 @@ sub _vcf_meta {
 # so does a site's POS, so that two builds share few sites, and only by chance.
 # A header with no lengths cannot be checked, and is not. Contigs are matched by
 # name less "chr", as sites are, so hg19 and b37 (chr1 and 1, both 249,250,621
-# bases by the headers of ~/Documents/Genomics/3025181.vcf.gz and of 1000
-# Genomes' hs37d5 BCF, read 2026-10-20) pass.
+# bases by the headers of an hg19 exome's VCF and of 1000 Genomes' hs37d5 BCF,
+# read 2026-10-20) pass.
 sub _same_build {
 	my ($sub, $test, $truth) = @_;
 	my %meta = (test => _vcf_meta($sub, 'test', $test), truth => _vcf_meta($sub, 'truth', $truth));
@@ -1173,7 +1233,7 @@ sub sex_check {
 	# odd count whose first is an option's name is left for _args to refuse
 	unshift @_, 'vcf' if @_ % 2 && defined $_[0] && !ref $_[0] && $_[0] !~ /\A(?:vcf|cutoff|min_depth|report)\z/;
 	croak "$sub: \"$_[0]\" is the file, so the options after it must be name => value pairs, and are an odd number"
-		if @_ && $_[0] ne 'vcf' && defined $_[0] && !ref $_[0] && -f $_[0];
+		if @_ && defined $_[0] && !ref $_[0] && $_[0] ne 'vcf' && -f $_[0];
 	my $args = _args(\@_, $sub, ['vcf'], [qw(cutoff min_depth report)]);
 	my %r;
 	# peddy 0.4.3's defaults (sex_check() in peddy/peddy.py): male below a het
@@ -1188,7 +1248,7 @@ sub sex_check {
 	croak "$sub: \"report\" must be 0 or 1, not " . _what($r{report}) unless !ref $r{report} && ($r{report} eq '0' || $r{report} eq '1');
 	my $vcf = $args->{vcf};
 	my ($next, $close) = _vcf_open($sub, 'vcf', $vcf);
-	my ($tally, $x_sites, $order) = _sex_tally($next, $vcf, $r{min_depth});
+	my ($tally, $x_sites, $order) = _located(sub { _sex_tally($next, $vcf, $r{min_depth}) });
 	$close->();
 	_sex_of($_, $r{cutoff}) foreach values %{ $tally };
 	if ($r{report}) {
@@ -1215,6 +1275,38 @@ my @King = ([0.354, 'the same person or identical twins'], [0.177, 'first-degree
 # gives about 150,000 and a genome 3 million, so only a small panel, or
 # files that hardly overlap, comes near it.
 my $Parent_sites = 1000;
+
+# Whether two people's own VCFs were probably not sequenced over the same
+# regions, which parent and relatedness warn of: of the sites compared, $sites,
+# one file has $more that the other lacks and the other $fewer that it lacks,
+# $more being the larger. Three things must hold.
+#
+# $more is over twice $fewer. Two VCFs of one pipeline have about as many each:
+# on 2026-10-18 the three pairs of one family's exomes had ratios of 1.13 at
+# most, where an exome of another capture kit had 3.0 to 13 against them, and a
+# genome against an exome 58, which is why 2.
+#
+# $more exceeds $fewer by $Region_excess sites, so that it is not chance. Were a
+# site in one file alone as likely to be in either, the chance of a ratio over
+# 2 with a difference of 50 or more is greatest at 99 against 49, where it is
+# 4.8e-5 (the exact binomial tail on both sides, computed 2026-11-10); a
+# difference of 30 would allow 1.8e-3.
+#
+# And by $Region_share of the sites compared, so that it could matter. Each of
+# those sites is taken as hom-REF in the file that lacks it, and at worst is an
+# opposite homozygote that was never sequenced, which adds that share to the
+# IBS0 rate. 0.009 is the smallest margin measured between a parent and
+# child's rate and max_ibs0's default: 0.012 less the 0.0030 of the comment in
+# parent. Fewer cannot carry such a pair over it.
+#
+# Up to 2026-11-10 the ratio was the whole test, so that two VCFs of 3,000
+# sites that differed by 3 sites against 1 were warned of.
+my $Region_excess = 50;
+my $Region_share = 0.009;
+sub _regions_differ {
+	my ($more, $fewer, $sites) = @_;
+	$more > 2 * $fewer && $more - $fewer >= $Region_excess && $more - $fewer >= $Region_share * $sites ? 1 : 0;
+}
 
 # The KING-robust between-family kinship (Manichaikul et al. 2010,
 # Bioinformatics 26:2867) of two samples with $het_a and $het_b het calls at the
@@ -1302,13 +1394,13 @@ sub parent {
 		}
 		croak "$sub: \"child\" and \"parent\" are both \"$child\"" if $child eq $parent;
 		my ($next, $close) = _vcf_open($sub, 'vcf', $vcf);
-		@t = _parent_one($next, $vcf, $r{min_depth}, $child, $parent);
+		@t = _located(sub { _parent_one($next, $vcf, $r{min_depth}, $child, $parent) });
 		$close->();
 	} else {
 		croak "$sub: \"child\" and \"parent\" are both \"$child\"" if !ref $child && !ref $parent && $child eq $parent;
 		my ($child_next, $child_close) = _vcf_open($sub, 'child', $child);
 		my ($parent_next, $parent_close) = _vcf_open($sub, 'parent', $parent);
-		@t = _parent_own($child_next, $child, $parent_next, $parent, $r{min_depth});
+		@t = _located(sub { _parent_own($child_next, $child, $parent_next, $parent, $r{min_depth}) });
 		$child_close->();
 		$parent_close->();
 	}
@@ -1345,16 +1437,13 @@ sub parent {
 	if ($r{report}) {
 		print STDOUT _parent_report($child, $parent, $vcf, \%r, \%s) or croak "$sub: can't print the report: $!";
 	}
-	# Two VCFs of one pipeline have about as many sites each alone: on
-	# 2026-10-18 the three pairs of one family's exomes had ratios of 1.13 at
-	# most, where an exome of another capture kit had 3.0 to 13 against them,
-	# and a genome against an exome 58, which is why 2.
+	# _regions_differ's comment says what is tested, and why
 	my ($more, $fewer) = $s{child_only} > $s{parent_only} ? ('child', 'parent') : ('parent', 'child');
 	my ($n_more, $n_fewer) = @s{"${more}_only", "${fewer}_only"};
 	carp "$sub: the ${more}'s VCF has $n_more sites that the ${fewer}'s lacks, and the ${fewer}'s only $n_fewer that the ${more}'s lacks,"
 		. ' so the two were probably not sequenced over the same regions (an exome and a genome, or two capture kits);'
 		. ' a site that one lacks is taken as hom-REF in it, so IBS0 and the kinship are not to be trusted'
-		if !defined $vcf && $n_more > 2 * $n_fewer;
+		if !defined $vcf && _regions_differ($n_more, $n_fewer, $s{sites});
 	wantarray ? ($s{parent}, \%s) : $s{parent};
 }
 
@@ -1443,7 +1532,7 @@ sub relatedness {
 	my ($names, $counts, $tally); # the samples in order; REL_T counts a pair, as Bioinf.xs describes them, packed as UVs; each sample's sex counts
 	if (@vcf == 1) {
 		my ($next, $close) = _vcf_open($sub, 'vcf', $vcf[0]);
-		($names, $counts, $tally) = _relatedness_one($next, $vcf[0], $r{min_depth});
+		($names, $counts, $tally) = _located(sub { _relatedness_one($next, $vcf[0], $r{min_depth}) });
 		$close->();
 	} else {
 		# each opened as Bioinf.xs comes to it, and closed at its end, so that only
@@ -1458,7 +1547,7 @@ sub relatedness {
 				$block;
 			};
 		} @vcf;
-		($names, $counts, $tally) = _relatedness_own(\@next, \@vcf, $r{min_depth});
+		($names, $counts, $tally) = _located(sub { _relatedness_own(\@next, \@vcf, $r{min_depth}) });
 	}
 	foreach my $i (0 .. $#{ $names }) {
 		my $s = $tally->{ $names->[$i] };
@@ -1567,7 +1656,7 @@ sub relatedness {
 		}
 		my ($more, $fewer) = $s->{only}{$x} > $s->{only}{$y} ? ($x, $y) : ($y, $x);
 		push @regions, "$tally->{$more}{file} against $tally->{$fewer}{file} ($s->{only}{$more} to $s->{only}{$fewer})"
-			if @vcf > 1 && $s->{only}{$more} > 2 * $s->{only}{$fewer};
+			if @vcf > 1 && _regions_differ($s->{only}{$more}, $s->{only}{$fewer}, $s->{sites});
 	});
 	my $n_pairs = @{ $names } * (@{ $names } - 1) / 2;
 	carp "$sub: $undecided of $n_pairs pairs are undecided, and their relationship undef, such as $first->[0] and $first->[1]: $first->[2]" if $undecided;
@@ -1640,11 +1729,11 @@ sub concordance {
 	# the truth's samples first, so that the test's reading keeps the calls of
 	# only those samples it will compare
 	my ($next, $close) = _vcf_open($sub, 'truth', $truth);
-	my $truth_names = _vcf_samples($next, $truth);
+	my ($truth_names) = _located(sub { _vcf_samples($next, $truth) });
 	$close->();
 	my ($test_next, $test_close) = _vcf_open($sub, 'test', $test);
 	my ($truth_next, $truth_close) = _vcf_open($sub, 'truth', $truth);
-	my ($out, $test_names) = _concordance($test_next, $test, $truth_next, $truth, $truth_names, $r{min_depth}, $r{discordances});
+	my ($out, $test_names) = _located(sub { _concordance($test_next, $test, $truth_next, $truth, $truth_names, $r{min_depth}, $r{discordances}) });
 	$test_close->();
 	$truth_close->();
 	if ($r{report}) {
@@ -1677,10 +1766,10 @@ my %Build_length = (
 # writes that file and its header comment says where every column comes from.
 my $Panel; # undef until the file has been read
 
-sub _hirisplex_panel {
-	my ($sub) = @_;
-	return $Panel if $Panel;
-	my $name = 'hirisplex_s_panel.tsv';
+# The marker panel $name, which this distribution installs in its share
+# directory, as a file that can be read; dies, naming $sub, when it is nowhere.
+sub _share_file {
+	my ($sub, $name) = @_;
 	# Installed, the panel is in the distribution's share directory, which is
 	# what File::ShareDir finds. Two fallbacks follow it: the same layout looked
 	# for in @INC, which is where blib puts the file under "make test" and keeps
@@ -1696,6 +1785,13 @@ sub _hirisplex_panel {
 	}
 	croak "$sub: can't find the marker panel $name, which this distribution installs in its share directory"
 		unless defined $file && -f $file && -r _;
+	$file;
+}
+
+sub _hirisplex_panel {
+	my ($sub) = @_;
+	return $Panel if $Panel;
+	my $file = _share_file($sub, 'hirisplex_s_panel.tsv');
 	open my $fh, '<', $file or croak "$sub: can't read $file: $!";
 	my $head = <$fh>;
 	croak "$sub: marker panel $file is empty" unless defined $head;
@@ -1841,7 +1937,7 @@ sub hirisplex_genotypes {
 	# option's name is left for _args to refuse
 	unshift @_, 'vcf' if @_ % 2 && defined $_[0] && !ref $_[0] && $_[0] !~ /\A(?:vcf|build|file|match|min_depth|report)\z/;
 	croak "$sub: \"$_[0]\" is the file, so the options after it must be name => value pairs, and are an odd number"
-		if @_ && $_[0] ne 'vcf' && defined $_[0] && !ref $_[0] && -f $_[0];
+		if @_ && defined $_[0] && !ref $_[0] && $_[0] ne 'vcf' && -f $_[0];
 	my $args = _args(\@_, $sub, ['vcf'], [qw(build file match min_depth report)]);
 	my %r;
 	$r{match} = $args->{match} // 'position'; # 'position' = CHROM and POS against the panel's coordinates; 'id' = the ID column against its rs numbers
@@ -1888,7 +1984,7 @@ sub hirisplex_genotypes {
 	croak "$sub: no marker of the panel has a " . ($r{build} // 'known') . ' position' unless @entries;
 
 	my ($next, $close) = _vcf_open($sub, 'vcf', $vcf);
-	my ($dose, $names, $seen) = _hirisplex_dosage($next, $vcf, $r{min_depth}, \@entries, scalar @{ $panel }, $r{match} eq 'id' ? 1 : 0);
+	my ($dose, $names, $seen) = _located(sub { _hirisplex_dosage($next, $vcf, $r{min_depth}, \@entries, scalar @{ $panel }, $r{match} eq 'id' ? 1 : 0) });
 	$close->();
 
 	my @column = map { "$_->{rsid}_$_->{input_allele}" } @{ $panel };
@@ -2078,6 +2174,278 @@ sub trait_predict {
 	if ($r{report}) {
 		print STDOUT _trait_report(\%r, \%out, [sort keys %out], $traits, $category) or croak "$sub: can't print the report: $!";
 	}
+	\%out;
+}
+
+# ---- blood type
+
+# The panel blood_type reads, share/blood_type_panel.tsv, once it has been
+# read: a hash ref of
+#
+#   markers  every marker, a hash ref a row, in the file's order, which is
+#            the order Bioinf.xs returns their genotypes in
+#   abo      role => the marker's place in "markers", for the three of ABO:
+#            "functional" (rs8176719, where the insertion counted is a
+#            working A or B gene and its lack is O), "B" and "O2"
+#   sites    the places in "markers" of RHD's sites
+#   gene     the row of the RHD gene, whose span a deletion has to cover
+#
+# share/make_blood_type_panel.pl writes the file, and its header comment says
+# where every row comes from and what was measured. The counted allele of
+# every marker is an ALT on both builds, never the reference's own, which is
+# what lets a marker with no record be read as no copies of it.
+my $Blood_panel; # undef until the file has been read
+
+sub _blood_panel {
+	my ($sub) = @_;
+	return $Blood_panel if $Blood_panel;
+	my $file = _share_file($sub, 'blood_type_panel.tsv');
+	open my $fh, '<', $file or croak "$sub: can't read $file: $!";
+	my $head = <$fh>;
+	croak "$sub: marker panel $file is empty" unless defined $head;
+	$head =~ s/\r?\n\z//;
+	$head =~ s/\A#//;
+	my @cols = split /\t/, $head, -1;
+	my %panel = (markers => [], abo => {}, sites => [], gene => undef);
+	while (defined(my $line = <$fh>)) {
+		$line =~ s/\r?\n\z//;
+		next if $line eq '';
+		my %m;
+		@m{@cols} = split /\t/, $line, -1;
+		foreach my $c (qw(name system role kind)) {
+			croak "$sub: row " . ($m{name} // '?') . " of $file has no $c" unless defined $m{$c} && length $m{$c};
+		}
+		foreach my $b (qw(b37 b38)) {
+			# vcf_chrom()'s numbering, which the panel's two chromosomes, 1 and 9, are already in
+			croak "$sub: row $m{name} of $file is on $b chromosome " . _what($m{"${b}_chrom"}) . ', which isn\'t an autosome'
+				unless defined $m{"${b}_chrom"} && $m{"${b}_chrom"} =~ /\A(?:[1-9]|1[0-9]|2[0-2])\z/;
+			foreach my $c ("${b}_pos", $m{kind} eq 'region' ? "${b}_end" : ()) {
+				croak "$sub: row $m{name} of $file has $c " . _what($m{$c}) . ', which isn\'t a position'
+					unless defined $m{$c} && $m{$c} =~ /\A[1-9][0-9]*\z/;
+			}
+		}
+		if ($m{kind} eq 'region') {
+			croak "$sub: $file has more than one gene" if $panel{gene};
+			$panel{gene} = \%m;
+			next;
+		}
+		croak "$sub: marker $m{name} of $file counts " . _what($m{count_allele}) . ', which isn\'t one base'
+			unless defined $m{count_allele} && $m{count_allele} =~ /\A[ACGT]\z/;
+		push @{ $panel{markers} }, \%m;
+		if ($m{system} eq 'ABO') {
+			$panel{abo}{ $m{role} } = $#{ $panel{markers} };
+		} else {
+			push @{ $panel{sites} }, $#{ $panel{markers} };
+		}
+	}
+	close $fh or croak "$sub: can't read $file: $!";
+	croak "$sub: marker panel $file has no RHD gene" unless $panel{gene};
+	croak "$sub: marker panel $file has no site of RHD" unless @{ $panel{sites} };
+	foreach my $role (qw(functional B O2)) {
+		croak "$sub: marker panel $file has no ABO marker of role \"$role\"" unless defined $panel{abo}{$role};
+	}
+	$Blood_panel = \%panel;
+}
+
+# The ABO genotype and phenotype that $n says, a hash ref of how many copies
+# (0 to 2, or undef for no genotype) a sample has of each of the three ABO
+# markers' counted alleles, by role: (genotype, phenotype, undef), or (undef,
+# undef, the role whose genotype was needed and is missing).
+#
+# A chromosome without rs8176719's insertion is O whatever else it carries. One
+# with it is B when it carries rs8176746's T, O when it carries rs41302905's T
+# (the O2 allele, an O with no deletion), and otherwise A. The genotypes are
+# not phased, so a B or O2 allele is taken to be on a chromosome that has the
+# insertion, as long as there is one to put it on. That is nearly always
+# right: of 1000 Genomes phase 3's 5,008 haplotypes (b37 BCF, read
+# 2026-11-10), 721 carried the insertion with the B allele, 1,001 the
+# insertion without it, 44 the B allele without the insertion and 3,242
+# neither, so somebody heterozygous at both is B and O rather than A and an O
+# that carries B's base with a probability of 721 * 3242 / (721 * 3242 + 1001
+# * 44), which is 0.981.
+sub _abo_type {
+	my ($n) = @_;
+	return (undef, undef, 'functional') unless defined $n->{functional};
+	my $working = $n->{functional}; # chromosomes with a working gene, A or B, unless they are O2
+	my ($b, $o2) = (0, 0);
+	if ($working) {
+		foreach my $role (qw(B O2)) {
+			return (undef, undef, $role) unless defined $n->{$role};
+		}
+		$b = $n->{B} < $working ? $n->{B} : $working;
+		$o2 = $n->{O2} < $working - $b ? $n->{O2} : $working - $b;
+	}
+	my %count = (A => $working - $b - $o2, B => $b, O => 2 - $working + $o2);
+	my $genotype = join '', map { $_ x $count{$_} } qw(A B O);
+	my $phenotype = $count{A} && $count{B} ? 'AB' : $count{A} ? 'A' : $count{B} ? 'B' : 'O';
+	($genotype, $phenotype, undef);
+}
+
+# blood_type's report on $vcf: what was read and how, a table of the samples in
+# $order, the VCF's, then what was taken as homozygous REF because the file has
+# no record of it, and why any sample has no type.
+sub _blood_report {
+	my ($vcf, $r, $panel, $out, $order, $assumed) = @_;
+	my $sites = scalar @{ $panel->{sites} };
+	my @head = ('sample', 'type', 'ABO', 'ABO genotype', 'RhD', 'RhD genotype', 'RHD sites');
+	my @rows = map {
+		my $s = $out->{$_};
+		[$_, $s->{type} // '-', $s->{abo}{phenotype} // '-', $s->{abo}{genotype} // '-',
+			$s->{rhesus}{phenotype} // '-', $s->{rhesus}{genotype} // '-', "$s->{rhesus}{carried}/$sites"]
+	} @{ $order };
+	my @w = map { length $head[$_] } 0 .. $#head;
+	foreach my $row (@rows) {
+		foreach my $i (0 .. $#head) {
+			$w[$i] = length $row->[$i] if length $row->[$i] > $w[$i];
+		}
+	}
+	my $line = sub { join('  ', map { $_ < $#head ? sprintf('%-*s', $w[$_], $_[$_]) : sprintf('%*s', $w[$_], $_[$_]) } 0 .. $#head) . "\n" };
+	my @why; # one line for each system of each sample that has no type
+	foreach my $name (@{ $order }) {
+		foreach my $system (qw(abo rhesus)) {
+			my $why = $out->{$name}{$system}{why};
+			push @why, "$name has no " . ($system eq 'abo' ? 'ABO' : 'RhD') . " type: $why\n" if defined $why;
+		}
+	}
+	"blood_type: $vcf\n"
+		. "ABO from rs8176719 (O's deletion), rs8176746 (B) and rs41302905 (O2); RhD from $sites sites of RHD, or a record of the gene's deletion;"
+		. " matched by position on $r->{build}; genotypes of DP below $r->{min_depth} not counted\n"
+		. $line->(@head) . join('', map { $line->(@{ $_ }) } @rows)
+		. "\"RHD sites\" is how many of the sites the sample has an ALT allele at; one is enough for RhD positive\n"
+		. (@{ $assumed } ? 'not in the file, and taken as homozygous for the reference allele: ' . join(', ', @{ $assumed }) . "\n" : '')
+		. join('', @why);
+}
+
+sub blood_type {
+	my $sub = 'blood_type';
+	# blood_type($file) and blood_type($file, %options) take the file first,
+	# as sex_check does; an odd count whose first is an option's name is left
+	# for _args to refuse
+	unshift @_, 'vcf' if @_ % 2 && defined $_[0] && !ref $_[0] && $_[0] !~ /\A(?:vcf|assume_ref|build|min_depth|report)\z/;
+	croak "$sub: \"$_[0]\" is the file, so the options after it must be name => value pairs, and are an odd number"
+		if @_ && defined $_[0] && !ref $_[0] && $_[0] ne 'vcf' && -f $_[0];
+	my $args = _args(\@_, $sub, ['vcf'], [qw(assume_ref build min_depth report)]);
+	my %r;
+	# 1 = a marker the file has no record of is homozygous for the reference
+	# allele, as a VCF that lists only its sample's variants means it;
+	# 0 = it has no genotype, as in a file of every site, or of an array's
+	$r{assume_ref} = $args->{assume_ref} // 1;
+	croak "$sub: \"assume_ref\" must be 0 or 1, not " . _what($r{assume_ref})
+		unless !ref $r{assume_ref} && ($r{assume_ref} eq '0' || $r{assume_ref} eq '1');
+	$r{min_depth} = $args->{min_depth} // 7; # 0 = count every genotype, whatever its DP; 7 is sex_check's, and what the panel's sites were chosen at
+	croak "$sub: \"min_depth\" must be a whole number, 0 or more, not " . _what($r{min_depth})
+		unless !ref $r{min_depth} && $r{min_depth} =~ /\A[0-9]+\z/;
+	$r{report} = $args->{report} // 1; # 1 = print a table of the samples to STDOUT; 0 = only return them
+	croak "$sub: \"report\" must be 0 or 1, not " . _what($r{report}) unless !ref $r{report} && ($r{report} eq '0' || $r{report} eq '1');
+	croak "$sub: \"build\" must be hg19, b37, hg38 or b38, not " . _what($args->{build})
+		if defined $args->{build} && (ref $args->{build} || $args->{build} !~ /\A(?:hg19|b37|hg38|b38)\z/);
+	my $vcf = $args->{vcf};
+	_vcf_check($sub, 'vcf', $vcf);
+	my $panel = _blood_panel($sub);
+	# which of the panel's two sets of coordinates the markers are looked for at
+	$r{build} = defined $args->{build} ? ($args->{build} =~ /\A(?:hg19|b37)\z/ ? 'b37' : 'b38') : _hirisplex_build($sub, $vcf);
+
+	my @marker = @{ $panel->{markers} };
+	my @entries = map {
+		my $m = $marker[$_];
+		[$m->{"$r{build}_chrom"}, $m->{"$r{build}_pos"}, $m->{count_allele}, $m->{kind} eq 'insertion' ? 1 : 0, $m->{name}, $_]
+	} 0 .. $#marker;
+	my $gene = $panel->{gene};
+	my ($next, $close) = _vcf_open($sub, 'vcf', $vcf);
+	my ($dose, $names, $seen, $deleted, $read, $longer) = _located(sub {
+		_blood_type_tally($next, $vcf, $r{min_depth}, \@entries, scalar @marker, @{ $gene }{"$r{build}_chrom", "$r{build}_pos", "$r{build}_end"})
+	});
+	$close->();
+
+	# Each marker the file has no record of: whether it is read as homozygous
+	# REF, and if not, why not. The file must have been able to hold the
+	# record: one with nothing on the marker's chromosome was not sequenced or
+	# not called there, and one with no allele longer than a base on it holds
+	# SNVs only, and cannot hold ABO's insertion.
+	my (@as_ref, @unknown); # one per marker: 1 = unlisted and read as REF; why an unlisted marker has no genotype, or undef
+	foreach my $k (0 .. $#marker) {
+		next if $seen->[$k];
+		my $m = $marker[$k];
+		my $chrom = $m->{"$r{build}_chrom"};
+		my $bit = 1 << $chrom;
+		$unknown[$k] = !$r{assume_ref} ? "the file has no record of $m->{name}, and \"assume_ref\" is 0"
+			: !($read & $bit) ? "the file has no record on chromosome $chrom"
+			: $m->{kind} eq 'insertion' && !($longer & $bit)
+				? "the file has no record of $m->{name}, an insertion, and no allele longer than one base on chromosome $chrom, so it holds SNVs only and could not show it"
+			: undef;
+		$as_ref[$k] = defined $unknown[$k] ? 0 : 1;
+	}
+	my @abo_role = sort { $panel->{abo}{$a} <=> $panel->{abo}{$b} } keys %{ $panel->{abo} };
+	my @sites = @{ $panel->{sites} };
+	my $listed = grep { $seen->[$_] } @sites;
+	# why no RhD type can be told from the sites when a sample has an ALT at
+	# none of them: undef when it can, which is when the file has a record of
+	# one, or every one is read as REF
+	my ($site_unknown) = $listed ? () : grep { defined } map { $unknown[$_] } @sites;
+
+	my %out;
+	foreach my $i (0 .. $#{ $names }) {
+		my $name = $names->[$i];
+		my $d = $dose->{$name};
+		my (%n, %copies, @assumed);
+		foreach my $role (@abo_role) {
+			my $k = $panel->{abo}{$role};
+			$n{$role} = $as_ref[$k] ? 0 : $d->[$k];
+			$copies{ $marker[$k]{name} } = $n{$role};
+			push @assumed, $marker[$k]{name} if $as_ref[$k];
+		}
+		my ($genotype, $phenotype, $lacking) = _abo_type(\%n);
+		my $abo_why;
+		if (defined $lacking) {
+			my $k = $panel->{abo}{$lacking};
+			$abo_why = $unknown[$k] // "no genotype at $marker[$k]{name}: the call is missing, is not diploid, or has a DP below $r{min_depth}";
+		}
+		my $carried = grep { $d->[$_] } @sites;
+		my $lost = $deleted->[$i]; # copies of a deletion covering RHD: 0 to 2, or undef when the file has no record of one that calls this sample
+		# 'deletion' = from a record of the gene's deletion; 'sites' = from the
+		# RHD sites; undef = no type
+		my ($rh_genotype, $rh_phenotype, $basis, $rh_why);
+		if (defined $lost) {
+			($rh_genotype, $rh_phenotype, $basis) = (('DD', 'Dd', 'dd')[$lost], $lost == 2 ? 'negative' : 'positive', 'deletion');
+		} elsif ($carried) {
+			# the second copy cannot be told from SNVs; see the README
+			($rh_genotype, $rh_phenotype, $basis) = ('D.', 'positive', 'sites');
+		} elsif (!defined $site_unknown) {
+			($rh_genotype, $rh_phenotype, $basis) = ('dd', 'negative', 'sites');
+		} else {
+			$rh_why = $site_unknown;
+		}
+		$out{$name} = {
+			type => defined $phenotype && defined $rh_phenotype ? $phenotype . ($rh_phenotype eq 'positive' ? '+' : '-') : undef,
+			abo => {
+				genotype    => $genotype,
+				phenotype   => $phenotype,
+				markers     => \%copies,
+				assumed_ref => \@assumed,
+				why         => $abo_why,
+			},
+			rhesus => {
+				genotype  => $rh_genotype,
+				phenotype => $rh_phenotype,
+				basis     => $basis,
+				sites     => scalar @sites,
+				listed    => 0 + $listed,
+				carried   => 0 + $carried,
+				deleted   => $lost,
+				why       => $rh_why,
+			},
+		};
+	}
+	if ($r{report}) {
+		my @assumed = map { $marker[$_]{name} } grep { $as_ref[$_] } map { $panel->{abo}{$_} } @abo_role;
+		my $ref_sites = grep { $as_ref[$_] } @sites;
+		push @assumed, "$ref_sites of the " . scalar(@sites) . ' RHD sites' if $ref_sites;
+		print STDOUT _blood_report($vcf, \%r, $panel, \%out, $names, \@assumed) or croak "$sub: can't print the report: $!";
+	}
+	my %chroms = map { $_->{"$r{build}_chrom"} => 1 } @marker;
+	carp "$sub: \"vcf\" $vcf has no record on chromosome " . join(' or ', sort { $a <=> $b } keys %chroms)
+		. ", matched by position on $r{build}, so no blood type can be told; check that it is the build the file is on"
+		unless grep { $read & (1 << $_) } keys %chroms;
 	\%out;
 }
 
@@ -2501,6 +2869,8 @@ sub plot_msa {
 		tooltips tree_file xlabel ylabel)]);
 	_refs($sub, $args, 'ARRAY', qw(clustal_args order));
 	_refs($sub, $args, 'HASH', 'labels');
+	_file_names($sub, $args, qw(filename msa_file tree_file));
+	_threads($sub, $args);
 	my $drawing = _drawing($sub, $args);
 	my $tooltips = $args->{'tooltips'} // 0; # 1 = a tooltip naming each residue, in an SVG; 0 = none
 	croak "$sub: \"tooltips\" must be 0 or 1, not " . _what($tooltips) unless !ref $tooltips && ($tooltips eq '0' || $tooltips eq '1');
@@ -2603,6 +2973,8 @@ sub plot_phylo {
 	my $args = _args(\@_, $sub, [], [qw(clustal_args execute fasta fh labels msa_file output_file threads title tree_file)]);
 	_refs($sub, $args, 'ARRAY', 'clustal_args');
 	_refs($sub, $args, 'HASH', 'labels');
+	_file_names($sub, $args, qw(msa_file output_file tree_file));
+	_threads($sub, $args);
 	my $drawing = _drawing($sub, $args);
 	$args->{output_file} //= 'phylo.svg';
 	my ($r, $tree, $names, $cmd);
@@ -2636,6 +3008,13 @@ sub msa_quality_table {
 	my $args = _args(\@_, $sub, ['filename'], [qw(alignment_json cb_label cb_max cb_min cblogscale default_undefined fasta
 		logscale_add metric msa_file normalize order show_numbers title unaligned_fa)]);
 	_refs($sub, $args, 'ARRAY', 'order');
+	_file_names($sub, $args, qw(filename msa_file));
+	# Each is added to, divided by or compared with a score. Up to 2026-11-10
+	# one that was not a number only warned "isn't numeric", and was drawn as 0.
+	foreach my $k (qw(cb_max cb_min default_undefined logscale_add normalize)) {
+		croak "$sub: \"$k\" must be a number, not " . _what($args->{$k})
+			if defined $args->{$k} && (ref $args->{$k} || $args->{$k} !~ $Number);
+	}
 	my %metric = map { $_ => 1 } qw(num bit_score score evalue identity positive align_len);
 	my $metric = $args->{metric} // 'score';
 	croak "$sub: \"$metric\" isn't one of the metrics: " . join(', ', sort keys %metric) unless $metric{$metric};
@@ -2671,17 +3050,43 @@ sub msa_quality_table {
 	}
 	croak "$sub: \"alignment_json\" isn't a BLAST report in JSON (-outfmt 15): it has no \"BlastOutput2\" array"
 		unless ref $blast eq 'HASH' && ref $blast->{BlastOutput2} eq 'ARRAY';
+	# The report's shape is checked as it is read. Up to 2026-11-10 a report
+	# that was not an object, or "hits" that was not an array, died with perl's
+	# "Can't use string as a HASH ref" or "Not an ARRAY reference", naming no
+	# function. A report with no bl2seq, as a search of a database has, holds no
+	# pair, and is left for the message below.
 	my (%data, $max);
-	foreach my $query (@{ $blast->{BlastOutput2} }) {
-		foreach my $hit_list (@{ $query->{report}{results}{bl2seq} }) {
-			foreach my $hit (@{ $hit_list->{hits} }) {
-				my $value = $hit->{hsps}[0]{$metric} // next;
-				$data{ $hit_list->{query_title} }{ $hit->{description}[0]{title} } = $value;
+	my %known; # every query the report names, whether or not it has a hit
+	foreach my $i (0 .. $#{ $blast->{BlastOutput2} }) {
+		my $query = $blast->{BlastOutput2}[$i];
+		my $where = 'report ' . ($i + 1) . ' of "alignment_json"';
+		my $results = ref $query eq 'HASH' && ref $query->{report} eq 'HASH' ? $query->{report}{results} : undef;
+		croak "$sub: $where has no report.results" unless ref $results eq 'HASH';
+		my $lists = $results->{bl2seq} // [];
+		croak "$sub: $where has a \"bl2seq\" that isn't an array, but " . _what($lists) unless ref $lists eq 'ARRAY';
+		foreach my $hit_list (@{ $lists }) {
+			croak "$sub: $where has a comparison that isn't one, which is an object with a \"query_title\" and a \"hits\" array"
+				unless ref $hit_list eq 'HASH' && defined $hit_list->{query_title} && !ref $hit_list->{query_title}
+					&& ref($hit_list->{hits} // []) eq 'ARRAY';
+			$known{ $hit_list->{query_title} } = 1;
+			foreach my $hit (@{ $hit_list->{hits} // [] }) {
+				croak "$sub: $where has a hit of \"$hit_list->{query_title}\" that isn't one, which is an object whose \"description\" and \"hsps\" are arrays of objects"
+					unless ref $hit eq 'HASH' && ref($hit->{description} // []) eq 'ARRAY' && ref($hit->{hsps} // []) eq 'ARRAY'
+						&& !grep { ref $_ ne 'HASH' } @{ $hit->{description} // [] }, @{ $hit->{hsps} // [] };
+				my ($first, $hsp) = (($hit->{description} // [])->[0], ($hit->{hsps} // [])->[0]);
+				next unless defined $first && defined $first->{title} && defined $hsp;
+				my $value = $hsp->{$metric} // next;
+				$data{ $hit_list->{query_title} }{ $first->{title} } = $value;
 				$max = $value if !defined $max || $value > $max;
 			}
 		}
 	}
 	croak "$sub: no \"$metric\" values in the BLAST report" unless defined $max;
+	# Up to 2026-11-10 a name in "order" that the report lacks, a misspelt one
+	# say, was drawn as a row and a column of grey cells, as a sequence that
+	# has no hit is.
+	my @unknown = grep { !$known{$_} } @{ $args->{order} // [] };
+	croak "$sub: \"order\" names sequences that aren't in the BLAST report: @unknown" if @unknown;
 	my @order = @{ $args->{order} // [sort { lc $a cmp lc $b } keys %data] };
 	my (@row_labels, @names);
 	foreach my $key (@order) {
@@ -2764,6 +3169,8 @@ sub clustal_view_residues {
 	my $args = _args(\@_, $sub, ['msa_file', 'output_tex_file'], [qw(caption clustal_args color_residues label
 		order row_width split table_text_size threads track)]);
 	_refs($sub, $args, 'ARRAY', qw(clustal_args order));
+	_file_names($sub, $args, qw(msa_file output_tex_file));
+	_threads($sub, $args);
 	my $color = $args->{'color_residues'} // {};
 	croak "$sub: \"color_residues\" must be a hash ref" unless ref $color eq 'HASH';
 	foreach my $protein (sort keys %{ $color }) {
@@ -2914,6 +3321,10 @@ __END__
  my $conc = concordance(truth => 'NA12878.truth.vcf.gz', test => 'NA12878.run42.vcf.gz');
  print $conc->{'NA12878'}{metrics}{genotype_concordance};
 
+ # each sample's ABO and RhD blood type, and the genotype behind each
+ my $blood = blood_type(vcf => 'exome.vcf.gz');
+ print "$blood->{'NA12878'}{type} ($blood->{'NA12878'}{abo}{genotype})\n"; # A+ (AO)
+
  # the 41 HIrisPlex-S markers, as the webtool's CSV wants them
  my $g = hirisplex_genotypes(vcf => 'genome.vcf.gz', file => 'hirisplexs.csv');
 
@@ -2924,13 +3335,13 @@ __END__
 =head1 DESCRIPTION
 
 FASTA I/O in XS, BLAST hit ranking, a search of the PDB's structures for a
-sequence, and multiple-sequence-alignment plots and LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, how every two people are related, how well one VCF's calls agree with another's, and the genotypes of the HIrisPlex-S eye, hair and skin colour panel, with a trait predictor for any multinomial logistic model you supply.
+sequence, and multiple-sequence-alignment plots and LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, how every two people are related, how well one VCF's calls agree with another's, each sample's ABO and RhD blood type, and the genotypes of the HIrisPlex-S eye, hair and skin colour panel, with a trait predictor for any multinomial logistic model you supply.
 
 Nothing is exported by default; ask for functions by name or with C<:all>.
 Every function dies (via C<Carp::croak>) on bad arguments, with a message that
 starts with the name of the function that raised it, as in
 C<fasta2hash: couldn't find "four" in x.fa>. C<pdb_search>, C<pgs_score>, C<sex_check>,
-C<parent>, C<relatedness>, C<concordance>, C<hirisplex_genotypes>, C<trait_predict>, C<plot_msa>, C<plot_phylo>, C<msa_quality_table> and C<clustal_view_residues>
+C<parent>, C<relatedness>, C<concordance>, C<blood_type>, C<hirisplex_genotypes>, C<trait_predict>, C<plot_msa>, C<plot_phylo>, C<msa_quality_table> and C<clustal_view_residues>
 take C<< name =E<gt> value >> pairs, not a hash ref.
 
 =head2 Alien::Bioinf
@@ -3021,8 +3432,12 @@ Reads a FASTA file (gzip-compressed if its name ends in C<.gz>, in any case,
 which needs a C<gzip> program on C<PATH>). Returns a hash ref of defline (without the C<< E<gt> >>) =>
 sequence, or, with C<$key>, just the sequence of that defline, reading no
 further than the record after it. A defline that appears twice is warned about
-and its sequences concatenated; with C<$key>, only a repeat of C<$key> is looked
-for. Line endings may be C<\n> or C<\r\n>. Whitespace (space, tab, C<\r>, C<\f>
+and its sequences concatenated. With C<$key>, reading stops at the defline
+after that record, so only a repeat that follows it directly is seen; a second
+record of that name further on is not read, and the first's sequence comes
+back alone, with no warning. Read the whole file where that matters. Line
+endings may be C<\n> or C<\r\n>; a file whose lines end in C<\r> alone (classic
+Mac OS) dies, since without a C<\n> it is all one line. Whitespace (space, tab, C<\r>, C<\f>
 and C<\x0b>) is dropped from sequences and from the end of deflines, as
 Biopython drops it, so a defline of C<x> and a space is found as C<x>. Deflines and sequences are bytes,
 just as they are in the file. A C<.gz> that gzip cannot read to its end, such as
@@ -3038,7 +3453,10 @@ C<$filename>, and prints C<wrote $filename> to STDOUT, with the name in black
 on cyan when STDOUT is a terminal. Keys and sequences are written as bytes, as C<print> to a C<:raw>
 handle writes them, so a string that perl holds as UTF-8 is written as the
 characters in it. A character above 255 has no single byte and dies; encode
-such a string first, as with C<Encode::encode('UTF-8', $name)>.
+such a string first, as with C<Encode::encode('UTF-8', $name)>. A key that is
+empty or holds a line feed dies, as does a sequence that is a reference
+(unless it is an object that overloads its own text), since C<fasta2hash> could
+not read any of them back as what was given.
 
 =head2 get_best_alignment_hit($json_file, $sort_criterion)
 
@@ -3597,7 +4015,13 @@ sites that one of the two never had sequenced. The report gives the sites in
 each file alone for that reason, and C<parent> warns when one file has more
 than twice as many as the other: the three pairs of the family above had
 ratios of 1.13 at most, an exome of another kit had 3.0 to 13 against them,
-and a genome against an exome 58 (with a kinship of -19.8). A VCF
+and a genome against an exome 58 (with a kinship of -19.8). The difference
+must also be 50 sites or more, which chance does not give (a ratio over 2 with
+a difference of 50 has a chance of 4.8e-5 at most, were a site as likely to be
+in either file alone), and 0.9% or more of the sites compared, since fewer
+could not carry the parent and child above over C<max_ibs0> even if every one
+were an opposite homozygote; so two VCFs that list every site and differ by 3
+sites against 1 are not warned of. A VCF
 that leaves out filtered calls has holes that look hom-REF too.
 
 C<parent> dies, rather than return a 0 or 1 that it has no grounds for, when
@@ -4012,6 +4436,207 @@ schemes for the chromosomes other than C<chr>.
 
 A BCF is not read; convert it with C<bcftools view -Oz>.
 
+=head2 blood_type(%args)
+
+Tells each sample's ABO blood group and whether it is RhD positive or
+negative from a VCF, with the genotype behind each:
+
+ use Cn::Bioinf 'blood_type';
+
+ my $b = blood_type(vcf => 'exome.vcf.gz');
+ print $b->{NA12878}{type};               # A+
+ print $b->{NA12878}{abo}{genotype};      # AO
+ print $b->{NA12878}{rhesus}{phenotype};  # positive
+
+and prints
+
+ blood_type: exome.vcf.gz
+ ABO from rs8176719 (O's deletion), rs8176746 (B) and rs41302905 (O2); RhD from 15 sites of RHD, or a record of the gene's deletion; matched by position on b37; genotypes of DP below 7 not counted
+ sample   type  ABO  ABO genotype  RhD       RhD genotype  RHD sites
+ NA12878  A+    A    AO            positive  D.                 2/15
+ "RHD sites" is how many of the sites the sample has an ALT allele at; one is enough for RhD positive
+ not in the file, and taken as homozygous for the reference allele: rs8176746, rs41302905, 13 of the 15 RHD sites
+
+with one row for each sample, in the VCF's order.
+
+B<This is not a blood test, and must not be used to choose blood for a
+transfusion or for any other clinical purpose.> It reads the common alleles
+and nothing else: a weak or partial D, an I<RHD> gene that is present but does
+not work (the I<RHD> pseudogene, common in people of African ancestry, makes
+somebody RhD negative whom this calls positive), a hybrid of I<RHD> and I<RHCE>,
+the A2 and other subgroups, cis-AB and the rare O alleles are all outside it.
+
+An exome's 22 MB C<.vcf.gz> took 0.8 s and 20 MB, and a whole genome's 155 MB
+6.1 s and 47 MB (perl 5.44.0, 2026-11-10). The markers are in
+C<share/blood_type_panel.tsv>, which C<share/make_blood_type_panel.pl> writes;
+its header comment says where each comes from, and the module never runs it.
+
+=head3 ABO
+
+Three markers are read. C<rs8176719> is the single-base deletion that makes the
+common O alleles; the reference genome carries the deletion, on GRCh37 and on
+GRCh38, so a VCF writes a working gene there as an insertion, and a chromosome
+with that insertion is A or B. C<rs8176746> is one of the changes that make
+the B enzyme, and C<rs41302905> is the O2 allele, an O with no deletion, which
+would otherwise be read as A. So a chromosome without the insertion is O,
+whatever else it carries; one with it is B with C<rs8176746>'s T, O with
+C<rs41302905>'s T, and otherwise A. The genotype is the two letters, A before B
+before O (C<AO>, C<BO>, C<AB>, C<OO>), and the phenotype is what they make: C<A>,
+C<B>, C<AB> or C<O>.
+
+The genotypes are not phased, so somebody heterozygous at both C<rs8176719>
+and C<rs8176746> is read as C<BO>, the B allele being taken to be on the
+chromosome with the working gene. Of the 5,008 haplotypes of 1000 Genomes'
+phase 3, 721 carried both and 44 the B allele without the insertion, which
+makes that reading right 98.1% of the time.
+
+Checked against 1000 Genomes on 2026-11-10: the ABO genotype read from phase
+3's calls on GRCh37 and the one read from the New York Genome Center's 30x
+resequencing of the same people, called afresh on GRCh38, were the same for
+all 2,504 of them.
+
+=head3 RhD
+
+Most people who are RhD negative have no I<RHD> gene on either chromosome, and
+a VCF of SNVs has no record for a gene that is not there. C<blood_type> reads
+it in one of two ways.
+
+Where the file has a record of a deletion that covers the whole gene, as 1000
+Genomes' phase 3 does (C<< 1:25592642 E<lt>CN0E<gt> >>, C<END=25661222>), the sample's
+genotype there is the answer: C<DD>, C<Dd> or C<dd>. A deletion is an ALT of
+C<< E<lt>CN0E<gt> >>, C<< E<lt>DELE<gt> >> or C<< E<lt>DEL:...E<gt> >>, and has to start at or before the gene and
+end, by C<END> or C<SVLEN>, at or after it.
+
+Otherwise it reads 15 sites inside the gene at which the reference genome
+carries a rare allele, so that almost everybody who has the gene has an ALT
+call there, and nobody without it has. One such call makes a sample RhD
+positive, written C<D.>, since SNVs cannot say whether the second chromosome
+has the gene too: the ratio of heterozygous to homozygous-ALT calls inside the
+gene, which tells sex on X, got a tenth to a quarter of 2,343 people wrong at
+any cutoff. No such call makes a sample C<dd>, RhD negative.
+
+The sites were chosen, and counted, in 1000 Genomes: the 30x calls of the
+2,493 people whose deletion genotype phase 3 gives. Of the 150 with no gene,
+none had a call at any of the 15; of the 2,343 with one or two, 5 had a call
+at none, and so are called negative, and 2 at only one. Choosing the sites
+on a random half of the people and counting on the other half chose the same
+15 and gave the same counts.
+
+An exome sees little of this: the capture kit of the three exomes tried
+reached 2 of the 15 sites, at a depth of 13. The types of those three are
+known from the depth of their reads: two cover I<RHD>'s exons at a mean depth
+of 3 and 2 against 90 and 97 over I<RHCE>'s, and the third at 30 against 84;
+C<blood_type> called them negative, negative and positive. A kit that reaches
+none of the 15 sites would call everybody
+negative, and C<carried> and C<listed>, below, are returned so that an answer
+from few sites can be seen for what it is.
+
+=head3 A marker the file has no record of
+
+A VCF of one person usually lists only the sites where that person carries an
+ALT allele, so that somebody who is OO, or has no B allele, or has no I<RHD>
+gene, simply has no record at those markers. By default a marker with no
+record is therefore read as homozygous for the reference allele, and each
+answer says which markers that was done for. Two things are not read that
+way, because the file could not have held the record:
+
+=over
+
+=item * a marker on a chromosome the file has no record on at all;
+
+=item * C<rs8176719>, an insertion, in a file with no allele longer than one base on
+chromosome 9. Such a file holds SNVs only, and reading the insertion's
+absence as REF would call everybody O; no ABO type is given, and C<why> says
+so.
+
+=back
+
+A file of every site, a cohort's, or a genotyping array's does have a record
+where a sample is homozygous REF, and C<< assume_ref =E<gt> 0 >> makes a marker with
+no record a marker with no genotype.
+
+=head3 Arguments
+
+=over
+
+=item * C<vcf> (required): a C<.vcf>, C<.vcf.gz>, C<.vcf.bgz> or C<.vcf.bz2> file. As
+C<sex_check> does, it may be given first and on its own:
+C<blood_type('genome.vcf.gz')>.
+
+=item * C<assume_ref>: 1 (the default) reads a marker the file has no record of as
+homozygous for the reference allele, as above; 0 leaves it without a
+genotype.
+
+=item * C<build>: C<hg19>, C<b37>, C<hg38> or C<b38>, saying which of the panel's two sets
+of coordinates to match on. By default it is read from the VCF's C<##contig>
+lengths, as C<hirisplex_genotypes> reads it, and C<blood_type> dies asking for
+it when the header gives no length it knows.
+
+=item * C<min_depth>: a genotype whose FORMAT C<DP> is below this is not counted.
+Defaults to 7, which is C<sex_check>'s and the depth the RhD sites were chosen
+at; 0 counts every call whatever its depth. A genotype with no C<DP> is
+always counted.
+
+=item * C<report>: 1 (the default) prints the table to STDOUT; 0 returns the answers
+only.
+
+=back
+
+=head3 What it returns
+
+A hash ref keyed by sample name, each holding:
+
+=over
+
+=item * C<type>: the two together, as C<A+> or C<O->, or C<undef> when either is not
+known.
+
+=item * C<abo>: a hash ref of
+
+=over
+
+=item * C<genotype> and C<phenotype>: as above, or C<undef>;
+
+=item * C<markers>: a hash ref of rs number => 0, 1 or 2 copies of the allele
+counted, or C<undef> where the sample has no genotype;
+
+=item * C<assumed_ref>: an array ref of the markers the file has no record of
+that were read as homozygous REF;
+
+=item * C<why>: C<undef>, or why no type could be given.
+
+=back
+
+=item * C<rhesus>: a hash ref of
+
+=over
+
+=item * C<genotype>: C<DD>, C<Dd> or C<dd> from a record of the deletion; C<D.> or
+C<dd> from the sites; or C<undef>;
+
+=item * C<phenotype>: C<positive>, C<negative> or C<undef>;
+
+=item * C<basis>: C<deletion> or C<sites>, saying which of the two it was read
+from, or C<undef>;
+
+=item * C<sites>, C<listed> and C<carried>: how many RhD sites the panel has, how
+many of them the file has a record of, and at how many this sample has
+an ALT allele;
+
+=item * C<deleted>: the copies of the deletion the sample has, 0 to 2, or C<undef>
+when the file has no record of it that calls the sample;
+
+=item * C<why>: C<undef>, or why no type could be given.
+
+=back
+
+=back
+
+A genotype is counted only when the call is diploid and complete, as
+C<hirisplex_genotypes> counts one. C<blood_type> warns when the file has no
+record on chromosome 1 or on chromosome 9, which usually means the wrong
+build.
+
 =head2 hirisplex_genotypes(%args)
 
 Reads the 41 markers of the HIrisPlex-S eye, hair and skin colour panel out of
@@ -4070,7 +4695,9 @@ C<hirisplex_genotypes('genome.vcf.gz')>.
 
 =item * C<match>: C<position> (the default) matches CHROM and POS against the panel's
 coordinates; C<id> matches the ID column against the markers' rs numbers,
-which finds nothing in a VCF whose ID column is C<.>.
+which finds nothing in a VCF whose ID column is C<.>. An ID of several
+names, separated by semicolons as the VCF specification has them, matches
+when any of them is a marker's.
 
 =item * C<build>: C<hg19>, C<b37>, C<hg38> or C<b38>, saying which of the panel's two sets
 of coordinates to match on. By default it is read from the VCF's C<##contig>
@@ -4366,7 +4993,10 @@ less, as C<evalue> has when BLAST has rounded every e-value to 0, dies.
 C<cb_max>, C<cblogscale>, C<show_numbers>: the sequences to show, in order; a
 number added to every value; the value of a pair with no hit (otherwise
 drawn grey); the title; the colour bar's label, lower and upper ends, and
-whether it is logarithmic; and whether each cell shows its number.
+whether it is logarithmic; and whether each cell shows its number. A name
+in C<order> that the report does not hold dies, and so does a
+C<logscale_add>, C<default_undefined>, C<cb_min>, C<cb_max> or C<normalize> that
+is not a number.
 
 =back
 

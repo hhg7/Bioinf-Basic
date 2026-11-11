@@ -8,5 +8,10 @@ use autodie ':default';
 use Cn::Util;
 use Cn::Bioinf;
 
-my $c = concordance(test => '/home/con/Documents/Genomics/56001801066929_WGZ.snp.vcf.gz', truth => '/home/con/Documents/Genomics/3025181.vcf.gz');
+# The test VCF and then the truth VCF may be given on the command line; the
+# defaults are the links in ~/Documents/Genomics, as parent.pl's are, so that
+# no sample's ID is written here.
+my $test  = shift // "$ENV{HOME}/Documents/Genomics/genome.vcf.gz";
+my $truth = shift // "$ENV{HOME}/Documents/Genomics/father.vcf.gz";
+my $c = concordance(test => $test, truth => $truth);
 p $c;

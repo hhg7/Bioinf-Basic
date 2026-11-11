@@ -48,7 +48,11 @@ close $s;
 open my $qf, '>', 'query.fa' or die $!;
 print {$qf} ">S.cerevisiae\n$q\n";
 close $qf;
-my $db = "$FindBin::Bin/subjects.db";
+# The databases are named relative to this directory, which is the working
+# directory since the chdir above: blastp copies -db into its JSON as
+# "search_target", and up to 2026-11-11 the fixtures so held the absolute path
+# of the maintainer's copy.
+my $db = 'subjects.db';
 system(Alien::Bioinf->blast('makeblastdb'), '-in', 'subjects.fa', '-dbtype', 'prot', '-out', $db) == 0 or die 'makeblastdb failed';
 system(Alien::Bioinf->blast('blastp'), '-query', 'query.fa', '-db', $db, '-outfmt', 15, '-out', 'hits.json') == 0 or die 'blastp failed';
 unlink glob "$db.*";
@@ -60,7 +64,7 @@ close $nr;
 open my $nq, '>', 'nr.query.fa' or die $!;
 print {$nq} '>q' . "\n" . substr($nr_seq, 0, 52) . "\n";
 close $nq;
-my $nr_db = "$FindBin::Bin/nr.db";
+my $nr_db = 'nr.db';
 system(Alien::Bioinf->blast('makeblastdb'), '-in', 'nr.fa', '-dbtype', 'prot', '-parse_seqids', '-out', $nr_db) == 0 or die 'makeblastdb failed';
 system(Alien::Bioinf->blast('blastp'), '-query', 'nr.query.fa', '-db', $nr_db, '-outfmt', 15, '-out', 'nr.json') == 0 or die 'blastp failed';
 unlink glob("$nr_db.*"), 'nr.fa', 'nr.query.fa';

@@ -430,7 +430,10 @@ dies_like sub { msa_quality_table(%q, normalize => 1) },
 dies_like sub { msa_quality_table(%q, order => 'A.b') }, qr/^msa_quality_table: "order" must be an array ref, not "A\.b"/, 'an order that is not an array ref dies';
 dies_like sub { msa_quality_table(%q, 'alignment_json' => []) },
 	qr/^msa_quality_table: "alignment_json" must be a file name or a hash ref, not an ARRAY ref/, 'and so does an alignment_json that is neither';
-dies_like sub { msa_quality_table(%q, order => ['E.f']) },
+# E.f is a query with no hit; up to 2026-11-10 this case named a sequence the
+# report lacked altogether, which now dies of that (see "found by review on 2026-11-10" below)
+dies_like sub { msa_quality_table(%q, 'alignment_json' => { BlastOutput2 => [@{ $blast->{BlastOutput2} },
+		{ report => { results => { bl2seq => [{ query_title => 'E.f', hits => [] }] } } }] }, order => ['E.f']) },
 	qr/^msa_quality_table: no pair of the sequences in "order" has a "evalue" value/, 'an order with nothing to draw dies';
 # a file of JSON that is not a BLAST report used to die with perl's "Not a HASH
 # reference", and one that is not JSON at all with JSON::MaybeXS's message
@@ -652,6 +655,144 @@ like $body, qr/^\\textit\{e\\\{f\\\}\} & /m, 'and so do its braces';
 	dies_like sub { pdb_search(seq => $seq) }, qr/^the network was used/, 'pdb_search: a good call reaches RCSB';
 }
 
+# ---- blood_type
+#
+# It needs none of Alien::Bioinf's programs either. The VCF is a well-formed
+# one with none of the panel's markers; the arguments are refused before it is
+# opened.
+{
+	my $vcf = spew('blood_checks.vcf', "##fileformat=VCFv4.2\n##contig=<ID=1,length=249250621>\n"
+		. join("\t", '#CHROM', qw(POS ID REF ALT QUAL FILTER INFO FORMAT S)) . "\n"
+		. join("\t", 1, 100, 'rs1', 'A', 'G', '.', '.', '.', 'GT', '0/1') . "\n");
+	my $bam = spew('blood_checks.bam', "not a VCF\n");
+	my @bad = (
+		[['nowhere.vcf'], qr/^blood_type: "vcf" file "nowhere\.vcf" doesn't exist or isn't readable/, 'a missing file'],
+		[[], qr/^blood_type: needs "vcf"/, 'no file'],
+		[[{ vcf => $vcf }], qr/^blood_type: takes name => value pairs, not a hash ref/, 'a hash ref'],
+		[[vcf => []], qr/^blood_type: "vcf" must be a file name, not an ARRAY ref/, 'a file that is a ref'],
+		[[vcf => $vcf, build => 'hg18'], qr/^blood_type: "build" must be hg19, b37, hg38 or b38, not "hg18"/, 'an unknown build'],
+		[[vcf => $vcf, min_depth => -1], qr/^blood_type: "min_depth" must be a whole number, 0 or more, not "-1"/, 'a negative min_depth'],
+		[[vcf => $vcf, min_depth => '7.5'], qr/^blood_type: "min_depth" must be a whole number, 0 or more, not "7\.5"/, 'a fractional min_depth'],
+		[[vcf => $vcf, report => 2], qr/^blood_type: "report" must be 0 or 1, not "2"/, 'a report of 2'],
+		[[vcf => $vcf, assume_ref => 'yes'], qr/^blood_type: "assume_ref" must be 0 or 1, not "yes"/, 'an assume_ref that is neither 0 nor 1'],
+		[[vcf => $vcf, assume_ref => []], qr/^blood_type: "assume_ref" must be 0 or 1, not an ARRAY ref/, 'an assume_ref that is a ref'],
+		[[vcf => $vcf, rhesus => 1], qr/^blood_type: doesn't know "rhesus"; it takes assume_ref, build, min_depth, report, vcf/, 'an unknown option'],
+		[[vcf => $bam], qr/^blood_type: "vcf" file \Q$bam\E must end in \.vcf, \.vcf\.gz, \.vcf\.bgz or \.vcf\.bz2/, 'a file whose name says it is not a VCF'],
+		[[$vcf, 'report'], qr/^blood_type: "\Q$vcf\E" is the file, so the options after it must be name => value pairs, and are an odd number/, 'a file followed by an option with no value'],
+	);
+	foreach my $case (@bad) {
+		my ($args, $re, $name) = @{ $case };
+		dies_like sub { blood_type(@{ $args }) }, $re, "blood_type: $name dies";
+	}
+	my $nolen = spew('blood_nolen.vcf', "##fileformat=VCFv4.2\n" . join("\t", '#CHROM', qw(POS ID REF ALT QUAL FILTER INFO FORMAT S)) . "\n");
+	dies_like sub { blood_type(vcf => $nolen, report => 0) },
+		qr/^blood_type: "vcf" .* has no ##contig line giving a length for chromosome 1, 15, 16, 20/,
+		'blood_type: a header with no length to tell the build by dies';
+	# the positive sentinel: a good call reads the file and returns its sample
+	my $r = blood_type(vcf => $vcf, report => 0);
+	is_deeply [sort keys %{ $r }], ['S'], 'blood_type: a good call returns the file\'s sample';
+	# an error raised in Bioinf.xs is given at the caller's line
+	my $short = spew('blood_short.vcf', "##fileformat=VCFv4.2\n##contig=<ID=1,length=249250621>\n"
+		. join("\t", '#CHROM', qw(POS ID REF ALT QUAL FILTER INFO FORMAT S)) . "\n1\t100\trs1\tA\n");
+	dies_like sub { blood_type(vcf => $short, report => 0) },
+		qr/^vcf_columns: \Q$short\E line 4 has 4 columns, and a record needs 9 and a sample at \Q${\ __FILE__}\E line \d+\.?\n\z/,
+		'blood_type: a record cut short dies in the reader, at the caller\'s line';
+	# the gene a deletion has to cover is checked before the file is read
+	dies_like sub { Cn::Bioinf::_blood_type_tally(sub { undef }, 'x.vcf', 0, [[9, 100, 'T', 0, 'rs1', 0]], 1, 25, 1, 2) },
+		qr/^bt_tally_vcf: the gene is chromosome 25, 1 to 2, which isn't a stretch of a chromosome/, 'blood_type: a gene on no chromosome dies';
+	dies_like sub { Cn::Bioinf::_blood_type_tally(sub { undef }, 'x.vcf', 0, [[9, 100, 'T', 0, 'rs1', 0]], 1, 1, 9, 2) },
+		qr/^bt_tally_vcf: the gene is chromosome 1, 9 to 2, which isn't a stretch of a chromosome/, 'blood_type: a gene that ends before it starts dies';
+	dies_like sub { Cn::Bioinf::_blood_type_tally(sub { undef }, 'x.vcf', 0, [[9, 100, 'T', 0, 'rs1', 0]], 1, 1, 1, 2) },
+		qr/^vcf_read: x\.vcf has no #CHROM line/, 'blood_type: and a good one gets as far as reading the VCF';
+}
+
+# ---- found by review on 2026-11-10; each failed against the code of that day
+
+# sex_check and hirisplex_genotypes compared an undef first argument with 'vcf'
+# before asking whether it was defined, and _args then made a hash key of it,
+# so each warned "uninitialized" and died of something else.
+foreach my $case (
+	['sex_check(undef, 1)', sub { sex_check(undef, 1) }, qr/^sex_check: takes name => value pairs, and the name of pair 1 is undef/],
+	['hirisplex_genotypes(undef, 1)', sub { hirisplex_genotypes(undef, 1) }, qr/^hirisplex_genotypes: takes name => value pairs, and the name of pair 1 is undef/],
+	['sex_check(undef, report => 0)', sub { sex_check(undef, report => 0) }, qr/^sex_check: takes name => value pairs, and was given an odd number of arguments/],
+	['parent(child => "C", undef, 1)', sub { parent(child => 'C', undef, 1) }, qr/^parent: takes name => value pairs, and the name of pair 2 is undef/],
+) {
+	my ($name, $code, $re) = @{ $case };
+	my @w;
+	local $SIG{__WARN__} = sub { push @w, $_[0] };
+	dies_like $code, $re, "$name dies saying what is wrong with its arguments";
+	is "@w", '', 'and with no "uninitialized" warning';
+}
+
+# A file name that was a reference was used as its text, so that
+# plot_msa(filename => []) wrote an image named "ARRAY(0x5ea732db32c8)", and
+# "threads" reached clustalo as it was, which refused it under _run's name.
+foreach my $case (
+	[sub { plot_msa(%two_noq, filename => []) },            qr/^plot_msa: "filename" must be a file name, not an ARRAY ref/],
+	[sub { plot_msa(%two_noq, filename => '') },            qr/^plot_msa: "filename" must be a file name, not ""/],
+	[sub { plot_msa(%two_noq, 'msa_file' => {}) },          qr/^plot_msa: "msa_file" must be a file name, not a HASH ref/],
+	[sub { plot_msa(%two_noq, 'tree_file' => \'t') },       qr/^plot_msa: "tree_file" must be a file name, not a SCALAR ref/],
+	[sub { plot_msa(%two_noq, threads => 'many') },         qr/^plot_msa: "threads" must be a whole number, 1 or more, not "many"/],
+	[sub { plot_msa(%two_noq, threads => 0) },              qr/^plot_msa: "threads" must be a whole number, 1 or more, not "0"/],
+	[sub { plot_phylo(fasta => { a => 'MK', b => 'MV' }, 'output_file' => []) }, qr/^plot_phylo: "output_file" must be a file name, not an ARRAY ref/],
+	[sub { plot_phylo(fasta => { a => 'MK', b => 'MV' }, threads => 1.5) },      qr/^plot_phylo: "threads" must be a whole number, 1 or more, not "1\.5"/],
+	[sub { msa_quality_table(%q, filename => []) },         qr/^msa_quality_table: "filename" must be a file name, not an ARRAY ref/],
+	[sub { clustal_view_residues('msa_file' => $ab, 'output_tex_file' => []) },  qr/^clustal_view_residues: "output_tex_file" must be a file name, not an ARRAY ref/],
+	[sub { clustal_view_residues('msa_file' => $ab, 'output_tex_file' => $tex, threads => 'many') },
+		qr/^clustal_view_residues: "threads" must be a whole number, 1 or more, not "many"/],
+) {
+	my ($code, $re) = @{ $case };
+	my ($what) = $re =~ /\^(\w+: "\w+")/;
+	dies_like $code, $re, "$what is refused before anything runs";
+}
+
+# msa_quality_table drew a name in "order" that the report lacks as a row and
+# a column of grey cells, drew a number that was not one as 0 after an "isn't
+# numeric" warning, and died with perl's own message, naming no function, for
+# a report whose parts were of the wrong kind.
+foreach my $case (
+	[[order => ['A.b', 'E.f']],       qr/^msa_quality_table: "order" names sequences that aren't in the BLAST report: E\.f/, 'a name in "order" that the report lacks'],
+	[['cb_min' => 'low'],             qr/^msa_quality_table: "cb_min" must be a number, not "low"/, 'a cb_min that is not a number'],
+	[['cb_max' => []],                qr/^msa_quality_table: "cb_max" must be a number, not an ARRAY ref/, 'a cb_max that is a reference'],
+	[['default_undefined' => 'NA'],   qr/^msa_quality_table: "default_undefined" must be a number, not "NA"/, 'a default_undefined that is not a number'],
+	[['logscale_add' => '1e'],        qr/^msa_quality_table: "logscale_add" must be a number, not "1e"/, 'a logscale_add that is not a number'],
+	[[normalize => 'yes'],            qr/^msa_quality_table: "normalize" must be a number, not "yes"/, 'a normalize that is not a number'],
+	[['alignment_json' => { BlastOutput2 => ['x'] }], qr/^msa_quality_table: report 1 of "alignment_json" has no report\.results/, 'a report that is not an object'],
+	[['alignment_json' => { BlastOutput2 => [{ report => { results => { bl2seq => {} } } }] }],
+		qr/^msa_quality_table: report 1 of "alignment_json" has a "bl2seq" that isn't an array, but a HASH ref/, 'a bl2seq that is not an array'],
+	[['alignment_json' => { BlastOutput2 => [{ report => { results => { bl2seq => [{ query_title => 'A.b', hits => {} }] } } }] }],
+		qr/^msa_quality_table: report 1 of "alignment_json" has a comparison that isn't one/, 'hits that are not an array'],
+	[['alignment_json' => { BlastOutput2 => [{ report => { results => { bl2seq => [{ query_title => 'A.b', hits => [1] }] } } }] }],
+		qr/^msa_quality_table: report 1 of "alignment_json" has a hit of "A\.b" that isn't one/, 'a hit that is not an object'],
+) {
+	my ($more, $re, $name) = @{ $case };
+	my @w;
+	local $SIG{__WARN__} = sub { push @w, $_[0] };
+	dies_like sub { msa_quality_table(%q, @{ $more }) }, $re, "msa_quality_table: $name dies";
+	is "@w", '', 'and with no warning';
+}
+
+# get_best_alignment_hit died with perl's "Not an ARRAY reference" for "hits"
+# that was an object, and warned "uninitialized" each time an hsp with no
+# bit_score broke a tie.
+{
+	my $search = sub { qq({"BlastOutput2":[{"report":{"results":{"search":{"query_title":"q","hits":$_[0]}}}}]}) };
+	dies_like sub { get_best_alignment_hit(spew('hits_object.json', $search->('{}'))) },
+		qr/^get_best_alignment_hit: report 1 of .+hits_object\.json has "hits" that isn't an array, but a HASH ref/, 'get_best_alignment_hit: "hits" that is an object dies';
+	dies_like sub { get_best_alignment_hit(spew('hit_number.json', $search->('[1]'))) },
+		qr/^get_best_alignment_hit: hit 1 of report 1 of .+hit_number\.json isn't a hit/, 'get_best_alignment_hit: a hit that is a number dies';
+	dies_like sub { get_best_alignment_hit(spew('hsps_object.json', $search->('[{"hsps":{}}]'))) },
+		qr/^get_best_alignment_hit: hit 1 of report 1 of .+hsps_object\.json isn't a hit/, 'get_best_alignment_hit: "hsps" that is an object dies';
+	my @w;
+	local $SIG{__WARN__} = sub { push @w, $_[0] };
+	my $got = get_best_alignment_hit(spew('no_bits.json', $search->('[{"len":5,"description":[{"title":"t"}],"hsps":[{"evalue":1,"num":1},{"evalue":1,"num":2}]}]')));
+	is_deeply [map { [@{ $_ }{qw(title num evalue)}] } @{ $got->{q} }], [['t', 1, 1]], 'get_best_alignment_hit: of two hsps that tie and have no bit_score, the first is kept';
+	is "@w", '', 'and with no "uninitialized" warning';
+	$got = get_best_alignment_hit(spew('no_description.json', $search->('[{"len":5,"hsps":[{"evalue":1,"bit_score":2}]}]')));
+	is_deeply [@{ $got->{q}[0] }{qw(title id accession descriptions hit_len)}], [undef, undef, undef, [], 5], 'get_best_alignment_hit: a hit with no description has undef names and no descriptions';
+	is "@w", '', 'and no warning either';
+}
+
 #  the XSUBs that read a VCF, when the reader grows perl's stack
 #
 # Up to 2026-10-26 each XSUB that reads a VCF through a perl callback pushed
@@ -663,8 +804,8 @@ like $body, qr/^\\textit\{e\\\{f\\\}\} & /m, 'and so do its braces';
 # glibc's malloc cannot grow in place from its heap, so the stack moves), and
 # once with one that does not. The expected value is the second run's: what
 # each XSUB counts is tested in t/sex.t, t/parent.t, t/relatedness.t,
-# t/concordance.t and t/hirisplex.t, and this checks only that a moved stack
-# does not change it.
+# t/concordance.t, t/hirisplex.t and t/blood.t, and this checks only that a
+# moved stack does not change it.
 {
 	my $two = spew('stack.two.vcf', join '', map { join("\t", @{ $_ }) . "\n" }
 		['##fileformat=VCFv4.2'],
@@ -709,6 +850,7 @@ my %call = (
 	relatedness_own  => sub { Cn::Bioinf::_relatedness_own([reader($one_a), reader($one_b)], [$one_a, $one_b], 0) },
 	concordance      => sub { Cn::Bioinf::_concordance(reader($two), $two, reader($two), $two, ['A', 'B'], 0, 1) },
 	hirisplex_dosage => sub { Cn::Bioinf::_hirisplex_dosage(reader($two), $two, 0, [[1, 100, 'G', 0, 'rs1', 0], [1, 200, 'T', 0, 'rs2', 1]], 2, 0) },
+	blood_type_tally => sub { Cn::Bioinf::_blood_type_tally(reader($two), $two, 0, [[1, 100, 'G', 0, 'rs1', 0], [1, 200, 'T', 0, 'rs2', 1]], 2, 1, 50, 150) },
 );
 my @result = $call{$case}->();
 Storable::nstore({ grown => $grown, result => \@result }, $out);
@@ -716,7 +858,7 @@ CHILD
 	require Storable;
 	# each XSUB and how many values it returns
 	my @cases = ([vcf_samples => 1], [sex_tally => 3], [parent_one => 12], [parent_own => 12],
-		[relatedness_one => 3], [relatedness_own => 3], [concordance => 2], [hirisplex_dosage => 3]);
+		[relatedness_one => 3], [relatedness_own => 3], [concordance => 2], [hirisplex_dosage => 3], [blood_type_tally => 6]);
 	foreach my $case (@cases) {
 		my ($name, $values) = @{ $case };
 		my %run; # 0 = the stack left alone, 1 = grown by the reader

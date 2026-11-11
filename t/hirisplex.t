@@ -112,6 +112,25 @@ foreach my $s (qw(A B C E)) {
 	is_deeply $by_id->{$s}{genotype}, $g->{$s}{genotype}, "matching by rs number finds the same genotypes for $s";
 }
 
+# An ID may be several names, which the VCF specification separates with
+# semicolons (VCFv4.2, section 1.4.1, field 3). Up to 2026-11-10 only the first
+# was looked at, so a record whose rs number came second matched nothing; this
+# failed against the code of that day. The genotypes expected are those of the
+# file as it is, which is the same records.
+{
+	open my $in, '<', $vcf or die "$vcf: $!";
+	my $text = do { local $/; <$in> };
+	close $in;
+	my $changed = $text =~ s/^([^#\t][^\t]*\t[0-9]+\t)(rs[0-9]+)\t/$1foo;$2;bar\t/mg;
+	cmp_ok $changed, '>=', 41, 'a record of every marker has its rs number put between two other names';
+	my $listed = catfile($dir, 'listed.vcf');
+	open my $out, '>', $listed or die "$listed: $!";
+	print {$out} $text;
+	close $out or die "$listed: $!";
+	my $got = hirisplex_genotypes(vcf => $listed, match => 'id', report => 0);
+	is_deeply $got->{$_}{genotype}, $by_id->{$_}{genotype}, "an rs number that is not the first name of its ID is still found, for $_" foreach qw(A B C E);
+}
+
 # ---- the webtool's CSV
 
 my $csv = catfile($dir, 'out.csv');

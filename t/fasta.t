@@ -195,6 +195,65 @@ like $@, qr/must be a hash ref/, 'a non-hash dies';
 eval { hash2fasta_file(\%h, $out, 'b') };
 like $@, qr/array ref or undef/, 'a non-array order dies';
 
+# ---- found by review on 2026-11-10; each failed against the code of that day
+
+# A file whose lines end in CR alone is one line, and came back as one record
+# named by the whole file, with no sequence. Biopython 1.87 reads such a file,
+# since Python opens it with universal newlines; here it is refused, which is
+# a deliberate difference.
+eval { fasta2hash(spew('cr.fa', ">a\rAAA\r>b\rCCC\r")) };
+like $@, qr/^read_fasta: .+cr\.fa line 1 has a carriage return inside its defline, as a file whose lines end in CR alone/,
+	'a file of CR line endings dies, rather than being one record named by all of it';
+# An error raised in Bioinf.xs was placed at the line of Cn/Bioinf.pm that
+# called the XSUB, which tells a caller nothing. The period after the line
+# number is optional: Carp wrote none before its 1.25, so perl 5.12.5's does
+# not (the first run of this test there, on 2026-11-10, failed on it).
+eval { fasta2hash(spew('noseq.fa', "ACGT\n")) };
+like $@, qr/^read_fasta: .+noseq\.fa line 1 is sequence, but no defline .+ at \Q${\ __FILE__}\E line \d+\.?\n\z/,
+	"an error raised in Bioinf.xs is placed at the caller's line, not at Cn/Bioinf.pm's";
+eval { hash2fasta_file({ a => 'M' }, $out, ['zz']) };
+like $@, qr/^write_fasta: "zz" has no sequence in the hash at \Q${\ __FILE__}\E line \d+\.?\n\z/, 'and so is one raised in writing';
+# With a key, reading stops at the defline after its record, as README.md
+# says, so a second record of that name further on is not read: the first's
+# sequence comes back alone, with no warning. This is not new; the whole-file
+# read of the same file, which warns and joins the two, is the sentinel.
+{
+	my $far = spew('dupfar.fa', ">a\nAAA\n>b\nCCC\n>a\nGGG\n");
+	my @w = warnings_of(sub { is fasta2hash($far)->{a}, 'AAAGGG', 'a repeat further on is joined when the whole file is read' });
+	is scalar(@w), 1, 'and warned of';
+	@w = warnings_of(sub { is fasta2hash($far, 'a'), 'AAA', 'but with a key, reading stops before it, and the first record comes back alone' });
+	is scalar(@w), 0, 'with no warning';
+}
+# hash2fasta_file wrote a reference as "ARRAY(0x...)", a key with a line feed
+# as a defline and a line of sequence, and an empty key as a defline with no
+# name, none of which fasta2hash reads back as what was given.
+eval { hash2fasta_file({ a => ['M'] }, $out) };
+like $@, qr/^write_fasta: the sequence of "a" is a reference, not a string of residues/, 'a sequence that is a reference dies, rather than being written as ARRAY(0x...)';
+eval { hash2fasta_file({ "a\nb" => 'M' }, $out) };
+like $@, qr/^write_fasta: "a\nb" has a line feed in it, which would end the defline there/, 'a key with a line feed dies';
+eval { hash2fasta_file({ '' => 'M' }, $out) };
+like $@, qr/^write_fasta: element 0 of the order is an empty name, which a defline can't be/, 'an empty key dies';
+{
+	package Cn::Bioinf::Test::Seq; # an object that is its own text
+	use overload '""' => sub { ${ $_[0] } }, fallback => 1;
+}
+hash2fasta_file({ o => bless(\(my $text = 'MKV'), 'Cn::Bioinf::Test::Seq') }, $out, undef, 0);
+is_deeply fasta2hash($out), { o => 'MKV' }, 'but an object that overloads its text is written as that text';
+
+SKIP: {
+	skip "fasta2hash can't read a .gz here: $no_gzip", 1 if $no_gzip;
+	# gzip read a name that starts with "-" as its options. The name has to be
+	# relative to start with one, hence the chdir.
+	require Cwd;
+	my $was = Cwd::getcwd();
+	gzip_file($plain, catfile($dir, '-n.fa.gz'));
+	chdir $dir or die "$dir: $!";
+	my $got = eval { fasta2hash('-n.fa.gz') };
+	my $why = $@;
+	chdir $was or die "$was: $!";
+	is_deeply $got, fasta2hash($plain), 'a .gz whose name starts with "-" is read, not taken for gzip\'s options' or diag $why;
+}
+
 SKIP: {
 	skip 'Test::LeakTrace is not installed', 5 unless eval { require Test::LeakTrace; 1 };
 	Test::LeakTrace::no_leaks_ok(sub { fasta2hash($plain) }, 'fasta2hash does not leak');
