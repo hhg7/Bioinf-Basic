@@ -4,13 +4,14 @@
 #
 # README.md is the source of the documentation; everything after the "1;" line
 # that ends the code in lib/Cn/Bioinf.pm is replaced on every run by
-# "__END__" and the POD converted from README.md, which is also written to
-# read.me.pod for inspection. Re-run it with "perl md2pod.pl" after
-# editing README.md, from any directory, since it changes to its own first; it
-# then checks the module with pod_file_ok() and Changes with changes_file_ok().
+# "__END__" and the POD converted from README.md. Re-run it with "perl
+# md2pod.pl" after editing README.md, from any directory, since it changes to
+# its own first; it then checks the module with pod_file_ok() and Changes with
+# changes_file_ok(). Up to 2026-11-11 it also wrote the POD to read.me.pod,
+# which nothing read; ~/Scripts/stats/md2pod.pl had already stopped doing so.
 #
-# This is an author-only helper. dist.ini's [PruneFiles] keeps it and
-# read.me.pod out of the tarball, so like ~/Scripts/stats's helper scripts it
+# This is an author-only helper. dist.ini's [PruneFiles] keeps it out of the
+# tarball, so like ~/Scripts/stats's helper scripts it
 # may use modern perl rather than the 5.12 the module is held to.
 #
 # Provenance: copied on 2026-09-30 from ~/Scripts/stats/md2pod.pl as of commit
@@ -32,7 +33,6 @@ use Test::CPAN::Changes;
 
 my $readme  = 'README.md';
 my $module  = 'lib/Cn/Bioinf.pm';
-my $pod_out = 'read.me.pod';
 chdir $FindBin::Bin;    # the paths above are relative to the repository root
 
 sub file2string {
@@ -565,10 +565,7 @@ $pod = balance_pod_over_back($pod);
 my @pod = split /\n/, $pod;
 unshift @pod, "=encoding utf8\n";
 
-say "Writing $pod_out and the POD of $module from $readme";
-open my $fh, '>', $pod_out;
-say $fh join ("\n", @pod);
-close $fh;
+say "Writing the POD of $module from $readme";
 
 my @lib = split /\n/, file2string($module);
 my @marks = grep { $lib[$_] eq '1;' } 0 .. $#lib;

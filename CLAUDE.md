@@ -106,9 +106,11 @@ belongs in both copies.
 
 ### Other build output
 
-- `Cn-Bioinf-*/` and `Cn-Bioinf-*.tar.gz` are `dzil build` output, and
-  `read.me.pod` is written by `md2pod.pl`. All are in `.gitignore`. Do not edit
-  them, and leave them out of any repo-wide search-and-replace.
+- `Cn-Bioinf-*/` and `Cn-Bioinf-*.tar.gz` are `dzil build` output, and are in
+  `.gitignore`. Do not edit them, and leave them out of any repo-wide
+  search-and-replace. `md2pod.pl` wrote a copy of the POD to `read.me.pod` until
+  2026-11-11, as `~/Scripts/stats/md2pod.pl` once did; neither writes it now,
+  and `.gitignore` still lists it so that a stale copy stays out of git.
 - `cover_db/` and the `*.gcov`, `*.gcda` and `*.gcno` files in the root are
   coverage output and are tracked in git, but are stale (see "Coverage" below).
   Regenerate them; never edit them.
