@@ -1,7 +1,7 @@
 use alienfile;
 # Every tool is always installed into this distribution's own share directory:
-# the point is a clustalo, BLAST, PLINK 2 and Python that Cn::Bioinf
-# controls, so there is no system probe. lib/Alien/Bioinf.pm does the fetching
+# the point is a clustalo, BLAST, PLINK 2, bcftools, Prodigal, kallisto, SPAdes
+# and Python that Cn::Bioinf controls, so there is no system probe. lib/Alien/Bioinf.pm does the fetching
 # (and says where from), because update() has to do exactly the same thing
 # again after install; this file only hands it the staging directory.
 #
@@ -15,7 +15,7 @@ my $lib = Path::Tiny::path('lib')->absolute->stringify;
 my $marker = sub {
 	my ($build) = @_;
 	my $f = Path::Tiny::path('tools');
-	$f->spew('clustalo blast plink2 python');
+	$f->spew('clustalo blast plink2 bcftools prodigal kallisto spades python');
 	$build->install_prop->{download_detail}{ $f->absolute->stringify } = { protocol => 'file' };
 };
 
@@ -31,10 +31,19 @@ share {
 		unshift @INC, $lib;
 		require Alien::Bioinf;
 		Alien::Bioinf->install($_, $build->install_prop->{stage}) foreach qw(clustalo blast python);
-		# Only Cn::Bioinf's pgs_score needs PLINK 2, which has no build for
-		# Linux on aarch64, where BLAST+ has one; there the rest is installed.
-		eval { Alien::Bioinf->install('plink2', $build->install_prop->{stage}); 1 }
-			or warn "PLINK 2 was not installed, so Cn::Bioinf's pgs_score won't work: $@";
+		# Each of these is built for fewer platforms than BLAST+ is (PLINK 2 has
+		# no build for Linux on aarch64, say, and bcftools none for Windows), and
+		# only some of Cn::Bioinf's functions need each, so one that cannot be
+		# installed is left out and the rest is installed. SPAdes comes after
+		# the Python above, which runs it.
+		my %for = (
+			plink2 => 'pgs_score and population-genetics functions', bcftools => 'call_variants',
+			prodigal => 'predict_genes', kallisto => 'rnaseq_quant', spades => 'assemble',
+		);
+		foreach my $tool (qw(plink2 bcftools prodigal kallisto spades)) {
+			eval { Alien::Bioinf->install($tool, $build->install_prop->{stage}); 1 }
+				or warn "$tool was not installed, so Cn::Bioinf's $for{$tool} won't work: $@";
+		}
 	};
 	gather sub {
 		my ($build) = @_;

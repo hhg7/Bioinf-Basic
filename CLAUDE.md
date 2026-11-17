@@ -471,7 +471,9 @@ File::ShareDir::Install, so both failed at `perl Makefile.PL` under
 `./test.all.perls.pl --no-install --no-alien`; `--deps` would install it.
 On 2026-11-11 the same command gave the same result: seven perls passed
 (2,342 tests where Alien::Bioinf is installed, 1,760 on `5.44.0-i686`) and
-those two failed at `perl Makefile.PL` for that reason.
+those two failed at `perl Makefile.PL` for that reason. On 2026-11-16
+`5.44.0-debug` had been added too, with the same gap and the same failure;
+the other seven passed (2,398 tests, 1,815 on `5.44.0-i686`).
 
 `./test.all.perls.pl` builds and tests against all of them, installing
 Alien::Bioinf into any perl that lacks it, and with `-p` against chosen ones.

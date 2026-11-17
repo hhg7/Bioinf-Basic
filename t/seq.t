@@ -303,6 +303,14 @@ is_deeply assembly_stats([]), {
 	total_length => 0, number => 0, mean_length => 0, longest => 0, shortest => 0, n_count => 0, gaps => 0, n50 => 0, l50 => 0,
 	nx => { map { 10 * $_ => 0 } 1 .. 10 }, lx => { map { 10 * $_ => 0 } 1 .. 10 },
 }, 'no sequences give zeros, as assembly-stats prints for an empty file';
+# Up to 2026-11-16 sequences that were all empty reached every tenth at the
+# first of them, since 10 * 0 >= 0 * x, so that their L50 was 1. The values are
+# the README's rule, that every Nx and Lx of sequences with no length is 0;
+# assembly-stats was not run on such a file.
+is_deeply assembly_stats(['', '']), {
+	total_length => 0, number => 2, mean_length => 0, longest => 0, shortest => 0, n_count => 0, gaps => 0, n50 => 0, l50 => 0,
+	nx => { map { 10 * $_ => 0 } 1 .. 10 }, lx => { map { 10 * $_ => 0 } 1 .. 10 },
+}, 'two empty sequences give an L50 of 0, rather than 1';
 is pos($contigs[3]), undef, "counting the gaps leaves the caller's sequences as they were";
 
 #  molecular_weight

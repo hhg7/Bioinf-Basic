@@ -8,7 +8,7 @@ use File::Spec::Functions qw(catfile);
 use Sys::Hostname ();
 use Cn::Bioinf qw(:all);
 # These run the clustalo, blastp and Python that Alien::Bioinf installed, on
-# t/data/DEG20010421.fa (see t/data/make_fixtures.pl). The clustal_view_residues
+# t/data/DEG20010421.fa (see t/data/make_fixtures.pl). The view_alignment
 # expectations are worked out by hand from the 2-sequence alignment below.
 # Alien::Bioinf is only recommended, so without a working one this is skipped;
 # the argument checks that need none of its programs are in t/checks.t.
@@ -216,7 +216,7 @@ foreach my $bad (
 	eval { plot_phylo(%{ $bad->[0] }) };
 	like $@, $bad->[1], "plot_phylo dies: $bad->[1]";
 }
-foreach my $f (\&plot_msa, \&plot_phylo, \&msa_quality_table, \&clustal_view_residues) {
+foreach my $f (\&plot_msa, \&plot_phylo, \&msa_quality_table) {
 	eval { $f->('x') };
 	like $@, qr/takes name => value pairs, and was given an odd number of arguments/, 'dies on an odd number of arguments';
 	eval { $f->({ %two }) };
@@ -269,14 +269,14 @@ foreach my $bad (
 	like $@, $bad->[1], "dies: $bad->[1]";
 }
 
-# ---- clustal_view_residues --------------------------------------------------
+# ---- view_alignment ---------------------------------------------------------
 
 # a: M K - L V   residues 1 2 . 3 4
 # b: M - Q L V
 # Residue 2 of a is column 1 and residue 3 is column 3; 3 columns per block.
 my $tex = catfile($dir, 'r.tex');
 my $ab = hash2fasta_file({ a => 'MK-LV', b => 'M-QLV' }, catfile($dir, 'ab.aln.fa'));
-my %view = ('msa_file' => $ab, 'output_tex_file' => $tex, 'row_width' => 3, track => 'a',
+my %view = ('msa_file' => $ab, 'output_file' => $tex, 'return_only' => 1, 'row_width' => 3, track => 'a',
 	'color_residues' => { a => { 2 => 'red', 3 => [1, 0, 0] } });
 sub body { open my $fh, '<', $_[0] or die $!; <$fh>; local $/; <$fh> } # all but the provenance line
 my $rows = <<'EOT';
@@ -296,33 +296,52 @@ my $rows = <<'EOT';
 \hline
 EOT
 my $head = "\\begin{table}[htp]\\footnotesize\n\\begin{tabular}{|c|l|c|} \\hline\n\\textbf{Track} & \\textbf{Sequence} & \\textbf{Length}\\\\ \\hline\n";
-is clustal_view_residues(%view), $tex, 'returns the file name';
+like view_alignment(%view), qr/^a  +MK-  2$/m, 'returns the alignment as text';
 is body($tex), "$head$rows\\end{tabular}\n\\caption{}\n\\end{table} \\FloatBarrier\n", 'one table, coloured and tracked';
 my @rows = split /(?<=\\hline\n)/, $rows;
-clustal_view_residues(%view, split => 1, caption => 'C', label => 'L');
+view_alignment(%view, split => 1, caption => 'C', label => 'L');
 is body($tex), "$head$rows[0]\\end{tabular}\n\\caption{C}\n\\label{tab:L0}\n\\end{table} \\FloatBarrier\n"
 	. "$head$rows[1]\\end{tabular}\n\\caption{C (continued)}\n\\label{tab:L1}\n\\end{table} \\FloatBarrier\n", 'split into one block per table';
-clustal_view_residues(%view, 'msa_file' => $out{'aln.fa'}, 'color_residues' => {}, track => undef, 'row_width' => 100);
+view_alignment(%view, 'msa_file' => $out{'aln.fa'}, 'color_residues' => {}, track => undef, 'row_width' => 100);
 like body($tex), qr/^\\textit\{S\.cerevisiae\} & \\texttt\{\Q${\ substr($aln->{'S.cerevisiae'}, 0, 100)}\E\} & \d+$/m,
 	'plot_msa\'s alignment is shown as it is';
 my $before = slurp($unaligned);
-is clustal_view_residues(%view, 'msa_file' => $unaligned, 'color_residues' => {}, track => undef, 'row_width' => 1e5), $tex, # 1 block, so every row is the full width
+like view_alignment(%view, 'msa_file' => $unaligned, 'color_residues' => {}, track => undef, 'row_width' => 1e5), qr/, aligned by Clustal Omega/, # 1 block, so every row is the full width
 	'sequences of different lengths are aligned rather than dying';
 my @shown = body($tex) =~ /^\\textit\{[^}]+\} & \\texttt\{([^}]*)\}/mg;
 ok @shown && (grep { /-/ } @shown) && !(grep { length $_ != length $shown[0] } @shown), 'into gapped rows of one width';
 is slurp($unaligned), $before, 'and "msa_file" is left as it was';
+# the provenance of what view_alignment writes itself, which names
+# Alien::Bioinf only in the clause that says how clustalo aligned it
+my $own = qr/\Q$FindBin::RealScript\E called using "view_alignment" in .+Bioinf\.pm version \Q$Cn::Bioinf::VERSION\E by user \S.* on host \Q${\ Sys::Hostname::hostname()}\E \(\Q$^O\E\) with Perl [\d.]+ \(\Q$^X\E\), written as /;
+{
+	open my $fh, '<', $tex or die $!;
+	my $first = <$fh>;
+	# joined qr// objects are a string, which like() refuses, until compiled again
+	my $tex_prov = qr/^% .*$own\QLaTeX by \E.+Bioinf\.pm itself; from the FASTA file \Q$unaligned\E $sha of 4 sequences, .+ which Clustal Omega [\d.]+ from Alien::Bioinf [\d.]+ aligned into [^;]+/
+		. qr/; showing 4 of 4 sequences in blocks of 100000 columns, coloring 0 columns$/;
+	like $first, qr/$tex_prov/, 'the LaTeX\'s first line is its provenance, with the clustalo run';
+	my $svg = catfile($dir, 'view.svg');
+	view_alignment($fa, 'output_file' => $svg, 'return_only' => 1, 'row_width' => 60, track => 'S.cerevisiae',
+		'color_residues' => { 'S.cerevisiae' => { 3 => 'red' } });
+	my $body = slurp($svg);
+	my $svg_prov = qr{<dc:title>[^<]*$own\QSVG by \E.+Bioinf\.pm itself} . aligned(qr/.*--threads 1/)
+		. qr{; showing 4 of 4 sequences in blocks of 60 columns, tracking S\.cerevisiae, coloring 1 column</dc:title>};
+	like $body, qr/$svg_prov/, 'and an SVG\'s, in its <dc:creator>, from a FASTA file given first';
+	is_deeply svg_dc($body), [qw(creator title)], 'which is all the metadata it has';
+}
 foreach my $bad (
 	[{ %view, track => 'z' }, qr/tracker "z" isn't in the alignment/],
 	[{ %view, 'color_residues' => { z => {} } }, qr/names proteins that aren't in the alignment: z/],
 	[{ %view, 'color_residues' => { a => { 9 => 'red' } } }, qr/a has no residue 9/],
-	[{ %view, 'color_residues' => { a => { 1 => [1, 0] } } }, qr/must be a name or 3 numbers/],
+	[{ %view, 'color_residues' => { a => { 1 => [1, 0] } } }, qr/the color of a residue 1 must be one of xcolor's base colors \(.+\) or \[r, g, b\], each 0 to 1, not an ARRAY ref/],
 	[{ %view, order => ['z'] }, qr/"order" names proteins that aren't in the alignment: z/],
-	[{ %view, 'msa_file' => catfile($dir, 'none.fa') }, qr/"msa_file" .+none\.fa doesn't exist/],
+	[{ %view, 'msa_file' => catfile($dir, 'none.fa') }, qr/the FASTA file .+none\.fa doesn't exist/],
 	[{ %view, fasta => $ab }, qr/doesn't know "fasta"/],
 	[{ %view, alignment => '\\centering' }, qr/doesn't know "alignment"/],
-	[{ 'output_tex_file' => $tex }, qr/needs "msa_file"/],
+	[{ 'output_file' => $tex }, qr/needs an alignment, first or as "msa_file"/],
 ) {
-	eval { clustal_view_residues(%{ $bad->[0] }) };
+	eval { view_alignment(%{ $bad->[0] }) };
 	like $@, $bad->[1], "dies: $bad->[1]";
 }
 

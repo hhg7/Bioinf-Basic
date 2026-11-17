@@ -6,7 +6,7 @@ use warnings FATAL => 'all';
 use autodie ':default';
 #use Stats::LikeR;
 use Cn::Util;
-use Cn::Bioinf;
+use Cn::Bioinf qw(concordance);
 
 # The test VCF and then the truth VCF may be given on the command line; the
 # defaults are the links in ~/Documents/Genomics, as parent.pl's are, so that

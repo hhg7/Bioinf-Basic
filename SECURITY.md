@@ -50,12 +50,12 @@ Out of scope:
   `alignment_json` when that file does not exist yet. A program that builds a
   path out of untrusted data, or writes into a directory other users can
   write to, has the problem in the *calling* program.
-- **The LaTeX that `clustal_view_residues()` writes.** It is meant to be
-  `\input` into the caller's own document. Sequence names have `#`, `&`, `^`,
-  `_` and `%` escaped so that ordinary names typeset, and nothing more: a name
-  containing a backslash or a brace is written as it is. Do not compile the
-  output of untrusted names with `-shell-escape`, any more than you would any
-  other untrusted `.tex`.
+- **The LaTeX that `view_alignment()` writes.** It is meant to be
+  `\input` into the caller's own document. Every character LaTeX treats specially in a
+  sequence name or a residue (backslashes and braces included, since
+  2026-11-02) is escaped so that it prints as itself. Even so, do not compile
+  the output of untrusted names with `-shell-escape`, any more than you would
+  any other untrusted `.tex`.
 - **matplotlib mathtext in labels.** `$\it{...}$` in a label is rendered as
   mathtext; that is the documented way to italicise a species name.
 - **Resource use proportional to the input.** Aligning or reading a large

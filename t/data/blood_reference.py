@@ -7,7 +7,9 @@
 #   python3 -I t/data/blood_reference.py share/blood_type_panel.tsv t/data/blood.vcf 7
 #
 # where the last argument is min_depth. On 2026-11-10, under Python 3.14.2, it
-# printed what t/blood.t expects, with 7 and with 0.
+# printed what t/blood.t expects, with 7 and with 0. On 2026-11-16 both it and
+# the module were changed to give no RhD type, rather than "dd", to a sample
+# with no genotype at any RHD site, and it printed t/blood.t's values again.
 #
 # It shares no code with Cn::Bioinf and is written the other way round: where
 # Bioinf.xs tests each record against the panel, this indexes the VCF by
@@ -86,7 +88,15 @@ for i, name in enumerate(samples):
         genotype = "".join(sorted(letters))
     if genotype:
         phenotype = "".join(sorted(set(genotype) - {"O"})) or "O"
-    carried = sum(1 for m in sites if copies(m, i))
-    rh_genotype, rh_phenotype = ("D.", "positive") if carried else ("dd", "negative")
-    blood = phenotype + ("+" if carried else "-") if phenotype else None
+    rh = [copies(m, i) for m in sites]
+    carried = sum(1 for c in rh if c)
+    # No ALT is negative only where the sample has a genotype at one site at
+    # least; with none, as when every call is below min_depth, it has no type.
+    if carried:
+        rh_genotype, rh_phenotype = "D.", "positive"
+    elif any(c is not None for c in rh):
+        rh_genotype, rh_phenotype = "dd", "negative"
+    else:
+        rh_genotype = rh_phenotype = None
+    blood = phenotype + ("+" if carried else "-") if phenotype and rh_phenotype else None
     print(name, blood, genotype, phenotype, rh_genotype, rh_phenotype, carried, sep="\t")

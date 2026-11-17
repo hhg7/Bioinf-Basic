@@ -5,6 +5,8 @@ use Test::More;
 use File::Temp qw(tempdir);
 use File::Spec::Functions qw(catdir catfile rel2abs);
 use Cwd ();
+use FindBin;
+use IO::Compress::Gzip ();
 use Cn::Bioinf qw(:all);
 # Checks that need none of Alien::Bioinf's programs, so that they run wherever
 # the module builds: each one dies, or is decided, before clustalo, blastp or
@@ -32,6 +34,18 @@ my @inc = map { "-I$_" } grep { !ref } @INC;
 
 is system($^X, @inc, '-e', 'BEGIN { $0 = q{/no/such/script.pl} } require Cn::Bioinf'), 0,
 	'the module loads when $0 is not a file, which FindBin would croak on';
+# Up to 2026-11-16 a bare "use Cn::Bioinf" imported every function, although
+# the documentation said nothing was exported by default. The child prints 1
+# for each import that happened; "loaded" shows that it ran at all.
+{
+	my $out = catfile($dir, 'exports.txt');
+	system($^X, @inc, '-e', 'package Bare; use Cn::Bioinf; package Named; use Cn::Bioinf q{gc_content}; package All; use Cn::Bioinf q{:all};'
+		. ' package main; open my $fh, q{>}, $ARGV[0] or die $!;'
+		. ' print {$fh} join q{,}, q{loaded}, map { defined &$_ ? 1 : 0 } qw(Bare::gc_content Bare::fasta2hash Named::gc_content Named::fasta2hash All::gc_content All::view_alignment)',
+		$out);
+	is slurp($out), 'loaded,0,0,1,0,1,1',
+		'a bare "use Cn::Bioinf" imports nothing, rather than every function; a name imports that one, and ":all" every one';
+}
 # Alien::Bioinf hidden from require, as on a machine that could not install it
 my $hide = 'BEGIN { unshift @INC, sub { die qq{hidden\n} if $_[1] eq q{Alien/Bioinf.pm}; return } }';
 my $err = catfile($dir, 'err.txt');
@@ -64,6 +78,14 @@ like slurp($err), qr/^_alien: plot_msa needs Alien::Bioinf, for Clustal Omega, B
 	like slurp($out), qr/^\Q$real\E called using "x" in .+ with Alien::Bioinf 9\.99 by user /,
 		"the Creator names the script's own path, not the working directory's";
 }
+
+#  _cmd_text
+
+# Up to 2026-11-16 _cmd_text put an argument holding an apostrophe between
+# apostrophes as it was, so the command it wrote into an image's Creator could
+# not be pasted into a shell, and wrote an empty argument as nothing at all.
+is Cn::Bioinf::_cmd_text('clustalo', '-i', "O'Brien.fa", '--outfmt=fa', ''), q{clustalo -i 'O'\''Brien.fa' --outfmt=fa ''},
+	"_cmd_text escapes an apostrophe and quotes an empty argument, rather than writing 'O'Brien.fa' and dropping it";
 
 #  _run
 
@@ -442,34 +464,35 @@ dies_like sub { msa_quality_table(%q, 'alignment_json' => spew('q_array.json', '
 dies_like sub { msa_quality_table(%q, 'alignment_json' => spew('q_bad.json', '{not json')) },
 	qr/^msa_quality_table: .+q_bad\.json isn't JSON: /, 'and one that is not JSON';
 
-#  clustal_view_residues 
+#  view_alignment
 
 my $ab = hash2fasta_file({ 'a_b^c~d' => 'MK-LV', 'e{f}' => 'M-QLV' }, catfile($dir, 'ab.aln.fa'));
 my $tex = catfile($dir, 'r.tex');
-my %view = ('msa_file' => $ab, 'output_tex_file' => $tex);
+my %view = ('msa_file' => $ab, 'output_file' => $tex);
 foreach my $k ('row_width', 'split') {
 	foreach my $v (0, -3, 'x') {
-		dies_like sub { clustal_view_residues(%view, $k => $v) }, qr/^clustal_view_residues: "\Q$k\E" must be a whole number, 1 or more, not "\Q$v\E"/,
+		dies_like sub { view_alignment(%view, $k => $v) }, qr/^view_alignment: "\Q$k\E" must be a whole number, 1 or more, not "\Q$v\E"/,
 			"$k $v dies" . ($k eq 'row_width' && $v eq '0' ? ', rather than looping forever' : '');
 	}
 }
-dies_like sub { clustal_view_residues(%view, order => 'e{f}') }, qr/^clustal_view_residues: "order" must be an array ref, not "e\{f\}"/,
+dies_like sub { view_alignment(%view, order => 'e{f}') }, qr/^view_alignment: "order" must be an array ref, not "e\{f\}"/,
 	'an order that is not an array ref dies';
-dies_like sub { clustal_view_residues(%view, 'color_residues' => { 'e{f}' => [2] }) },
-	qr/^clustal_view_residues: "color_residues" must map e\{f\} to a hash ref of residue number => colour, not an ARRAY ref/,
+dies_like sub { view_alignment(%view, 'color_residues' => { 'e{f}' => [2] }) },
+	qr/^view_alignment: "color_residues" must map e\{f\} to a hash ref of residue number => color, not an ARRAY ref/,
 	'and so does a protein in color_residues that maps to anything but a hash ref';
 foreach my $n (0, -1) {
-	dies_like sub { clustal_view_residues(%view, 'color_residues' => { 'e{f}' => { $n => 'red' } }) },
-		qr/^clustal_view_residues: a residue of e\{f\} in "color_residues" must be a residue number, 1 or more, not "$n"/,
+	dies_like sub { view_alignment(%view, 'color_residues' => { 'e{f}' => { $n => 'red' } }) },
+		qr/^view_alignment: a residue of e\{f\} in "color_residues" must be a residue number, 1 or more, not "$n"/,
 		"colouring residue $n dies, rather than colouring the last";
 }
 {
 	open my $saved, '>&', \*STDOUT or die $!;
 	open STDOUT, '>', catfile($dir, 'out.txt') or die $!;
-	clustal_view_residues(%view);
+	my $text = view_alignment(%view);
 	open STDOUT, '>&', $saved or die $!;
+	like $text, qr/^# alignment: 2 sequences x 5 columns\n/, 'view_alignment returns the text it shows';
+	is slurp(catfile($dir, 'out.txt')), "$text" . "wrote $tex\n", 'and prints it, and then the "wrote" line, with no color when STDOUT is not a terminal';
 }
-is slurp(catfile($dir, 'out.txt')), "wrote $tex\n", 'the "wrote" line has no colour when STDOUT is not a terminal';
 my $body = slurp($tex);
 like $body, qr/^\\textit\{a\\_b\\textasciicircum\{\}c\\textasciitilde\{\}d\} & /m, 'a name\'s _, ^ and ~ print as themselves';
 like $body, qr/^\\textit\{e\\\{f\\\}\} & /m, 'and so do its braces';
@@ -480,7 +503,7 @@ like $body, qr/^\\textit\{e\\\{f\\\}\} & /m, 'and so do its braces';
 	local *STDOUT; # for the "wrote" lines, which are not TAP
 	open STDOUT, '>', catfile($dir, 'quiet.txt') or die "can't send STDOUT to quiet.txt: $!";
 	my $odd = hash2fasta_file({ 'sp|P1|<x>' => 'MK%L#' }, catfile($dir, 'odd.aln.fa'));
-	clustal_view_residues('msa_file' => $odd, 'output_tex_file' => $tex);
+	view_alignment('msa_file' => $odd, 'output_file' => $tex);
 	like slurp($tex), qr/^\\textit\{sp\\textbar\{\}P1\\textbar\{\}\\textless\{\}x\\textgreater\{\}\} & \\texttt\{MK\\%L\\#\} & 3$/m,
 		'a name\'s |, < and > print as themselves, and so do a residue\'s % and #';
 }
@@ -492,26 +515,195 @@ like $body, qr/^\\textit\{e\\\{f\\\}\} & /m, 'and so do its braces';
 	local *STDOUT; # for the "wrote" lines, which are not TAP
 	open STDOUT, '>', catfile($dir, 'quiet.txt') or die "can't send STDOUT to quiet.txt: $!";
 	my $one = hash2fasta_file({ a => 'ACDEFGHIKLMN', b => 'ACDEFGHIKLMN' }, catfile($dir, 'track.aln.fa'));
-	my %t = ('msa_file' => $one, 'output_tex_file' => $tex, 'row_width' => 10, track => 'a');
-	clustal_view_residues(%t, 'color_residues' => { a => { 3 => 'red', 5 => 'blue', 10 => 'green', 11 => 'red' } });
+	my %t = ('msa_file' => $one, 'output_file' => $tex, 'row_width' => 10, track => 'a');
+	view_alignment(%t, 'color_residues' => { a => { 3 => 'red', 5 => 'blue', 10 => 'green', 11 => 'red' } });
 	my @track = slurp($tex) =~ /^\\textit\{a\} track & \\texttt\{([^}]*)\}/mg;
-	is_deeply \@track, ['--3-5---10', '11'], 'clustal_view_residues: a residue number in the last column of a block ends at the block\'s end';
-	clustal_view_residues(%t, 'color_residues' => { a => { 9 => 'red', 10 => 'green' } });
+	is_deeply \@track, ['--3-5---10', '11'], 'view_alignment: a residue number in the last column of a block ends at the block\'s end';
+	view_alignment(%t, 'color_residues' => { a => { 9 => 'red', 10 => 'green' } });
 	@track = slurp($tex) =~ /^\\textit\{a\} track & \\texttt\{([^}]*)\}/mg;
-	is_deeply \@track, ['--------9-', '--'], 'clustal_view_residues: and one that would overlap the number before it is left out';
+	is_deeply \@track, ['--------9-', '--'], 'view_alignment: and one that would overlap the number before it is left out';
 	# A tracked protein that "order" leaves out has no track row, and used to be
 	# counted as having one, so a table held more blocks than "split" said.
-	clustal_view_residues(%t, track => 'b', order => ['a'], 'row_width' => 4, split => 2);
+	view_alignment(%t, track => 'b', order => ['a'], 'row_width' => 4, split => 2);
 	my $tables = () = slurp($tex) =~ /\\begin\{table\}/g;
-	is $tables, 2, 'clustal_view_residues: three blocks at 2 a table are two tables when the tracked protein is not shown';
+	is $tables, 2, 'view_alignment: three blocks at 2 a table are two tables when the tracked protein is not shown';
 	# a residue number that is not a number used to warn "isn't numeric in
 	# sort" before it was refused
 	my $warned = '';
 	local $SIG{__WARN__} = sub { $warned .= $_[0] };
-	dies_like sub { clustal_view_residues(%t, 'color_residues' => { a => { abc => 'red', 2 => 'blue' } }) },
-		qr/^clustal_view_residues: a residue of a in "color_residues" must be a residue number, 1 or more, not "abc"/,
-		'clustal_view_residues: a residue number "abc" dies';
-	is $warned, '', 'clustal_view_residues: with no warning from sorting it first';
+	dies_like sub { view_alignment(%t, 'color_residues' => { a => { abc => 'red', 2 => 'blue' } }) },
+		qr/^view_alignment: a residue of a in "color_residues" must be a residue number, 1 or more, not "abc"/,
+		'view_alignment: a residue number "abc" dies';
+	is $warned, '', 'view_alignment: with no warning from sorting it first';
+}
+# view_alignment's terminal text and SVG (2026-11-16), worked out by hand for
+# the alignment below, as t/msa.t's LaTeX is: residue 2 of a is column 2 and
+# residue 3 is column 4, and 3 columns a block. The name column is as wide as
+# "a track", and the counts end 2 columns past the widest block. The SVG's
+# lengths are 7.2 px a character, from an 8 px margin; its metadata is laid
+# out as Matplotlib::Simple 0.33's svg_creator_metadata lays it out.
+{
+	my %ab = (a => 'MK-LV', b => 'M-QLV');
+	my %show = ('row_width' => 3, track => 'a', 'color_residues' => { a => { 2 => 'red', 3 => [1, 0, 0] } }, 'return_only' => 1);
+	my $text = <<'EOT';
+# alignment: 2 sequences x 5 columns
+         1 3
+a        MK-  2
+a track  -2-
+b        M-Q  2
+
+         4
+a        LV   4
+a track  3-
+b        LV   4
+# alignment: 2 sequences x 5 columns
+EOT
+	is view_alignment(\%ab, %show), $text, 'view_alignment: a hash ref first, shown as text, the banner first and last';
+	my $fa = hash2fasta_file(\%ab, catfile($dir, 'view.aln.fa'));
+	is view_alignment($fa, %show), $text, 'view_alignment: and the same from a FASTA file name first';
+	is view_alignment(\%ab, 'return_only' => 1, order => ['b']), <<'EOT', 'view_alignment: "order" leaves a sequence out, which the banner says';
+# alignment: 2 sequences x 5 columns  (showing 1)
+   1   5
+b  M-QLV  4
+# alignment: 2 sequences x 5 columns  (showing 1)
+EOT
+	# a tab in a name would break its row in two columns, as Stats::LikeR's view writes it
+	like view_alignment({ "x\ty" => 'MK' }, 'return_only' => 1), qr/^x\\ty  MK  2$/m, 'view_alignment: a tab in a name is shown as \t';
+	# printed to "to", and not to STDOUT, with return_only 0 (the default)
+	open my $to, '>', \my $buf or die $!;
+	{
+		local *STDOUT;
+		open STDOUT, '>', catfile($dir, 'quiet.txt') or die $!;
+		view_alignment(\%ab, %show, 'return_only' => 0, to => $to);
+	}
+	is $buf, $text, 'view_alignment: printed to "to"';
+	is slurp(catfile($dir, 'quiet.txt')), '', 'view_alignment: and to nothing else';
+	# the colors of a terminal, which a test cannot be: 24-bit ANSI, then a reset
+	my $blocks = [{ start => 0, width => 2, rows => [{ label => 'a', track => 0, chars => ['M', 'K'], colors => [undef, 'orange'], count => 2 }] }];
+	is Cn::Bioinf::_alignment_text($blocks, '#', 1), "#\n   1\na  M\e[38;2;255;128;0mK\e[0m  2\n#\n",
+		'view_alignment: in a terminal, a colored residue is a 24-bit ANSI color (xcolor\'s orange, 1 .5 0)';
+
+	my $svg = catfile($dir, 'view.svg');
+	view_alignment({ %ab, 'x&<y>' => 'MKQ%V' }, %show, 'output_file' => $svg);
+	my $got = slurp($svg);
+	like $got, qr{\A<\?xml version="1\.0" encoding="utf-8" standalone="no"\?>\n<svg xmlns="http://www\.w3\.org/2000/svg" width="124" height="192" viewBox="0 0 124 192" version="1\.1">\n <metadata>\n  <rdf:RDF xmlns:dc="http://purl\.org/dc/elements/1\.1/" xmlns:cc="http://creativecommons\.org/ns#" xmlns:rdf="http://www\.w3\.org/1999/02/22-rdf-syntax-ns#">\n   <cc:Work>\n    <dc:creator>\n     <cc:Agent>\n      <dc:title>[^<]+ called using "view_alignment" in [^<]+Bioinf\.pm version \Q$Cn::Bioinf::VERSION\E by user [^<]+, written as SVG by [^<]+Bioinf\.pm itself; from a hash ref of 3 sequences; showing 3 of 3 sequences in blocks of 3 columns, tracking a, coloring 2 columns</dc:title>\n     </cc:Agent>\n    </dc:creator>\n   </cc:Work>\n  </rdf:RDF>\n </metadata>\n},
+		'view_alignment: an SVG\'s provenance is in its <dc:creator>, as Matplotlib::Simple writes it, and names no Alien::Bioinf';
+	# Up to 2026-11-16 a row was one <text> stretched by textLength, which
+	# librsvg 2.58 (Eye of GNOME) ignores, so its letters drifted right of their
+	# columns; each is now placed at its column's center, 72.8 + 3.6 + 7.2 i.
+	like $got, qr{\Q<text y="36" text-anchor="middle" xml:space="preserve"><tspan x="76.4">M</tspan><tspan x="83.6" fill="rgb(255,0,0)">K</tspan><tspan x="90.8">-</tspan></text>\E},
+		'view_alignment: each residue is a <tspan> centered on its column, rather than a row stretched by textLength, which librsvg ignores';
+	ok $got =~ /<tspan x=/ && $got !~ /textLength/, 'view_alignment: and no row uses textLength';
+	like $got, qr{<rect x="80" y="24" width="7\.2" height="16" fill="none" pointer-events="all"><title>a: K2, alignment column 2</title></rect>},
+		'view_alignment: with a tooltip over each colored residue';
+	like $got, qr{<title>b: a gap, alignment column 2</title>}, 'view_alignment: and over a gap in a colored column';
+	like $got, qr{<text x="8" y="84">x&amp;&lt;y&gt;</text>}, 'view_alignment: a name\'s & and < are XML\'s';
+	like $got, qr{\Q<tspan x="76.4">M</tspan><tspan x="83.6" fill="rgb(255,0,0)">K</tspan><tspan x="90.8">Q</tspan></text>\E}, 'view_alignment: the third sequence is drawn';
+	like $got, qr{\Q<tspan x="76.4" fill="rgb(255,0,0)">%</tspan><tspan x="83.6">V</tspan></text>\E}, 'view_alignment: and a "%" residue is drawn as itself, not taken for a format';
+	# an aligned input needs no clustalo, so no Alien::Bioinf, which a smoker lacks
+	my $hidden = catfile($dir, 'hidden.svg');
+	system($^X, @inc, '-e', "$hide use Cn::Bioinf q{view_alignment}; view_alignment({ a => q{MK}, b => q{MV} }, q{output_file} => \$ARGV[0], q{return_only} => 1)", $hidden);
+	like slurp($hidden), qr{<dc:title>[^<]+ called using "view_alignment" [^<]+</dc:title>}, 'view_alignment: an SVG is written without Alien::Bioinf';
+	my ($open, $close) = (scalar(() = $got =~ /<text /g), scalar(() = $got =~ m{</text>}g));
+	ok $open > 0 && $open == $close, "view_alignment: every one of its $open <text> elements is closed";
+	like $got, qr{</g>\n</svg>\n\z}, 'view_alignment: and so is the SVG';
+
+	# "title" (2026-11-16): a bold 14 px line in a 20 px band above the rest,
+	# which moves every line down by 20 (the first header from y 20 to 40, and
+	# the first row from 36 to 56), and widens the image when it is wider than
+	# the alignment, at 8.4 px a character
+	my $titled = catfile($dir, 'titled.svg');
+	view_alignment({ %ab, 'x&<y>' => 'MKQ%V' }, %show, 'output_file' => $titled, title => 'a<b> & c');
+	$got = slurp($titled);
+	like $got, qr{<svg [^>]*width="124" height="212" viewBox="0 0 124 212"}, 'view_alignment: a "title" makes the SVG 20 px taller';
+	like $got, qr{\Q<text x="8" y="23" font-size="14" font-weight="bold">a&lt;b&gt; &amp; c</text>\E\n  <text x="72.8" y="40"},
+		'view_alignment: and is drawn above the first block, its <, > and & XML\'s';
+	like $got, qr{\Q<text y="56" text-anchor="middle" xml:space="preserve"><tspan x="76.4">M</tspan>\E},
+		'view_alignment: and the rows are drawn below it';
+	view_alignment(\%ab, 'return_only' => 1, 'output_file' => $titled, title => 'x' x 20);
+	like slurp($titled), qr{<svg [^>]*width="184" }, 'view_alignment: a "title" wider than the alignment widens the SVG to hold it (8 + 20 x 8.4 + 8)';
+
+	# "color" (2026-11-16): every residue on plot_msa's color for it, which
+	# is share/msa_plot.py's AA or NT. Its text is white or black, whichever
+	# _text_on picks: white on K (#0038a2, L = 0.0544) and black on M
+	# (#c9c433, L = 0.5214) and on red (L = 0.2126), the WCAG 2.2 line being
+	# L = 0.1791. The x and y are the 7.2 px layout above, with the name
+	# column 1 character wide, so the residues start at 8 + 3 * 7.2 = 29.6.
+	my $py = slurp(catfile($FindBin::Bin, File::Spec->updir, 'share', 'msa_plot.py'));
+	foreach my $table (['AA', 'aa'], ['NT', 'nt']) {
+		my ($name, $key) = @{ $table };
+		my ($dict) = $py =~ /^$name = dict\((.*?)\)\n/ms;
+		ok defined $dict, "view_alignment: msa_plot.py has its $name table";
+		my %want = ($dict // '') =~ /\b([A-Z])='(#[0-9a-f]{6})'/gi;
+		while (($dict // '') =~ /\{c: '(#[0-9a-f]{6})' for c in '([A-Z]+)'\}/g) {
+			my $hex = $1;
+			$want{$_} = $hex foreach split //, $2;
+		}
+		is_deeply Cn::Bioinf::_residue_colors()->{$key}, \%want, "view_alignment: \"color\" has msa_plot.py's $name colors, so that it colors as plot_msa does";
+	}
+	my $colored = catfile($dir, 'colored.svg');
+	view_alignment(\%ab, color => 1, 'row_width' => 5, 'output_file' => $colored, 'return_only' => 1);
+	$got = slurp($colored);
+	like $got, qr{\Q  <rect x="29.6" y="24" width="7.2" height="16" fill="rgb(201,196,51)"/>\E\n\Q  <rect x="36.8" y="24" width="7.2" height="16" fill="rgb(0,56,162)"/>\E\n\Q  <rect x="51.2" y="24" width="14.4" height="16" fill="rgb(86,174,108)"/>\E\n},
+		'view_alignment: with "color", a background under each residue, one for each run of a color, and none under a gap';
+	like $got, qr{\Q<tspan x="33.2">M</tspan><tspan x="40.4" fill="rgb(255,255,255)">K</tspan><tspan x="47.6">-</tspan><tspan x="54.8">L</tspan><tspan x="62">V</tspan></text>\E},
+		'view_alignment: and white text where it reads better than black, each letter centered on its background';
+	like $got, qr{, every residue on its color from CIAlign's CBS amino acid palette, as plot_msa colors it</dc:title>}, 'view_alignment: which its provenance says';
+	view_alignment(\%ab, color => 1, 'row_width' => 5, 'output_file' => $colored, 'return_only' => 1, 'color_residues' => { a => { 2 => 'red' } });
+	like slurp($colored), qr{\Q<tspan x="40.4" font-weight="bold" text-decoration="underline">K</tspan>\E},
+		'view_alignment: one of "color_residues" is on its own color, bold and underlined';
+	view_alignment({ x => 'ACGT', y => 'AC-T' }, color => 1, 'output_file' => $colored, 'return_only' => 1);
+	$got = slurp($colored);
+	like $got, qr{CIAlign's CBS nucleotide palette}, 'view_alignment: sequences of nucleotide codes are on the nucleotide palette';
+	like $got, qr{fill="rgb\(162,44,73\)"/>}, 'view_alignment: and sequences of nucleotide codes are on the nucleotide colors (T #a22c49, not the amino acid #e57700)';
+	is view_alignment(\%ab, %show, color => 1), $text, 'view_alignment: "color" adds nothing to the text returned, which has no escapes';
+	my $ctex = catfile($dir, 'colored.tex');
+	view_alignment(\%ab, color => 1, 'row_width' => 5, 'output_file' => $ctex, 'return_only' => 1, 'color_residues' => { a => { 2 => 'red' } });
+	my $tex_body = slurp($ctex);
+	like $tex_body, qr/^\\begin\{table\}\[htp\]\\footnotesize\n\\setlength\{\\fboxsep\}\{0pt\}\n\\begin\{tabular\}/m, 'view_alignment: the LaTeX\'s boxes have no margin, so that they meet';
+	unlike $tex_body, qr/\\textbf\{[^}]*\}\\par/, 'view_alignment: and with no "title", no title line';
+	# "title" (2026-11-16): a bold line above each table, as LaTeX prints it
+	view_alignment(\%ab, 'row_width' => 2, split => 1, 'output_file' => $ctex, 'return_only' => 1, title => 'A_1 & 50%');
+	is_deeply [slurp($ctex) =~ /^\\begin\{table\}\[htp\]\\footnotesize\n(.*)\n\\begin\{tabular\}/mg],
+		['\textbf{A\_1 \& 50\%}\par', '\textbf{A\_1 \& 50\%} (continued)\par', '\textbf{A\_1 \& 50\%} (continued)\par'],
+		'view_alignment: a "title" heads each LaTeX table, escaped, and is "(continued)" after the first';
+	is +($tex_body =~ /^(\\textit\{a\} & .*)$/m)[0],
+		'\textit{a} & \texttt{\colorbox[RGB]{201,196,51}{\strut{}M}\colorbox[RGB]{255,0,0}{\strut{}\textbf{K}}-\colorbox[RGB]{86,174,108}{\strut{}L}\colorbox[RGB]{86,174,108}{\strut{}V}} & 4',
+		'view_alignment: and each residue is a \colorbox, with no command run on into the letter, as \strutM was';
+	like $tex_body, qr/^\\textit\{b\} & \\texttt\{\\colorbox\[RGB\]\{201,196,51\}\{\\strut\{\}M\}\\colorbox\[RGB\]\{255,0,0\}\{\\strut\{\}\\textbf\{-\}\}/m,
+		'view_alignment: and a gap in a column of "color_residues" is boxed too';
+	# the terminal, which a test cannot be, from _alignment_text itself
+	$blocks = [{ start => 0, width => 2, rows => [{ label => 'a', track => 0, chars => ['K', 'M'], colors => [undef, 'red'],
+		bg => [[0, 56, 162], [255, 0, 0]], strong => [undef, 1], count => 2 }] }];
+	is Cn::Bioinf::_alignment_text($blocks, '#', 1), "#\n   1\na  \e[38;2;255;255;255;48;2;0;56;162mK\e[0m\e[1;4;38;2;0;0;0;48;2;255;0;0mM\e[0m  2\n#\n",
+		'view_alignment: in a terminal, a residue is on its background, and one of "color_residues" is bold and underlined';
+	dies_like sub { view_alignment(\%ab, color => 'true') }, qr/^view_alignment: "color" must be 0 or 1, not "true"/, 'view_alignment: a "color" of "true" dies';
+
+	foreach my $case (
+		[[\%ab, 'msa_file' => $fa],             qr/^view_alignment: was given the alignment both first and as "msa_file"/],
+		[[[1], 'return_only' => 1],             qr/^view_alignment: the alignment must be a hash ref of name => sequence or a FASTA file name, not an ARRAY ref/],
+		[['', 'return_only' => 1],              qr/^view_alignment: the alignment must be a hash ref of name => sequence or a FASTA file name, not ""/],
+		[['return_only' => 1],                  qr/^view_alignment: needs an alignment, first or as "msa_file"/],
+		[[\%ab, 'output_file' => 'x.png'],      qr/^view_alignment: "output_file" must end in \.svg or \.tex, which say what to write, not "x\.png"/],
+		[[\%ab, 'output_file' => 'x.svg', caption => 'C', split => 2], qr/^view_alignment: "caption", "split" only shape a LaTeX "output_file" \(\.tex\)/],
+		[[\%ab, label => 'L'],                  qr/^view_alignment: "label" only shape a LaTeX "output_file" \(\.tex\)/],
+		[[\%ab, title => 'T'],                  qr/^view_alignment: "title" is drawn only in an "output_file" \(\.svg or \.tex\), and none was given/],
+		[[\%ab, 'output_file' => 'x.svg', title => ['T']], qr/^view_alignment: "title" must be a string, not an ARRAY ref/],
+		[[\%ab, 'output_file' => 'x.svg', title => "two\nlines"], qr/^view_alignment: "title" holds a control character, \\x\{0a\}/],
+		[[\%ab, 'return_only' => 'yes'],        qr/^view_alignment: "return_only" must be 0 or 1, not "yes"/],
+		[[\%ab, to => []],                      qr/^view_alignment: "to" must be an open filehandle, not an ARRAY ref/],
+		[[\%ab, 'color_residues' => { a => { 1 => 'ForestGreen' } }],
+			qr/^view_alignment: the color of a residue 1 must be one of xcolor's base colors \(black, blue, .+, yellow\) or \[r, g, b\], each 0 to 1, not "ForestGreen"/],
+		[[\%ab, 'color_residues' => { a => { 1 => [2, 0, 0] } }], qr/^view_alignment: the color of a residue 1 must be one of xcolor's base colors/],
+		[[\%ab, 'color_residues' => { a => { 1 => ['x', 0, 0] } }], qr/^view_alignment: the color of a residue 1 must be one of xcolor's base colors/],
+		[[{}],                                  qr/^view_alignment: has no sequences to show in the hash ref/],
+		[[{ a => '' }],                         qr/^view_alignment: has no residues to show in the hash ref/],
+		[[{ a => [] }],                         qr/^view_alignment: sequence "a" must be a string of residues, not an ARRAY ref/],
+		[[{ a => "MK\nV" }],                    qr/^view_alignment: sequence "a" holds a control character, \\x\{0a\}/],
+	) {
+		my ($list, $re) = @{ $case };
+		dies_like sub { view_alignment(@{ $list }) }, $re, "dies: $re";
+	}
 }
 
 # ---- hirisplex_genotypes and trait_predict
@@ -618,6 +810,37 @@ like $body, qr/^\\textit\{e\\\{f\\\}\} & /m, 'and so do its braces';
 	my $frac = trait_predict(genotypes => { S => { 'rs12913832_T' => '1.5', other => 'NA' } }, model => $dose_model, report => 0);
 	cmp_ok abs($frac->{S}{eye}{p}{blue} - exp(1.5) / (exp(1.5) + 1)), '<', 1e-12, 'trait_predict: a dosage of 1.5 is multiplied in';
 	is $frac->{S}{eye}{called}, 1, 'trait_predict: and is a called genotype';
+
+	# Up to 2026-11-16 a data frame's rows were not checked against its
+	# header or its columns against each other: an array row's extra field was
+	# dropped, and a hash of arrays had as many rows as whichever column each
+	# happened to give first, the others padded with undef or cut short.
+	my @one = (['t', 'only', '(intercept)', -3]);
+	is trait_predict(genotypes => { S => {} }, model => [[qw(trait category marker beta)], @one], report => 0)->{S}{t}{call}, 'only',
+		'trait_predict: a model as an array of arrays is read';
+	dies_like sub { trait_predict(genotypes => { S => {} }, model => [[qw(trait category marker beta)], [@{ $one[0] }, 'extra']], report => 0) },
+		qr/^trait_predict: row 1 of "model" has 5 fields, and its header 4/, 'trait_predict: an array row longer than its header dies, rather than losing the extra field';
+	dies_like sub { trait_predict(genotypes => { S => {} }, model => [[qw(trait category marker beta)], ['t', 'only', '(intercept)']], report => 0) },
+		qr/^trait_predict: row 1 of "model" has 3 fields, and its header 4/, 'trait_predict: and one shorter than it';
+	my %columns = (trait => ['t', 't'], category => ['only', 'only'], marker => ['(intercept)', 'm'], beta => [-3, 1]);
+	is trait_predict(genotypes => { S => { m => 1 } }, model => \%columns, report => 0)->{S}{t}{call}, 'only',
+		'trait_predict: a model as a hash of arrays is read';
+	dies_like sub { trait_predict(genotypes => { S => {} }, model => { %columns, note => ['x'] }, report => 0) },
+		qr/^trait_predict: column "note" of "model" has 1 value, and "beta" 2/,
+		'trait_predict: a hash of arrays whose columns differ in length dies, rather than taking the length of whichever comes first';
+
+	# Up to 2026-11-16 a gzipped "model" or "weights" file that ended early was
+	# read as if it ended there. 20,000 rows compress to about 40 KB, and half
+	# of that holds thousands of them.
+	my $rows = join '', "trait\tcategory\tmarker\tbeta\n", "t\tonly\t(intercept)\t-3\n", map { "t\tonly\tm$_\t0\n" } 1 .. 20_000;
+	my $tsv = spew('long_model.tsv', $rows);
+	my $gz = catfile($dir, 'long_model.tsv.gz');
+	IO::Compress::Gzip::gzip($tsv => $gz) or die "gzip $tsv: $IO::Compress::Gzip::GzipError";
+	is trait_predict(genotypes => { S => {} }, model => $gz, report => 0)->{S}{t}{call}, 'only', 'trait_predict: a whole gzipped model is read';
+	truncate $gz, int((-s $gz) / 2) or die "truncate $gz: $!";
+	dies_like sub { trait_predict(genotypes => { S => {} }, model => $gz, report => 0) },
+		qr/^trait_predict: "model" file .+long_model\.tsv\.gz ends early or is corrupt, after row [0-9]+: unexpected end of file/,
+		'trait_predict: a truncated gzipped model dies, rather than being read as far as it goes';
 }
 
 # ---- pdb_search
@@ -737,9 +960,9 @@ foreach my $case (
 	[sub { plot_phylo(fasta => { a => 'MK', b => 'MV' }, 'output_file' => []) }, qr/^plot_phylo: "output_file" must be a file name, not an ARRAY ref/],
 	[sub { plot_phylo(fasta => { a => 'MK', b => 'MV' }, threads => 1.5) },      qr/^plot_phylo: "threads" must be a whole number, 1 or more, not "1\.5"/],
 	[sub { msa_quality_table(%q, filename => []) },         qr/^msa_quality_table: "filename" must be a file name, not an ARRAY ref/],
-	[sub { clustal_view_residues('msa_file' => $ab, 'output_tex_file' => []) },  qr/^clustal_view_residues: "output_tex_file" must be a file name, not an ARRAY ref/],
-	[sub { clustal_view_residues('msa_file' => $ab, 'output_tex_file' => $tex, threads => 'many') },
-		qr/^clustal_view_residues: "threads" must be a whole number, 1 or more, not "many"/],
+	[sub { view_alignment('msa_file' => $ab, 'output_file' => []) },  qr/^view_alignment: "output_file" must be a file name, not an ARRAY ref/],
+	[sub { view_alignment('msa_file' => $ab, 'output_file' => $tex, threads => 'many') },
+		qr/^view_alignment: "threads" must be a whole number, 1 or more, not "many"/],
 ) {
 	my ($code, $re) = @{ $case };
 	my ($what) = $re =~ /\^(\w+: "\w+")/;

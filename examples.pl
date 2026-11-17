@@ -10,18 +10,15 @@ use Time::HiRes 'time';
 
 my $h = fasta2hash('t/data/DEG20010421.fa');
 
-# clustal_view_residues aligns t/data/DEG20010421.fa itself, since its sequences differ in length
+# view_alignment aligns t/data/DEG20010421.fa itself, since its sequences differ in length
 plot_msa(
 	fasta      => 't/data/DEG20010421.fa',
 	filename   => 'DEG20010421.msa.svg',
 );
-clustal_view_residues(
-	'msa_file'        => 't/data/DEG20010421.fa',
-	'output_tex_file' => 'view_residues.tab.tex'
-);
-clustal_view_residues(
+view_alignment('t/data/DEG20010421.fa', output_file => 'view_residues.tab.tex');
+view_alignment(
 	msa_file        => 't/data/DEG20010421.fa',
-	output_tex_file => 'ex.tex',
+	output_file     => 'ex.tex',
 	color_residues  => {
      # residue numbers are 1-based in S.cerevisiae's own sequence, not alignment columns
      'S.cerevisiae' => { 3 => 'red', 8 => 'blue', 9 => [0, 0.6, 0] },   # xcolor name, or [r,

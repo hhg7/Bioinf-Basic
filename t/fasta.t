@@ -134,8 +134,9 @@ SKIP: {
 SKIP: {
 	# 20,000 60-residue lines compress to about 3 KB; half of that is a gzip
 	# stream that ends early, and gzip says so on STDERR and in its exit status
-	skip "fasta2hash can't read a .gz here: $no_gzip", 2 if $no_gzip;
+	skip "fasta2hash can't read a .gz here: $no_gzip", 4 if $no_gzip;
 	my $big = spew('big.fa', ">x\n" . (('A' x 60) . "\n") x 20_000);
+	my $gz_whole = gzip_file($big, catfile($dir, 'whole.fa.gz'));
 	my $gz = gzip_file($big, catfile($dir, 'big.fa.gz'));
 	truncate $gz, int((-s $gz) / 2) or die "truncate $gz: $!";
 	open my $saved, '>&', \*STDERR or die $!;
@@ -144,7 +145,16 @@ SKIP: {
 	my $err = $@;
 	my $one = eval { fasta2hash($gz, 'nope') };
 	my $err_key = $@;
+	# _fasta_ordered, which plot_msa, plot_phylo, view_alignment and
+	# msa_quality_table read their FASTA through, up to 2026-11-16 left gzip's
+	# exit status unread and returned the part it got
+	my ($whole) = Cn::Bioinf::_fasta_ordered($gz_whole);
+	my $ordered = eval { [Cn::Bioinf::_fasta_ordered($gz)] };
+	my $err_ordered = $@;
 	open STDERR, '>&', $saved or die $!;
+	is length $whole->{x}, 1_200_000, '_fasta_ordered reads the whole .gz';
+	like $err_ordered, qr/^_fasta_ordered: couldn't read all of .+big\.fa\.gz: gzip exited [1-9]/,
+		'and dies on a truncated one, rather than returning part of it';
 	like $err, qr/^fasta2hash: couldn't read all of .+big\.fa\.gz: gzip exited [1-9]/, 'a truncated .gz dies, rather than returning part of it';
 	like $err_key, qr/couldn't read all of/, 'and so it does when a key was looked for to the end';
 }

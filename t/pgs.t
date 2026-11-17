@@ -7,6 +7,7 @@ use Storable qw(dclone);
 use File::Temp qw(tempdir);
 use File::Spec::Functions qw(catfile);
 use IO::Compress::Gzip qw(gzip $GzipError);
+use File::Copy qw(copy);
 use Cn::Bioinf qw(pgs_score);
 plan skip_all => 'pgs_score runs PLINK 2, which Alien::Bioinf installs, and it is not installed here'
 	unless eval { require Alien::Bioinf; -x Alien::Bioinf->plink2 };
@@ -157,6 +158,25 @@ score_is pgs_score(vcf => $vcf, weights => { map { $_->{rsID} => $_ } @{ $weight
 	open STDOUT, '>&', $saved or die $!;
 	is $rc, 0, 'PLINK 2 made a .pgen of the fixture';
 	score_is pgs_score(vcf => "$prefix.pgen", weights => $weights_file), $plink, 'a PLINK 2 .pgen';
+	# The same fileset with each sample given a family (FID), as a .psam may.
+	# Up to 2026-11-16 the scores were keyed by IID alone, so that two samples
+	# with one IID in different families were added together: S1's and S2's
+	# scores were summed under "S", with -3 variants missing.
+	my $fam = catfile($dir, 'fam');
+	foreach my $ext (qw(pgen pvar)) {
+		copy("$prefix.$ext", "$fam.$ext") or die "copy $prefix.$ext: $!";
+	}
+	my $psam = sub {
+		open my $fh, '>', "$fam.psam" or die "$fam.psam: $!";
+		print {$fh} "#FID\tIID\tSEX\n", map { "$_->[0]\t$_->[1]\tNA\n" } @_;
+		close $fh or die "$fam.psam: $!";
+	};
+	$psam->([A => 'S1'], [B => 'S2'], [C => 'S3']);
+	score_is pgs_score(vcf => "$fam.pgen", weights => $weights_file), $plink, 'a .psam with families is scored by IID';
+	$psam->([A => 'S'], [B => 'S'], [C => 'T']);
+	my $merged = eval { pgs_score(vcf => "$fam.pgen", weights => $weights_file) };
+	like $@, qr/^pgs_score: "vcf" has two samples whose IID is "S", in families "A" and "B"; the scores are returned by IID, so each sample's must be unique/,
+		'two samples with one IID in different families die, rather than having their scores added together';
 	score_is pgs_score(vcf => $vcf_file, weights => $weights_file, memory => 640, threads => 1), $plink, 'memory and threads';
 }
 

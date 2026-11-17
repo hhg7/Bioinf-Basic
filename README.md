@@ -32,6 +32,10 @@
     );
     plot_phylo('tree_file' => 'orthologs.newick', 'output_file' => 'tree.svg', title => 'EF-3');
 
+    # the alignment in the terminal, as Stats::LikeR's view shows a table, and as an SVG
+    view_alignment('orthologs.fa', output_file => 'aln.svg', track => 'S.cerevisiae',
+        color_residues => { 'S.cerevisiae' => { 3 => 'red', 8 => 'blue' } });
+
     # a polygenic score for each sample of a VCF, from a PGS Catalog scoring file
     my $scores = pgs_score(vcf => 'genome.vcf.gz', weights => 'PGS000138.txt.gz');
 
@@ -73,8 +77,10 @@ Nothing is exported by default; ask for functions by name or with `:all`.
 Every function dies (via `Carp::croak`) on bad arguments, with a message that
 starts with the name of the function that raised it, as in
 `fasta2hash: couldn't find "four" in x.fa`. `pdb_search`, `pgs_score`, `sex_check`,
-`parent`, `relatedness`, `concordance`, `blood_type`, `hirisplex_genotypes`, `trait_predict`, `plot_msa`, `plot_phylo`, `msa_quality_table` and `clustal_view_residues`
-take `name => value` pairs, not a hash ref.
+`parent`, `relatedness`, `concordance`, `blood_type`, `hirisplex_genotypes`, `trait_predict`, `plot_msa`, `plot_phylo` and `msa_quality_table`
+take `name => value` pairs, not a hash ref; `view_alignment` takes the
+alignment first, as a hash ref or a file name, and `name => value` pairs after
+it.
 
 ## Alien::Bioinf
 
@@ -86,8 +92,8 @@ x86\_64) and it needs the network; PLINK 2 has no build for Linux on aarch64,
 so there it installs the rest. `fasta2hash`, `hash2fasta_file`,
 `get_best_alignment_hit`, `sex_check`, `parent`, `relatedness`, `concordance`,
 `hirisplex_genotypes` and `trait_predict` work without it; `pgs_score`, `plot_msa`,
-`plot_phylo`, `msa_quality_table`, and `clustal_view_residues` given an
-unaligned file, die saying that they need it. A CPAN client does not install a recommended module
+`plot_phylo`, `msa_quality_table`, and `view_alignment` given
+sequences that are not aligned, die saying that they need it. A CPAN client does not install a recommended module
 unless asked, so install it first:
 
     cpanm Alien::Bioinf
@@ -382,7 +388,7 @@ letters are `N` or `n`, and `gaps`, how many runs of them there are; `n50` and
 N50 is the length of the sequence at which the lengths, added from the longest
 down, first reach half of their total, and L50 is how many sequences that took;
 `$s->{nx}{90}` and `$s->{lx}{90}` are the same for 90%. With no sequences
-every number is 0.
+every number is 0, and with no sequence of any length every Nx and Lx is.
 
 ## molecular_weight($seq, %args)
 
@@ -588,7 +594,9 @@ which `Alien::Bioinf` installs, reads the genotypes and does the arithmetic
     #               alleles => 24030, missing => 10259, mismatched => 0 } }
 
 Both arguments may also be data frames, as Stats::LikeR's `read_table`
-returns them, which this module takes without loading Stats::LikeR; a VCF
+returns them, which this module takes without loading Stats::LikeR. Every row
+of an array of arrays has as many fields as its header, and every column of a
+hash of arrays as many values as the others, or the frame dies. A VCF
 given as a frame is written to a temporary VCF for PLINK 2. Files cost less
 memory, since a frame is all in perl: on 2026-10-17, PGS000907's 1,773,528
 variants were scored from files against a 3.5-million-record genome in 25 s,
@@ -621,7 +629,9 @@ with perl peaking at 0.8 GB.
   CPU.
 
 Returns a hash ref keyed by sample, a hash of hashes that `write_table` can
-write, with these fields for each sample:
+write, with these fields for each sample. A sample is named by its IID, so a
+PLINK 2 fileset in which two samples share an IID, in different families, dies
+rather than adding their scores together.
 
 - `score`: the sum of the weights times the dosages, PLINK 2's `SCORE1_SUM`.
   PLINK 2 writes it to six significant figures, so it is good to about one
@@ -1329,7 +1339,10 @@ call there, and nobody without it has. One such call makes a sample RhD
 positive, written `D.`, since SNVs cannot say whether the second chromosome
 has the gene too: the ratio of heterozygous to homozygous-ALT calls inside the
 gene, which tells sex on X, got a tenth to a quarter of 2,343 people wrong at
-any cutoff. No such call makes a sample `dd`, RhD negative.
+any cutoff. No such call makes a sample `dd`, RhD negative, as long as it has
+a genotype at one site at least: a call, or a site the file has no record of
+that is read as REF (see below). A sample whose calls at every site are
+missing, are not diploid, or have a DP below `min_depth` has no RhD type.
 
 The sites were chosen, and counted, in 1000 Genomes: the 30x calls of the
 2,493 people whose deletion genotype phase 3 gives. Of the 150 with no gene,
@@ -1557,7 +1570,8 @@ category's intercept. A category whose only row is an intercept of 0 is the
 reference category, which is how a model of *k* categories is written with
 *k* - 1 sets of betas; every category that should appear in the result needs at
 least one row. Traits and their categories come out in the order the table
-first names them.
+first names them. A frame's rows and columns must be of one length, as
+`pgs_score`'s must, and a gzipped file that ends early dies.
 
 For each category the linear predictor is its intercept plus the sum of its
 betas times the genotypes, and the probabilities are `exp` of those over their
@@ -1724,25 +1738,76 @@ Draws an all-against-all BLAST score table with matplotlib, and returns
 
 `msa_file` is accepted and ignored, for old callers.
 
-## clustal_view_residues(%args)
+## view_alignment($alignment, %args)
 
-Writes an alignment as LaTeX tables with chosen residues coloured, and returns
-`output_tex_file`, printing `wrote` and that file name to STDOUT, the name in
-black on cyan when STDOUT is a terminal. Protein names and residues are
-written so that LaTeX prints them as they are, `_`, `^`, `{`, `|`, `<` and the
-like included.
+Shows an alignment in the terminal, as Stats::LikeR's `view` shows a
+dataframe, and draws it as an SVG or writes it as LaTeX tables when asked, with
+chosen residues colored. It was `clustal_view_residues` until 2026-11-16,
+which wrote only the LaTeX.
 
-- `msa_file` (required): a FASTA file. If its sequences are all one length
-  (such as the alignment `plot_msa` keeps) it is shown as it is; if not, it is
-  first aligned with Clustal Omega into a temporary file, and `msa_file`
-  itself is never written.
-- `output_tex_file` (required): the LaTeX file to write, meant to be
-  `\input` into a document whose preamble loads `xcolor` (for the colours)
-  and `placeins` (for the `\FloatBarrier` after each table).
-- `color_residues`: `{ protein => { residue number => colour } }`, where
-  residue numbers are 1-based and a colour is an xcolor name or
-  `[r, g, b]`; a coloured column is coloured in every protein.
-- `track`: a protein that gets a row under it showing its coloured residue
+    my %seqs = (a => 'MK-LV', b => 'M-QLV');
+    view_alignment(\%seqs, row_width => 3, track => 'a',
+        color_residues => { a => { 2 => 'red', 3 => [1, 0, 0] } });
+
+prints
+
+    # alignment: 2 sequences x 5 columns
+             1 3
+    a        MK-  2
+    a track  -2-
+    b        M-Q  2
+
+             4
+    a        LV   4
+    a track  3-
+    b        LV   4
+    # alignment: 2 sequences x 5 columns
+
+Each block of `row_width` columns has its first and last alignment column
+above it, and each row ends with how many residues that sequence has had so
+far. Colored residues are in their colors when the output is a terminal. As
+in `view`, the banner comes first and last, so that an alignment longer than
+the screen still says what it is where the scrolling stops.
+
+    view_alignment('orthologs.fa', output_file => 'orthologs.svg');      # an SVG too
+    view_alignment(msa_file => 'orthologs.fa', output_file => 'aln.tex'); # LaTeX tables
+    my $text = view_alignment(\%seqs, return_only => 1);                 # print nothing
+
+The alignment is the first argument, a hash ref of `name => sequence` or a FASTA
+file name, followed by `name => value` pairs. It can also be given as
+`msa_file` among the pairs. If its sequences are all one length (such as the
+alignment `plot_msa` keeps), it is shown as it is. If not, it is first aligned
+with Clustal Omega, which needs Alien::Bioinf; a FASTA file given is never
+written. `view_alignment` always returns the text, as UTF-8 bytes and without
+the colors, whether or not it also prints it. When it writes a file, it then
+prints `wrote` and that file name to STDOUT, the name in black on cyan when
+STDOUT is a terminal.
+
+- `msa_file`: the FASTA file, when it is not given first.
+- `output_file`: a file to write as well, whose name says what it is: a
+  `.svg` is drawn as the terminal shows the alignment, and a `.tex` is written
+  as LaTeX tables, to be `\input` into a document whose preamble loads
+  `xcolor` (for the colors) and `placeins` (for the `\FloatBarrier` after each
+  table). Any other ending dies.
+- `title`: a line above the alignment in `output_file`. The SVG draws it
+  in bold above the first block, and widens the image when the title is wider
+  than the alignment. The LaTeX writes it in bold above each table, with
+  "(continued)" after the first table. It is plain text, written so that LaTeX
+  prints it as it is, so `_`, `&` and `%` need no escaping. The terminal and the
+  text returned do not show it. Without an `output_file` it dies, and so does
+  a title that holds a control character, such as a newline. The default is no
+  title.
+- `color_residues`: `{ protein => { residue number => color } }`, where
+  residue numbers are 1-based and a color is one of xcolor's 19 base colors
+  (`black`, `blue`, `brown`, `cyan`, `darkgray`, `gray`, `green`,
+  `lightgray`, `lime`, `magenta`, `olive`, `orange`, `pink`, `purple`, `red`,
+  `teal`, `violet`, `white` and `yellow`, with the RGB values xcolor 3.01
+  gives them) or `[r, g, b]`, each 0 to 1. A colored column is colored in every
+  protein.
+- `color`: 1 to put every residue on its own color, as `plot_msa` colors it
+  and as other alignment viewers do (default 0, which colors only
+  `color_residues`). See [Coloring every residue](#coloring-every-residue).
+- `track`: a protein that gets a row under it showing its colored residue
   numbers, each starting at its residue's column, or just after the number
   before it. A number that would run past the end of its block ends at the
   block's last column instead, and is left out only when it would then
@@ -1750,6 +1815,15 @@ like included.
 - `order`: an array ref of the proteins to show, top to bottom (default:
   sorted, ignoring case).
 - `row_width`: alignment columns per block (default 100).
+- `to`: the filehandle to print to (default: the one `select` names, which is
+  STDOUT unless the program changed it).
+- `return_only`: 1 to print nothing, not even the `wrote` line, and only
+  return the text (default 0).
+- `threads`, `clustal_args`: clustalo threads (default 1) and an array ref of
+  further clustalo arguments, when the sequences have to be aligned.
+
+These four shape the LaTeX only, and die with any other `output_file`:
+
 - `split`: blocks per LaTeX table (default 4); further tables are captioned
   "(continued)".
 - `caption`: the table caption (default empty).
@@ -1757,8 +1831,53 @@ like included.
   ... when there is more than one table.
 - `table_text_size`: the LaTeX size command put at the start of each table
   (default `\footnotesize`).
-- `threads`, `clustal_args`: clustalo threads (default 1) and an array ref of
-  further clustalo arguments, when `msa_file` has to be aligned.
+
+In the terminal and the SVG, a tab, carriage return or newline in a name is
+shown as `\t`, `\r` or `\n`, and any other control character as `\x{..}`. A
+sequence that holds a control character dies. In LaTeX, names and residues are
+written so that LaTeX prints them as they are, `_`, `^`, `{`, `|`, `<` and the
+like included.
+
+### Coloring every residue
+
+With `color => 1`, every residue is on the color `plot_msa` draws it in:
+CIAlign's color-blind-safe "CBS" palette (Tumescheit, Firth & Brown, PeerJ
+2022), which gives residues of like chemistry one color (D and E, K and R, S
+and T, F and Y, N and Q, and L, V and I share theirs). The nucleotide palette is
+used instead when every character is a nucleotide code or a gap, as `plot_msa`
+decides it, so a protein made only of letters that are also IUPAC nucleotide
+codes (such as `ACGT`) is colored as DNA. Gaps and `*` stay uncolored. Each
+residue's letter is white or black, whichever contrasts more with its color
+by WCAG 2.2's contrast ratio.
+
+The residues of `color_residues` are then on their own colors instead, and
+are bold and underlined. In the terminal the colors are 24-bit ANSI
+backgrounds, which most terminals show; the text returned has none. In the SVG
+each run of a color is one rectangle under the row. In LaTeX each residue is a
+`\colorbox`, and each table sets `\fboxsep` to 0 so that the boxes meet.
+
+    view_alignment('orthologs.fa', color => 1, output_file => 'aln.svg');
+
+### The SVG
+
+The SVG is written by this module, not by matplotlib, so an aligned input
+needs neither Alien::Bioinf nor Python. Its text stays text: a sequence can be
+selected and copied out of it, and searched for in a browser. Each
+residue is placed at the center of its own column, so the letters line up with
+each other and with their colors in any font and any viewer, Eye of GNOME
+(librsvg) included. Each colored residue has a
+tooltip that names its sequence, its residue number and its alignment column,
+such as `a: K2, alignment column 2`.
+
+Its provenance is where Matplotlib::Simple puts it, as the only metadata in
+the file, in `<dc:creator><cc:Agent><dc:title>`, on one line:
+
+    /home/me/view.pl called using "view_alignment" in .../Cn/Bioinf.pm version 0.02 by user me on host box (linux) with Perl 5.44.0 (/usr/bin/perl), written as SVG by .../Cn/Bioinf.pm itself; from the FASTA file /home/me/orthologs.fa (SHA-256 781f...) of 4 sequences; showing 4 of 4 sequences in blocks of 100 columns, tracking S.cerevisiae, coloring 3 columns
+
+When the sequences had to be aligned, the clause after "itself" says how, as
+`plot_msa`'s does: the ungapped file clustalo read, the Clustal Omega and
+Alien::Bioinf versions, the alignment it wrote, each with its SHA-256, and the
+command. A LaTeX file has the same line as its first, a `%` comment.
 
 # Thanks
 

@@ -14,7 +14,9 @@ use Cn::Bioinf qw(blood_type);
 #
 # The expected types of its 16 samples are what t/data/blood_reference.py, a
 # second implementation of the same rules that shares no code with the module,
-# printed under Python 3.14.2 on 2026-11-10, with a min_depth of 7 and of 0:
+# printed under Python 3.14.2 on 2026-11-10, with a min_depth of 7 and of 0,
+# and again on 2026-11-16, after it and the module stopped calling a sample RhD
+# negative from sites where it has no genotype (BB and OO changed):
 #
 #   python3 -I t/data/blood_reference.py share/blood_type_panel.tsv t/data/blood.vcf 7
 #
@@ -83,10 +85,10 @@ sub columns { ['#CHROM', qw(POS ID REF ALT QUAL FILTER INFO FORMAT), @_] }
 my @expect = (
 	[AA     => 'A+',  'AA', 'A',  'D.', 'positive', 15],
 	[AO     => 'A+',  'AO', 'A',  'D.', 'positive', 1],
-	[BB     => 'B-',  'BB', 'B',  'dd', 'negative', 0],
+	[BB     => undef, 'BB', 'B',  undef, undef, 0],
 	[BO     => 'B-',  'BO', 'B',  'dd', 'negative', 0],
 	[AB     => 'AB+', 'AB', 'AB', 'D.', 'positive', 15],
-	[OO     => 'O-',  'OO', 'O',  'dd', 'negative', 0],
+	[OO     => undef, 'OO', 'O',  undef, undef, 0],
 	[OOb    => 'O-',  'OO', 'O',  'dd', 'negative', 0],
 	[AO2    => 'A+',  'AO', 'A',  'D.', 'positive', 15],
 	[O2O    => 'O-',  'OO', 'O',  'dd', 'negative', 0],
@@ -103,7 +105,7 @@ my $b = blood_type(vcf => $vcf, report => 0);
 is_deeply [sort keys %{ $b }], [sort map { $_->[0] } @expect], 'every sample of the VCF is returned';
 foreach my $e (@expect) {
 	my ($name, @want) = @{ $e };
-	is_deeply answer($b->{$name}), \@want, "$name: " . (defined $want[0] ? "$want[0], $want[1] and $want[3]" : "no ABO type, and RhD $want[4]");
+	is_deeply answer($b->{$name}), \@want, "$name: " . join(', ', 'type ' . ($want[0] // 'none'), 'ABO ' . ($want[1] // 'none'), 'RhD ' . ($want[3] // 'none'));
 }
 
 # every answer has the same keys, whichever way it was reached
@@ -124,7 +126,15 @@ is $b->{AA}{rhesus}{basis}, 'sites', 'RhD is told from the RHD sites';
 is $b->{AA}{rhesus}{sites}, 15, 'of which the panel has 15';
 is $b->{AA}{rhesus}{listed}, 15, 'and the file a record of each';
 is $b->{AA}{rhesus}{deleted}, undef, 'with no record of a deletion';
-is $b->{BB}{rhesus}{why}, undef, 'a sample with an RhD type has no "why"';
+is $b->{BO}{rhesus}{why}, undef, 'a sample with an RhD type has no "why"';
+# Up to 2026-11-16 a sample with no ALT at any RHD site was RhD negative even
+# when it had no genotype at any of them either, so that BB's no-calls and OO's
+# calls below min_depth (15 homozygous ALTs at DP 3) were both "dd".
+is $b->{BB}{rhesus}{carried}, 0, 'BB carries no ALT at an RHD site';
+is $b->{BB}{rhesus}{why}, 'no genotype at any of the 15 RHD sites the file has a record of: the calls are missing, are not diploid, or have a DP below 7',
+	'and with no genotype at any of them it has no RhD type, rather than being called negative';
+like $b->{OO}{rhesus}{why}, qr/^no genotype at any of the 15 RHD sites /, 'nor has OO, whose calls there are all below min_depth';
+is $b->{BO}{rhesus}{phenotype}, 'negative', 'while BO, homozygous REF at every site, is still negative';
 
 # min_depth: OO's sites and SHAL's rs8176719 are at a DP of 3
 {
@@ -155,6 +165,8 @@ is_deeply blood_type($vcf, report => 0), $b, 'blood_type($file, %options) is blo
 	like $line[14], qr/^NCf +- +- +- +positive +D\. +15\/15$/, 'a sample with no ABO type has "-" for it';
 	is_deeply [map { (split ' ')[0] } @line[3 .. 18]], [map { $_->[0] } @expect], 'every sample has a row, in the file\'s order';
 	is scalar(grep { / has no ABO type: / } @line), 4, 'and each of the four with no ABO type a line saying why';
+	is scalar(grep { / has no RhD type: / } @line), 2, 'as do the two with no RhD type';
+	like $line[5], qr/^BB +- +B +BB +- +- +0\/15$/, 'a sample with an ABO type and no RhD type has "-" for the type and RhD';
 	like $out, qr/^NCb has no ABO type: no genotype at rs8176746: /m, 'and the report says why a sample has no type';
 	unlike $out, qr/taken as homozygous/, 'nothing is said to be taken as REF when nothing was';
 	($out) = stdout_of(sub { blood_type(vcf => $vcf, report => 0) });

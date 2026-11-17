@@ -3,7 +3,9 @@ package Cn::Bioinf;
 #
 # Taken from ~/Scripts/bioinf.pm (as it stood on 2026-08-19): fasta2hash,
 # get_best_alignment_hit, hash2fasta_file, msa_quality_table, msa_phylo_plot and
-# clustal_view_residues. fasta2hash and hash2fasta_file are now XS (Bioinf.xs).
+# clustal_view_residues (now view_alignment, since 2026-11-16, which also shows
+# the alignment in the terminal and draws it as an SVG). fasta2hash and
+# hash2fasta_file are now XS (Bioinf.xs).
 # msa_phylo_plot is now plot_msa and plot_phylo, and no longer takes a BLAST
 # report and a proteome database: each is given the sequences, aligns them with
 # Clustal Omega and draws the result itself, with share/msa_plot.py (from
@@ -31,13 +33,13 @@ use Exporter 'import';
 use XSLoader;
 our $VERSION = '0.02';
 our @EXPORT_OK = qw(
-	assembly_stats back_transcribe blood_type clustal_view_residues complement concordance fasta2hash fasta_index
+	assembly_stats back_transcribe blood_type complement concordance fasta2hash fasta_index
 	fasta_region find_orfs gc_content get_best_alignment_hit hash2fasta_file hirisplex_genotypes isoelectric_point
 	kmer_count molecular_weight motif_search msa_quality_table parent pdb_search pgs_score plot_msa plot_phylo
 	protein_charge relatedness reverse_complement sex_check subseq trait_predict transcribe translate
-	translate_six_frames
+	translate_six_frames view_alignment
 );
-our @EXPORT = @EXPORT_OK;
+# Nothing is in @EXPORT: a caller names what it wants, or asks for ":all".
 our %EXPORT_TAGS = (all => \@EXPORT_OK);
 XSLoader::load('Cn::Bioinf', $VERSION);
 # The calling script's full path, for _creator. It is looked up at load time,
@@ -161,10 +163,14 @@ sub _utf8 {
 # Creator, which it pastes into a Python literal; this one reaches Python as a
 # JSON string through _python's --argfile, so backslashes and quotes in a path
 # need no escaping here.
+#
+# With $own, the file is written by this module itself (view_alignment's SVG
+# and LaTeX), so Alien::Bioinf is neither needed nor named; the clause that
+# says how an alignment was made names it when clustalo was run.
 sub _creator {
-	my ($sub) = @_;
-	_alien($sub);
-	"$Script called using \"$sub\" in " . __FILE__ . " version $VERSION with Alien::Bioinf $Alien::Bioinf::VERSION"
+	my ($sub, $own) = @_;
+	_alien($sub) unless $own;
+	"$Script called using \"$sub\" in " . __FILE__ . " version $VERSION" . ($own ? '' : " with Alien::Bioinf $Alien::Bioinf::VERSION")
 		. ' by user ' . _user() . ' on host ' . hostname() . " ($^O) with Perl " . sprintf('%vd', $^V) . " ($^X)";
 }
 
@@ -363,7 +369,12 @@ sub _fasta_ordered {
 	my @order;
 	my $fh = _open_fasta($file);
 	my ($h) = _located(sub { _read_fasta($fh, undef, $file, \@order) });
-	close $fh;
+	# a truncated or corrupt .gz shows only in gzip's exit status, as in
+	# fasta2hash; the whole file was read, so no SIGPIPE is expected
+	unless (close $fh) {
+		my $why = $! ? "$!" : $? & 127 ? 'gzip was killed by signal ' . ($? & 127) : 'gzip exited ' . ($? >> 8);
+		croak "_fasta_ordered: couldn't read all of $file: $why";
+	}
 	($h, \@order);
 }
 
@@ -786,7 +797,9 @@ sub assembly_stats {
 	# sequences that took. The comparison is in whole numbers, 10 * the sum
 	# against the total * x / 10, where assembly-stats divides in floating point.
 	my ($sum, $tenth) = (0, 1); # $tenth = the x / 10 that has not been reached yet
-	foreach my $i (0 .. $#len) {
+	# with a total of 0, 10 * 0 >= 0 * x would reach every tenth at the first
+	# sequence, and give an Lx of 1 where the rule below says 0
+	foreach my $i ($total ? (0 .. $#len) : ()) {
 		$sum += $len[$i];
 		while ($tenth <= 10 && 10 * $sum >= $total * $tenth) {
 			$nx{10 * $tenth} = $len[$i];
@@ -1362,6 +1375,8 @@ sub _frame_rows {
 			foreach my $i (0 .. $#data) {
 				croak "$sub: row " . ($i + 1) . " of \"$what\" must be an array ref, as its header is, not " . _what($data[$i])
 					unless ref $data[$i] eq 'ARRAY';
+				croak "$sub: row " . ($i + 1) . " of \"$what\" has " . scalar(@{ $data[$i] }) . ' fields, and its header ' . scalar(@{ $head })
+					unless @{ $data[$i] } == @{ $head };
 				my %row;
 				@row{ @{ $head } } = @{ $data[$i] };
 				push @rows, \%row;
@@ -1383,10 +1398,15 @@ sub _frame_rows {
 				@rows = values %{ $frame };
 			}
 		} elsif (ref $first eq 'ARRAY') {
-			my @cols = keys %{ $frame };
+			# sorted, so that the column a length is compared with, and named
+			# when it differs, is not the hash's order
+			my @cols = sort keys %{ $frame };
 			foreach my $c (@cols) {
 				croak "$sub: column \"$c\" of \"$what\" must be an array ref, as \"$key\" is, not " . _what($frame->{$c})
 					unless ref $frame->{$c} eq 'ARRAY';
+				my $n = @{ $frame->{$c} };
+				croak "$sub: column \"$c\" of \"$what\" has $n value" . ($n == 1 ? '' : 's') . ", and \"$cols[0]\" " . scalar(@{ $frame->{ $cols[0] } })
+					unless $n == @{ $frame->{ $cols[0] } };
 			}
 			foreach my $i (0 .. $#{ $first }) {
 				push @rows, { map { $_ => $frame->{$_}[$i] } @cols };
@@ -1446,6 +1466,14 @@ sub _weight_rows {
 	} else {
 		open $fh, '<:raw', $weights or croak "$sub: can't read $weights: $!";
 	}
+	my $n = 0; # rows read so far
+	# IO::Uncompress::Gunzip ends a truncated or corrupt stream as if it were
+	# the end of the file, and says so only in its error(), which reading a
+	# .gz to the end therefore checks
+	my $whole = sub {
+		return unless ref $fh ne 'GLOB' && $fh->error;
+		croak "$sub: \"$what\" file $weights ends early or is corrupt, " . ($n ? "after row $n" : 'before its first row') . ': ' . $fh->error;
+	};
 	my $head;
 	while (defined(my $line = <$fh>)) {
 		$line =~ s/\r?\n\z//;
@@ -1453,9 +1481,9 @@ sub _weight_rows {
 		$head = $line;
 		last;
 	}
+	$whole->() unless defined $head;
 	croak "$sub: \"$what\" file $weights has no header line" unless defined $head;
 	my @cols = split /\t/, $head, -1;
-	my $n = 0;
 	my $next = sub {
 		while (defined(my $line = <$fh>)) {
 			$line =~ s/\r?\n\z//;
@@ -1464,6 +1492,7 @@ sub _weight_rows {
 			@row{@cols} = split /\t/, $line, -1;
 			return (\%row, 'row ' . ++$n);
 		}
+		$whole->();
 		return;
 	};
 	($next, \@cols);
@@ -1695,15 +1724,25 @@ sub pgs_score {
 
 	my @samples; # in PLINK 2's order
 	open my $psam, '<', "$samples.psam" or croak "$sub: can't read $samples.psam: $!";
-	my $iid; # the column of the IID
+	my ($iid, $fid); # the columns of the IID and of the FID, which a .psam need not have
+	# IID => its FID, or '' with no FID column. The scores are keyed by IID,
+	# where PLINK 2 tells samples apart by FID and IID together, so two samples
+	# that share an IID would have their scores added into one.
+	my %family;
 	while (my $line = <$psam>) {
 		chomp $line;
 		my @f = split /\t/, $line;
 		if ($line =~ /\A#/) {
 			($iid) = grep { $f[$_] =~ /\A#?IID\z/ } 0 .. $#f;
+			($fid) = grep { $f[$_] =~ /\A#?FID\z/ } 0 .. $#f;
 			next;
 		}
-		push @samples, $f[$iid // 0];
+		my $id = $f[$iid // 0];
+		my $family = defined $fid ? $f[$fid] : '';
+		croak "$sub: \"vcf\" has two samples whose IID is \"$id\"" . (defined $fid ? ", in families \"$family{$id}\" and \"$family\"" : '')
+			. '; the scores are returned by IID, so each sample\'s must be unique' if exists $family{$id};
+		$family{$id} = $family;
+		push @samples, $id;
 	}
 	close $psam;
 
@@ -1752,8 +1791,10 @@ sub pgs_score {
 				? $e eq uc $ref || (length $o && $o eq uc $ref)
 				: defined $named{$e} && (!length $o || defined $named{$o});
 			# Of two records that agree, as a multi-allelic site split in two
-			# can give, the first in CHROM:POS:REF:ALT order is used, so that the
-			# order of the file does not decide it.
+			# can give, the one whose "CHROM:POS:REF:ALT" sorts first as a
+			# string is used, so that the order of the file does not decide it.
+			# That is not genomic order ("1:100" sorts before "1:99"), and need
+			# not be: the choice only has to be the same every time.
 			next if defined $use{$i} && (split /\t/, $use{$i})[2] le $sort;
 			# An effect allele the record lacks (its REF being the other allele)
 			# has no copies; it is given as the REF with a weight of 0, which
@@ -3175,10 +3216,11 @@ sub blood_type {
 	my @abo_role = sort { $panel->{abo}{$a} <=> $panel->{abo}{$b} } keys %{ $panel->{abo} };
 	my @sites = @{ $panel->{sites} };
 	my $listed = grep { $seen->[$_] } @sites;
-	# why no RhD type can be told from the sites when a sample has an ALT at
-	# none of them: undef when it can, which is when the file has a record of
-	# one, or every one is read as REF
-	my ($site_unknown) = $listed ? () : grep { defined } map { $unknown[$_] } @sites;
+	# why a sample with a genotype at none of the sites has no RhD type: the
+	# file's reason when it has a record of none of them, and otherwise the
+	# sample's calls at those it has
+	my ($site_unknown) = $listed ? ("no genotype at any of the $listed RHD sites the file has a record of: the calls are missing, are not diploid, or have a DP below $r{min_depth}")
+		: grep { defined } map { $unknown[$_] } @sites;
 
 	my %out;
 	foreach my $i (0 .. $#{ $names }) {
@@ -3198,6 +3240,11 @@ sub blood_type {
 			$abo_why = $unknown[$k] // "no genotype at $marker[$k]{name}: the call is missing, is not diploid, or has a DP below $r{min_depth}";
 		}
 		my $carried = grep { $d->[$_] } @sites;
+		# The sites this sample has a genotype at: a call the file has, or a
+		# site it has no record of that is read as REF. No ALT is RhD negative
+		# only where there is one; a site's no-call, or a call below
+		# min_depth, is undef, and up to 2026-11-16 was counted as REF.
+		my $typed = grep { $as_ref[$_] || defined $d->[$_] } @sites;
 		my $lost = $deleted->[$i]; # copies of a deletion covering RHD: 0 to 2, or undef when the file has no record of one that calls this sample
 		# 'deletion' = from a record of the gene's deletion; 'sites' = from the
 		# RHD sites; undef = no type
@@ -3207,7 +3254,7 @@ sub blood_type {
 		} elsif ($carried) {
 			# the second copy cannot be told from SNVs; see the README
 			($rh_genotype, $rh_phenotype, $basis) = ('D.', 'positive', 'sites');
-		} elsif (!defined $site_unknown) {
+		} elsif ($typed) {
 			($rh_genotype, $rh_phenotype, $basis) = ('dd', 'negative', 'sites');
 		} else {
 			$rh_why = $site_unknown;
@@ -3556,7 +3603,7 @@ sub pdb_search {
 
 # Dies unless $n, given to $sub as $what, is a 1-based residue number. Without
 # this, 0 and the negative numbers index @col from its end in plot_msa and
-# clustal_view_residues, and silently mean the last residues.
+# view_alignment, and silently mean the last residues.
 sub _residue_number {
 	my ($sub, $what, $n) = @_;
 	croak "$sub: $what must be a residue number, 1 or more, not " . (defined $n ? "\"$n\"" : 'undef')
@@ -3760,8 +3807,15 @@ sub _kept {
 	@kept ? 'kept with it: ' . join(', ', @kept) : ();
 }
 
-# A command as it could be pasted into a shell, for an image's Creator.
-sub _cmd_text { join ' ', map { /[^\w\/.,:=+-]/ ? "'$_'" : $_ } @_ }
+# A command as it could be pasted into a POSIX shell, for an image's Creator:
+# an argument that holds anything but the characters listed, or nothing at all,
+# goes between apostrophes, and an apostrophe inside it is written '\''.
+sub _cmd_text {
+	join ' ', map {
+		(my $s = $_) =~ s/'/'\\''/g;
+		$s eq '' || $s =~ /[^\w\/.,:=+-]/ ? "'$s'" : $s;
+	} @_;
+}
 
 # How _align made an alignment, as one clause of an image's Creator: what
 # Clustal Omega read, which version ran, what it wrote and the command. $cmd,
@@ -3966,81 +4020,493 @@ sub _latex_text {
 	$text;
 }
 
-sub clustal_view_residues {
-	my $sub = 'clustal_view_residues';
-	# msa_file: a FASTA file, aligned (such as plot_msa's) or not; color_residues:
-	# {protein => {1-based residue number => colour}}, the colour an xcolor
-	# name or an [r, g, b] ref; order: proteins top to bottom; row_width:
-	# columns per block (100); split: blocks per LaTeX table (4); track: a
-	# protein whose coloured residue numbers get a row of their own; threads and
-	# clustal_args: for clustalo, if msa_file has to be aligned.
-	my $args = _args(\@_, $sub, ['msa_file', 'output_tex_file'], [qw(caption clustal_args color_residues label
-		order row_width split table_text_size threads track)]);
+# xcolor's 19 base colors as [r, g, b], each 0 to 1, for the terminal and the
+# SVG, which have no xcolor to look a name up in. Taken from xcolor.sty v3.01
+# (2023/11/15, TeX Live's tex/latex/xcolor), its three \definecolorset lines
+# for the base colors (lines 1435 to 1456): red to violet are given in rgb
+# first, cyan to olive in cmyk and black to white in gray, and the rgb of each
+# is the one written in its rgb place.
+my %Xcolor = (
+	red      => [1, 0, 0],     green     => [0, 1, 0],       blue  => [0, 0, 1],
+	brown    => [.75, .5, .25], lime     => [.75, 1, 0],     orange => [1, .5, 0],
+	pink     => [1, .75, .75], purple    => [.75, 0, .25],   teal  => [0, .5, .5],
+	violet   => [.5, 0, .5],   cyan      => [0, 1, 1],       magenta => [1, 0, 1],
+	yellow   => [1, 1, 0],     olive     => [.5, .5, 0],     black => [0, 0, 0],
+	darkgray => [.25, .25, .25], gray    => [.5, .5, .5],    lightgray => [.75, .75, .75],
+	white    => [1, 1, 1],
+);
+
+# The color view_alignment's "color" gives every residue: plot_msa's, as
+# share/msa_plot.py's AA and NT tables hold them, which are CIAlign's
+# color-blind-safe "CBS" palette (getAAColours('CBS') and getNtColours('CBS');
+# Tumescheit, Firth & Brown, PeerJ 2022, MIT license), so that the text, the
+# SVG and plot_msa's image color a residue alike. The gap and "*", which
+# msa_plot.py draws white, are left out here, and so stay uncolored.
+# t/checks.t reads msa_plot.py's tables and checks that these are the same.
+my %Residue_color = (
+	aa => {
+		D => '#a22c49', E => '#a22c49', C => '#c9c433', M => '#c9c433', K => '#0038a2', R => '#0038a2',
+		S => '#e57700', T => '#e57700', F => '#589aab', Y => '#589aab', N => '#50d3cb', Q => '#50d3cb',
+		G => '#eae2ea', L => '#56ae6c', V => '#56ae6c', I => '#56ae6c', A => '#888988', W => '#89236a',
+		H => '#e669ca', P => '#ffc4a9', X => '#000000', B => '#936e23', Z => '#936e23', J => '#936e23',
+		U => '#936e23', O => '#936e23',
+	},
+	nt => {
+		A => '#56ae6c', G => '#c9c433', T => '#a22c49', C => '#0038a2', N => '#6979d3', U => '#a22c49',
+		map { $_ => '#6979d3' } split //, 'RYSWKMBDHVX',
+	},
+);
+
+# %Residue_color itself, for t/checks.t to compare with msa_plot.py's tables.
+sub _residue_colors { \%Residue_color }
+
+# The palette of %Residue_color for these sequences: 'nt' when every character
+# of every one, upper-cased, is a nucleotide code or a gap, as msa_plot.py
+# decides it after CIAlign's seqType(), and 'aa' otherwise. A "." counts as a
+# gap here, which msa_plot.py has no use for, since it reads only "-".
+sub _palette_for {
+	my ($seqs) = @_;
+	my $nt = $Residue_color{nt};
+	foreach my $s (values %{ $seqs }) {
+		foreach my $c (split //, uc $s) {
+			return 'aa' unless $c eq '-' || $c eq '.' || defined $nt->{$c};
+		}
+	}
+	'nt';
+}
+
+# The text color, as 0 to 255 r, g, b, that reads best on the background $r,
+# $g, $b: white or black, whichever has the higher contrast ratio against it
+# by WCAG 2.2's definitions of relative luminance and contrast ratio (W3C
+# Recommendation, 2023-10-05, "Glossary"): each channel taken from sRGB to
+# linear, L = 0.2126 R + 0.7152 G + 0.0722 B, and the ratio of the lighter L
+# + 0.05 to the darker. The two ratios are equal at L = 0.1791; of
+# %Residue_color, #936e23 (L = 0.1748, white) and #6979d3 (L = 0.2138, black)
+# are the nearest it (measured 2026-11-16), far enough that no NV width can
+# tip them.
+sub _text_on {
+	my @lin = map { my $s = $_ / 255; $s <= 0.04045 ? $s / 12.92 : (($s + 0.055) / 1.055) ** 2.4 } @_;
+	my $l = 0.2126 * $lin[0] + 0.7152 * $lin[1] + 0.0722 * $lin[2];
+	1.05 / ($l + 0.05) > ($l + 0.05) / 0.05 ? (255, 255, 255) : (0, 0, 0);
+}
+
+# A color of "color_residues", an xcolor base name or [r, g, b], as the 0 to
+# 255 integers of the terminal's and the SVG's rgb.
+sub _rgb255 {
+	my ($c) = @_;
+	map { int(255 * $_ + 0.5) } @{ ref $c ? $c : $Xcolor{$c} };
+}
+
+# $name as the terminal and the SVG show it: a tab, carriage return or newline
+# as \t, \r or \n, as Stats::LikeR's view writes them, and any other control
+# character as \x{..}, so that one name stays on one line and the SVG stays
+# XML, which allows none of them.
+sub _shown_name {
+	my ($name) = @_;
+	my %esc = ("\t" => '\\t', "\r" => '\\r', "\n" => '\\n');
+	$name =~ s/([\x00-\x1f\x7f])/$esc{$1} \/\/ sprintf('\\x{%02x}', ord $1)/ge;
+	$name;
+}
+
+# $text as the text of an XML element: &, < and > written as entities. Quotes
+# need none outside an attribute, and are left as they are, as matplotlib
+# leaves them in the Creator, so that the provenance reads the same in both.
+sub _xml {
+	my ($text) = @_;
+	my %ent = ('&' => '&amp;', '<' => '&lt;', '>' => '&gt;');
+	$text =~ s/([&<>])/$ent{$1}/g;
+	$text;
+}
+
+# The alignment of view_alignment as LaTeX tables, the original output of
+# bioinf.pm's clustal_view_residues: each block's rows of name, residues and
+# residues so far, a table of "split" blocks each.
+sub _alignment_tex {
+	my ($sub, $r, $blocks, $creator) = @_;
+	my @table;
+	foreach my $block (@{ $blocks }) {
+		foreach my $row (@{ $block->{rows} }) {
+			my $name = _latex_text($row->{name});
+			if ($row->{track}) {
+				push @table, ["\\textit{$name} track", '\texttt{' . join('', @{ $row->{chars} }) . '}', $row->{count}];
+				next;
+			}
+			# a residue is written so that LaTeX prints it, as a name is
+			my @seq = map { _latex_text($_) } @{ $row->{chars} };
+			foreach my $i (0 .. $#seq) {
+				if (my $bg = $row->{bg}[$i]) {
+					# a box of its color, the \strut making every box in the row
+					# one height, under the residue in white or black; the {} ends
+					# the command's name, which would otherwise run on into "M"
+					my $x = $seq[$i];
+					$x = "\\textcolor{white}{$x}" if (_text_on(@{ $bg }))[0];
+					$x = "\\textbf{$x}" if $row->{strong}[$i];
+					$seq[$i] = '\colorbox[RGB]{' . join(',', @{ $bg }) . "}{\\strut{}$x}";
+					next;
+				}
+				my $c = $row->{colors}[$i] // next;
+				$seq[$i] = ref $c ? '{\color[rgb]{' . join(',', @{ $c }) . "}$seq[$i]}" : "\\textcolor{$c}{$seq[$i]}";
+			}
+			push @table, ["\\textit{$name}", '\texttt{' . join('', @seq) . '}', $row->{count}];
+		}
+		push @table, ['\hline'];
+	}
+	my $per_table = $r->{split} * (1 + @{ $blocks->[0]{rows} }); # a block's rows, and its \hline
+	my $file = $r->{'output_file'};
+	open my $tex, '>', $file or croak "$sub: can't write $file: $!";
+	# a newline in a path would end the comment, and make the rest LaTeX
+	(my $comment = $creator) =~ tr/\r\n/  /;
+	print {$tex} "% $comment\n" or croak "$sub: can't write $file: $!";
+	my $n_tables = int((@table + $per_table - 1) / $per_table);
+	foreach my $t (0 .. $n_tables - 1) {
+		my $end = ($t + 1) * $per_table - 1;
+		$end = $#table if $end > $#table;
+		# with "color", no margin round a residue's box, so that the boxes meet;
+		# the table's group keeps the setting from the rest of the document
+		print {$tex} "\\begin{table}[htp]$r->{'table_text_size'}\n", ($r->{color} ? "\\setlength{\\fboxsep}{0pt}\n" : ''),
+			($r->{title} ne '' ? '\textbf{' . _latex_text($r->{title}) . '}' . ($t > 0 ? ' (continued)' : '') . "\\par\n" : ''),
+			"\\begin{tabular}{|c|l|c|} \\hline\n",
+			'\textbf{Track} & \textbf{Sequence} & \textbf{Length}\\\\ \hline', "\n";
+		print {$tex} join(' & ', @{ $_ }), ($_->[-1] eq '\hline' ? "\n" : "\n\\\\\n") foreach @table[$t * $per_table .. $end];
+		print {$tex} "\\end{tabular}\n\\caption{$r->{caption}", ($t > 0 && $r->{caption} ne '' ? ' (continued)' : ''), "}\n";
+		print {$tex} "\\label{tab:$r->{label}", ($n_tables > 1 ? $t : ''), "}\n" if defined $r->{label};
+		print {$tex} "\\end{table} \\FloatBarrier\n";
+	}
+	close $tex or croak "$sub: can't write $file: $!";
+}
+
+# The width of the name column and of the residue count column, in
+# characters, which the terminal and the SVG lay their rows out by.
+sub _alignment_widths {
+	my ($blocks) = @_;
+	my ($name_w, $count_w) = (0, 0);
+	foreach my $row (map { @{ $_->{rows} } } @{ $blocks }) {
+		my $w = length _chars($row->{label});
+		$name_w = $w if $w > $name_w;
+		$count_w = length $row->{count} if !$row->{track} && length $row->{count} > $count_w;
+	}
+	($name_w, $count_w);
+}
+
+# The header of a block, as the terminal shows it: its first alignment column
+# over its first residue, and its last over its last when there is room for
+# both with a space between.
+sub _block_header {
+	my ($block) = @_;
+	my ($first, $last) = ($block->{start} + 1, $block->{start} + $block->{width});
+	my $room = $block->{width} - length($first) - length($last);
+	$first . ($room >= 1 ? ' ' x $room . $last : '');
+}
+
+# The alignment of view_alignment as text: a banner, then each block's header
+# and rows of name, residues and residues so far, the banner again last, as
+# Stats::LikeR's view ends with it. With $color, a residue with a background
+# (view_alignment's "color") is on it, as a 24-bit ANSI background
+# (48;2;r;g;b), in the text color _text_on picks (38;2;r;g;b), and also bold
+# (1) and underlined (4) when it is one of "color_residues"; any other colored
+# residue is in its color, as a foreground; and each is followed by a reset
+# (0). Characters, not bytes.
+sub _alignment_text {
+	my ($blocks, $banner, $color) = @_;
+	my ($name_w, $count_w) = _alignment_widths($blocks);
+	my $seq_w = $blocks->[0]{width}; # the first block is the widest
+	my @lines = ($banner);
+	foreach my $b (0 .. $#{ $blocks }) {
+		my $block = $blocks->[$b];
+		push @lines, '' if $b > 0;
+		push @lines, ' ' x ($name_w + 2) . _block_header($block);
+		foreach my $row (@{ $block->{rows} }) {
+			my $seq = '';
+			foreach my $i (0 .. $#{ $row->{chars} }) {
+				my $c = _chars($row->{chars}[$i]);
+				my $bg = $row->{bg}[$i];
+				if ($color && defined $bg) {
+					$seq .= "\e[" . ($row->{strong}[$i] ? '1;4;' : '') . '38;2;' . join(';', _text_on(@{ $bg })) . ';48;2;' . join(';', @{ $bg }) . "m$c\e[0m";
+				} elsif ($color && defined $row->{colors}[$i]) {
+					$seq .= "\e[38;2;" . join(';', _rgb255($row->{colors}[$i])) . "m$c\e[0m";
+				} else {
+					$seq .= $c;
+				}
+			}
+			my $name = _chars($row->{label});
+			my $line = $name . ' ' x ($name_w - length($name) + 2) . $seq;
+			$line .= ' ' x ($seq_w - @{ $row->{chars} } + 2 + $count_w - length $row->{count}) . $row->{count} unless $row->{track};
+			push @lines, $line;
+		}
+	}
+	join('', map { "$_\n" } @lines, $banner);
+}
+
+# The alignment of view_alignment as an SVG, laid out as _alignment_text lays
+# it out, with its provenance $creator in the <metadata> that Matplotlib::Simple
+# 0.33's svg_creator_metadata writes it in, after matplotlib 3.11.2's
+# backend_svg._write_metadata: <dc:creator><cc:Agent><dc:title>, the one place
+# a figure from any of its engines keeps it, and the only metadata written.
+# Each residue is a <tspan> of its own, centered on its column by its own x,
+# so that the columns of every row, and the backgrounds under them, line up
+# whatever font the viewer has. Up to 2026-11-16 a row was one <text> whose
+# textLength was fixed instead, which librsvg 2.58 (Eye of GNOME's renderer)
+# ignores: it drew DejaVu Sans Mono's own 7.224 px advance, so the letters ran
+# further right of their backgrounds at every column; and it reads only the
+# first of a list of x on one <text>, so that is no way out either. A
+# colored residue has a tooltip, an empty <rect> over it with a <title>, as
+# msa_plot.py puts one on each cell. With "color", each run of residues of one
+# background is one <rect> under the row, and a residue whose text is to be
+# white, or which is one of "color_residues" (bold and underlined, as in the
+# terminal), is a <tspan>. A $title other than '' is a bold line above the
+# first block, and the image is widened to hold it if need be.
+sub _alignment_svg {
+	my ($sub, $file, $blocks, $creator, $title) = @_;
+	# 12 px text, and 7.2 px a character: 0.6 em is the advance of DejaVu Sans
+	# Mono, Liberation Mono and Courier New alike, so the names and the counts,
+	# which are not stretched, end where the layout puts them in any of them.
+	# 16 px a line leaves 4 px between the descenders of one row and the
+	# capitals of the next; 8 px is the margin all round.
+	my ($fs, $cw, $lh, $pad) = (12, 7.2, 16, 8);
+	# The title is 14 px bold, 8.4 px a character by the same 0.6 em, on a
+	# baseline 15 px into a band of 20 px, which leaves its descenders 1 px
+	# clear of the band and the band 4 px clear of the first header's capitals.
+	my ($title_fs, $title_cw, $title_h, $title_base) = (14, 8.4, 20, 15);
+	$title //= '';
+	my $top = $pad + ($title eq '' ? 0 : $title_h); # where the first block's line starts
+	my ($name_w, $count_w) = _alignment_widths($blocks);
+	# Every length is written with %.10g, so that 8 + 9 * 7.2 is written 72.8
+	# and not 72.80000000000001, and a column past the millionth is still
+	# placed to the hundredth of a pixel.
+	my $x0 = sprintf '%.10g', $pad + ($name_w + 2) * $cw; # where the residues start
+	my $x_count = $x0 + ($blocks->[0]{width} + 2 + $count_w) * $cw; # where the counts end
+	my $lines = 0;
+	$lines += 1 + @{ $_->{rows} } foreach @{ $blocks }; # a header and the rows of each block
+	$lines += @{ $blocks } - 1; # a blank line between blocks
+	my $right = $x_count; # where the widest thing drawn ends
+	my $title_end = $pad + length(_chars($title)) * $title_cw;
+	$right = $title_end if $title_end > $right;
+	my ($width, $height) = map { sprintf '%.10g', $_ } $right + $pad, $top + $pad + $lines * $lh;
+	my ($before, $after) = (
+		"\n <metadata>\n"
+		 . '  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">' . "\n"
+		 . "   <cc:Work>\n    <dc:creator>\n     <cc:Agent>\n      <dc:title>",
+		"</dc:title>\n     </cc:Agent>\n    </dc:creator>\n   </cc:Work>\n  </rdf:RDF>\n </metadata>"
+	);
+	my $svg = qq{<?xml version="1.0" encoding="utf-8" standalone="no"?>\n}
+		. qq{<svg xmlns="http://www.w3.org/2000/svg" width="$width" height="$height" viewBox="0 0 $width $height" version="1.1">}
+		. $before . _xml(_chars($creator)) . $after . "\n"
+		. qq{ <rect width="100%" height="100%" fill="#ffffff"/>\n}
+		. qq{ <g font-family="DejaVu Sans Mono, Liberation Mono, Courier New, monospace" font-size="$fs" fill="#000000">\n};
+	$svg .= sprintf(qq{  <text x="$pad" y="%d" font-size="$title_fs" font-weight="bold">%s</text>\n}, $pad + $title_base, _xml(_chars($title)))
+		if $title ne '';
+	my $line = 0;
+	foreach my $b (0 .. $#{ $blocks }) {
+		my $block = $blocks->[$b];
+		$line++ if $b > 0;
+		my $y = $top + ++$line * $lh - 4; # the baseline, 4 px above the line's foot
+		my ($first, $last) = ($block->{start} + 1, $block->{start} + $block->{width});
+		$svg .= qq{  <text x="$x0" y="$y" fill="#666666">$first</text>\n};
+		$svg .= sprintf(qq{  <text x="%.10g" y="$y" fill="#666666" text-anchor="end">$last</text>\n}, $x0 + $block->{width} * $cw)
+			if $block->{width} - length($first) - length($last) >= 1;
+		foreach my $row (@{ $block->{rows} }) {
+			$y = $top + ++$line * $lh - 4;
+			$svg .= qq{  <text x="$pad" y="$y"} . ($row->{track} ? ' fill="#666666"' : '') . '>' . _xml(_chars($row->{label})) . "</text>\n";
+			# the backgrounds, drawn before the text so as to be under it
+			my $n = @{ $row->{chars} };
+			for (my $i = 0; $i < $n; ) {
+				my $bg = $row->{bg}[$i];
+				unless (defined $bg) {
+					$i++;
+					next;
+				}
+				my $key = join ',', @{ $bg };
+				my $end = $i + 1; # one past the last of the run
+				$end++ while $end < $n && defined $row->{bg}[$end] && join(',', @{ $row->{bg}[$end] }) eq $key;
+				$svg .= sprintf(qq{  <rect x="%.10g" y="%.10g" width="%.10g" height="$lh" fill="rgb($key)"/>\n}, $x0 + $i * $cw, $y + 4 - $lh, ($end - $i) * $cw);
+				$i = $end;
+			}
+			my (@tips, $seq);
+			foreach my $i (0 .. $#{ $row->{chars} }) {
+				my $c = _xml(_chars($row->{chars}[$i]));
+				my $color = $row->{colors}[$i];
+				my $attr = '';
+				if (my $bg = $row->{bg}[$i]) {
+					my @fg = _text_on(@{ $bg });
+					$attr = ($fg[0] ? ' fill="rgb(255,255,255)"' : '') . ($row->{strong}[$i] ? ' font-weight="bold" text-decoration="underline"' : '');
+				} elsif (defined $color) {
+					$attr = ' fill="rgb(' . join(',', _rgb255($color)) . ')"';
+				}
+				# centered on its own column, whatever the font's advance
+				$seq .= sprintf qq{<tspan x="%.10g"$attr>%s</tspan>}, $x0 + ($i + 0.5) * $cw, $c;
+				next unless defined $color;
+				push @tips, sprintf(qq{  <rect x="%.10g" y="%.10g" width="$cw" height="$lh" fill="none" pointer-events="all"><title>%s</title></rect>\n},
+					$x0 + $i * $cw, $y + 4 - $lh, _xml(_chars($row->{tips}[$i]))) if defined $row->{tips}[$i];
+			}
+			# $seq is an argument, not part of the format, which a residue "%" would break
+			$svg .= sprintf(qq{  <text y="$y" text-anchor="middle" xml:space="preserve"%s>%s</text>\n},
+				$row->{track} ? ' fill="#666666"' : '', $seq);
+			$svg .= join '', @tips;
+			$svg .= sprintf(qq{  <text x="%.10g" y="$y" text-anchor="end">$row->{count}</text>\n}, $x_count) unless $row->{track};
+		}
+	}
+	$svg .= " </g>\n</svg>\n";
+	utf8::encode($svg);
+	open my $fh, '>:raw', $file or croak "$sub: can't write $file: $!";
+	print {$fh} $svg or croak "$sub: can't write $file: $!";
+	close $fh or croak "$sub: can't write $file: $!";
+}
+
+sub view_alignment {
+	my $sub = 'view_alignment';
+	# The alignment comes first, as the data does in Stats::LikeR's view: a hash
+	# ref of name => sequence, or a FASTA file name; or else it is "msa_file",
+	# among the name => value pairs. It is the odd one out, so an odd number of
+	# arguments means it was given first.
+	my @list = @_;
+	my $data = @list % 2 ? shift @list : undef;
+	# msa_file: a FASTA file, aligned (such as plot_msa's) or not;
+	# output_file: a .svg or a .tex to write; color_residues: {protein =>
+	# {1-based residue number => color}}, the color an xcolor base name or an
+	# [r, g, b] ref; color: 1 = every residue on its color from plot_msa's
+	# palette, 0 = only those of color_residues; order: proteins top to bottom;
+	# row_width: columns per block (100); track: a protein whose colored residue
+	# numbers get a row of their own; threads and clustal_args: for clustalo, if
+	# the sequences have to be aligned; to: the filehandle to print to;
+	# return_only: 1 = print nothing; title: a line above the alignment in
+	# "output_file", .svg or .tex; caption, label, split (blocks per table, 4)
+	# and table_text_size: for a .tex only.
+	my $args = _args(\@list, $sub, [], [qw(caption clustal_args color color_residues label msa_file order output_file return_only
+		row_width split table_text_size threads title to track)]);
 	_refs($sub, $args, 'ARRAY', qw(clustal_args order));
-	_file_names($sub, $args, qw(msa_file output_tex_file));
+	_file_names($sub, $args, qw(msa_file output_file));
 	_threads($sub, $args);
+	if (defined $data) {
+		croak "$sub: was given the alignment both first and as \"msa_file\"" if defined $args->{'msa_file'};
+		croak "$sub: the alignment must be a hash ref of name => sequence or a FASTA file name, not " . _what($data)
+			unless ref $data eq 'HASH' || (!ref $data && $data ne '');
+	} else {
+		$data = $args->{'msa_file'} // croak "$sub: needs an alignment, first or as \"msa_file\"";
+	}
+	my %r;
+	$r{'row_width'} = $args->{'row_width'} // 100;
+	$r{split} = $args->{split} // 4;
+	# 0 would never end the loop over blocks, and divide by 0 in the tables
+	foreach my $k ('row_width', 'split') {
+		croak "$sub: \"$k\" must be a whole number, 1 or more, not " . _what($args->{$k}) if defined $args->{$k} && (ref $args->{$k} || $args->{$k} !~ /\A[1-9][0-9]*\z/);
+	}
+	$r{color} = $args->{color} // 0; # 1 = every residue on its palette color; 0 = only "color_residues" colored
+	croak "$sub: \"color\" must be 0 or 1, not " . _what($r{color}) unless !ref $r{color} && ($r{color} eq '0' || $r{color} eq '1');
+	$r{'return_only'} = $args->{'return_only'} // 0; # 1 = return the text and print nothing; 0 = print it too
+	croak "$sub: \"return_only\" must be 0 or 1, not " . _what($r{'return_only'})
+		unless !ref $r{'return_only'} && ($r{'return_only'} eq '0' || $r{'return_only'} eq '1');
+	require Symbol;
+	require Scalar::Util;
+	# the selected handle, which is STDOUT unless the program changed it
+	$r{to} = Scalar::Util::openhandle($args->{to} // Symbol::qualify_to_ref(select()))
+		// croak "$sub: \"to\" must be an open filehandle, not " . _what($args->{to});
+	$r{'output_file'} = $args->{'output_file'};
+	$r{format} = !defined $r{'output_file'} ? '' : $r{'output_file'} =~ /\.svg\z/i ? 'svg' : $r{'output_file'} =~ /\.tex\z/i ? 'tex'
+		: croak "$sub: \"output_file\" must end in .svg or .tex, which say what to write, not \"$r{'output_file'}\""; # '' = no file
+	my @tex_only = grep { defined $args->{$_} } qw(caption label split table_text_size);
+	croak "$sub: " . join(', ', map { "\"$_\"" } @tex_only) . ' only shape a LaTeX "output_file" (.tex)' if @tex_only && $r{format} ne 'tex';
+	$r{title} = $args->{title} // ''; # '' = no title line
+	croak "$sub: \"title\" is drawn only in an \"output_file\" (.svg or .tex), and none was given" if defined $args->{title} && $r{format} eq '';
+	croak "$sub: \"title\" must be a string, not " . _what($r{title}) if ref $r{title};
+	# a newline would end the SVG's line of text, and a blank line the LaTeX's \textbf
+	croak "$sub: \"title\" holds a control character, " . sprintf('\\x{%02x}', ord $1) if $r{title} =~ /([\x00-\x1f\x7f])/;
+	$r{caption} = $args->{caption} // '';
+	$r{label} = $args->{label};
+	$r{'table_text_size'} = $args->{'table_text_size'} // '\footnotesize';
 	my $color = $args->{'color_residues'} // {};
 	croak "$sub: \"color_residues\" must be a hash ref" unless ref $color eq 'HASH';
 	foreach my $protein (sort keys %{ $color }) {
-		croak "$sub: \"color_residues\" must map $protein to a hash ref of residue number => colour, not " . _what($color->{$protein})
+		croak "$sub: \"color_residues\" must map $protein to a hash ref of residue number => color, not " . _what($color->{$protein})
 			unless ref $color->{$protein} eq 'HASH';
-	}
-	# 0 would never end the loop over blocks, and divide by 0 in the tables
-	foreach my $k ('row_width', 'split') {
-		croak "$sub: \"$k\" must be a whole number, 1 or more, not \"$args->{$k}\"" if defined $args->{$k} && $args->{$k} !~ /\A[1-9][0-9]*\z/;
-	}
-	croak "$sub: \"msa_file\" $args->{'msa_file'} doesn't exist" unless -e $args->{'msa_file'};
-	my $data = fasta2hash($args->{'msa_file'});
-	croak "$sub: has no sequences to show in $args->{'msa_file'}" unless %{ $data };
-	my %len = map { length $_ => 1 } values %{ $data };
-	if (keys %len > 1) {
-		# Sequences of different lengths can't be an alignment, so align them,
-		# into a temporary file: "msa_file" is the input, and is never written.
-		my %clustal = map { $_ => $args->{$_} } grep { defined $args->{$_} } qw(clustal_args threads);
-		(undef, undef, undef, undef, $data) = _align({ %clustal, fasta => $args->{'msa_file'} }, $sub, 0);
-		%len = map { length $_ => 1 } values %{ $data };
-	}
-	my $track = $args->{track};
-	croak "$sub: tracker \"$track\" isn't in the alignment" if defined $track && !defined $data->{$track};
-	my ($aln_len) = keys %len;
-	my @undef = grep { !defined $data->{$_} } sort keys %{ $color };
-	croak "$sub: \"color_residues\" names proteins that aren't in the alignment: @undef" if @undef;
-	my @proteins = @{ $args->{order} // [sort { lc $a cmp lc $b } keys %{ $data }] };
-	my @bad = grep { !defined $data->{$_} } @proteins;
-	croak "$sub: \"order\" names proteins that aren't in the alignment: @bad" if @bad;
-	my $width = $args->{'row_width'} // 100;
-	# Alignment column => colour, and for the tracked protein column => its
-	# residue number. A coloured column is coloured in every protein.
-	my (%col_color, %col_number);
-	foreach my $protein (sort keys %{ $color }) {
-		my @col;
-		while ($data->{$protein} =~ /[A-Za-z]/g) {
-			push @col, pos($data->{$protein}) - 1;
-		}
 		# checked before they are sorted as numbers, which would warn of one that is not
 		_residue_number($sub, "a residue of $protein in \"color_residues\"", $_) foreach sort keys %{ $color->{$protein} };
 		foreach my $n (sort { $a <=> $b } keys %{ $color->{$protein} }) {
 			my $c = $color->{$protein}{$n};
+			# xcolor's own names beyond its base 19 (dvipsnames and the rest)
+			# have no rgb here, for the terminal or the SVG
+			croak "$sub: the color of $protein residue $n must be one of xcolor's base colors (" . join(', ', sort keys %Xcolor)
+				. ') or [r, g, b], each 0 to 1, not ' . _what($c)
+				unless ref $c ? ref $c eq 'ARRAY' && @{ $c } == 3 && !grep { !defined $_ || ref $_ || !/\A(?:[0-9]+\.?[0-9]*|\.[0-9]+)\z/ || $_ > 1 } @{ $c }
+					: defined $Xcolor{$c};
+		}
+	}
+	my ($fasta, $seqs);
+	if (ref $data) {
+		($fasta, $seqs) = ($data, $data);
+	} else {
+		croak "$sub: the FASTA file $data doesn't exist" unless -e $data;
+		($fasta, $seqs) = ($data, fasta2hash($data));
+	}
+	croak "$sub: has no sequences to show in " . (ref $data ? 'the hash ref' : $data) unless %{ $seqs };
+	foreach my $name (sort keys %{ $seqs }) {
+		my $s = $seqs->{$name};
+		croak "$sub: sequence \"$name\" must be a string of residues, not " . _what($s) unless defined $s && !ref $s;
+		# one would break a row in two, or make the SVG XML no longer
+		croak "$sub: sequence \"$name\" holds a control character, " . sprintf('\\x{%02x}', ord $1) if $s =~ /([\x00-\x1f\x7f])/;
+	}
+	my %len = map { length $_ => 1 } values %{ $seqs };
+	my ($cmd, $names);
+	if (keys %len > 1) {
+		# Sequences of different lengths can't be an alignment, so align them,
+		# into a temporary file: the input is never written.
+		my %clustal = map { $_ => $args->{$_} } grep { defined $args->{$_} } qw(clustal_args threads);
+		(undef, undef, $names, $cmd, $seqs) = _align({ %clustal, fasta => $fasta }, $sub, 0);
+		%len = map { length $_ => 1 } values %{ $seqs };
+	}
+	my ($aln_len) = keys %len;
+	croak "$sub: has no residues to show in " . (ref $data ? 'the hash ref' : $data) unless $aln_len;
+	my $track = $args->{track};
+	croak "$sub: tracker \"$track\" isn't in the alignment" if defined $track && !defined $seqs->{$track};
+	my @undef = grep { !defined $seqs->{$_} } sort keys %{ $color };
+	croak "$sub: \"color_residues\" names proteins that aren't in the alignment: @undef" if @undef;
+	my @proteins = @{ $args->{order} // [sort { lc $a cmp lc $b } keys %{ $seqs }] };
+	my @bad = grep { !defined $seqs->{$_} } @proteins;
+	croak "$sub: \"order\" names proteins that aren't in the alignment: @bad" if @bad;
+	my $width = $r{'row_width'};
+	# Alignment column => color, and for the tracked protein column => its
+	# residue number. A colored column is colored in every protein.
+	my (%col_color, %col_number);
+	foreach my $protein (sort keys %{ $color }) {
+		my @col;
+		while ($seqs->{$protein} =~ /[A-Za-z]/g) {
+			push @col, pos($seqs->{$protein}) - 1;
+		}
+		foreach my $n (sort { $a <=> $b } keys %{ $color->{$protein} }) {
 			my $col = $col[$n - 1] // croak "$sub: $protein has no residue $n";
-			croak "$sub: the colour of $protein residue $n must be a name or 3 numbers" if ref $c && (ref $c ne 'ARRAY' || @{ $c } != 3);
-			$col_color{$col} = $c;
+			$col_color{$col} = $color->{$protein}{$n};
 			$col_number{$col} = $n if defined $track && $protein eq $track;
 		}
 	}
-	my (@table, %count);
+	# Each block of "row_width" columns: its first column (0-based), its width,
+	# and its rows, each of which has its name, the label it is shown under,
+	# whether it is the track row (1) or a sequence (0), its characters, each
+	# one's color of "color_residues" or undef, each one's tooltip or undef, each
+	# one's background as 0 to 255 r, g, b or undef (with "color" only), each
+	# one's emphasis (1 = one of "color_residues" on a background, which is
+	# shown bold and underlined; undef = none), and the residues so far. With
+	# "color", one of "color_residues" has its own color as its background.
+	my $palette = $r{color} ? _palette_for($seqs) : undef; # 'aa' or 'nt'; undef = no "color"
+	my %bg = $r{color} ? map { $_ => [map { hex } $Residue_color{$palette}{$_} =~ /([0-9a-f]{2})/gi] } keys %{ $Residue_color{$palette} } : ();
+	my (@blocks, %count);
 	for (my $start = 0; $start < $aln_len; $start += $width) {
 		my $w = $aln_len - $start < $width ? $aln_len - $start : $width;
+		my @rows;
 		foreach my $protein (@proteins) {
-			my @seq = split //, substr($data->{$protein}, $start, $w);
-			$count{$protein} += grep { /[A-Za-z]/ } @seq;
-			# a residue is written so that LaTeX prints it, as a name is
-			$_ = _latex_text($_) foreach @seq;
-			foreach my $col (grep { $_ >= $start && $_ < $start + $w } keys %col_color) {
-				my ($c, $i) = ($col_color{$col}, $col - $start);
-				$seq[$i] = ref $c ? '{\color[rgb]{' . join(',', @{ $c }) . "}$seq[$i]}" : "\\textcolor{$c}{$seq[$i]}";
+			my @seq = split //, substr($seqs->{$protein}, $start, $w);
+			my (@colors, @tips, @bg, @strong);
+			foreach my $i (0 .. $#seq) {
+				my $before = $count{$protein} // 0;
+				$count{$protein} = $before + 1 if $seq[$i] =~ /[A-Za-z]/;
+				$bg[$i] = $bg{ uc $seq[$i] } if $r{color};
+				my $c = $col_color{ $start + $i } // next;
+				$colors[$i] = $c;
+				($bg[$i], $strong[$i]) = ([_rgb255($c)], 1) if $r{color};
+				$tips[$i] = _shown_name($protein) . ': ' . ($seq[$i] =~ /[A-Za-z]/ ? "$seq[$i]$count{$protein}" : 'a gap')
+					. ', alignment column ' . ($start + $i + 1);
 			}
-			my $name = _latex_text($protein);
-			push @table, ["\\textit{$name}", '\texttt{' . join('', @seq) . '}', $count{$protein}];
+			$count{$protein} //= 0;
+			push @rows, { name => $protein, label => _shown_name($protein), track => 0, chars => \@seq, colors => \@colors,
+				tips => \@tips, bg => \@bg, strong => \@strong, count => $count{$protein} };
 			next unless defined $track && $protein eq $track;
 			# Each residue number written from its own column rightwards, one
 			# digit per column so the row stays aligned, and moved right past
@@ -4058,30 +4524,39 @@ sub clustal_view_residues {
 				@row[$at .. $at + $#digits] = @digits;
 				$free = $at + @digits + 1;
 			}
-			push @table, ["\\textit{$name} track", '\texttt{' . join('', @row) . '}', $count{$protein}];
+			push @rows, { name => $protein, label => _shown_name($protein) . ' track', track => 1, chars => \@row, colors => [], tips => [],
+				bg => [], strong => [], count => $count{$protein} };
 		}
-		push @table, ['\hline'];
+		push @blocks, { start => $start, width => $w, rows => \@rows };
 	}
-	# rows a block: its proteins, the track row if the tracked protein is shown, and \hline
-	my $per_table = ($args->{split} // 4) * (1 + @proteins + ((defined $track && grep { $_ eq $track } @proteins) ? 1 : 0));
-	my $size = $args->{'table_text_size'} // '\footnotesize';
-	my $caption = $args->{caption} // '';
-	open my $tex, '>', $args->{'output_tex_file'} or croak "$sub: can't write $args->{'output_tex_file'}: $!";
-	print {$tex} "%written by $0, calling $sub in " . __FILE__ . "\n";
-	my $n_tables = int((@table + $per_table - 1) / $per_table);
-	foreach my $t (0 .. $n_tables - 1) {
-		my $end = ($t + 1) * $per_table - 1;
-		$end = $#table if $end > $#table;
-		print {$tex} "\\begin{table}[htp]$size\n\\begin{tabular}{|c|l|c|} \\hline\n",
-			'\textbf{Track} & \textbf{Sequence} & \textbf{Length}\\\\ \hline', "\n";
-		print {$tex} join(' & ', @{ $_ }), ($_->[-1] eq '\hline' ? "\n" : "\n\\\\\n") foreach @table[$t * $per_table .. $end];
-		print {$tex} "\\end{tabular}\n\\caption{$caption", ($t > 0 && $caption ne '' ? ' (continued)' : ''), "}\n";
-		print {$tex} "\\label{tab:$args->{label}", ($n_tables > 1 ? $t : ''), "}\n" if defined $args->{label};
-		print {$tex} "\\end{table} \\FloatBarrier\n";
+	my $n_seqs = keys %{ $seqs };
+	my $banner = "# alignment: $n_seqs sequence" . ($n_seqs == 1 ? '' : 's') . " x $aln_len column" . ($aln_len == 1 ? '' : 's')
+		. (defined $cmd ? ', aligned by Clustal Omega' : '') . (@proteins == $n_seqs ? '' : '  (showing ' . scalar(@proteins) . ')');
+	if ($r{format} ne '') {
+		my $from = defined $cmd ? _align_provenance({ fasta => $fasta }, $sub, $cmd, $names, $cmd->[4])
+			: 'from ' . _fasta_id($fasta, $n_seqs);
+		my $creator = _creator($sub, 1) . ', written as ' . ($r{format} eq 'svg' ? 'SVG' : 'LaTeX') . ' by ' . __FILE__ . " itself; $from"
+			. '; showing ' . scalar(@proteins) . " of $n_seqs sequences in blocks of $width columns"
+			. (defined $track ? ', tracking ' . _shown_name($track) : '') . ', coloring ' . scalar(keys %col_color) . ' column'
+			. (keys %col_color == 1 ? '' : 's')
+			. ($r{color} ? ', every residue on its color from CIAlign\'s CBS ' . ($palette eq 'nt' ? 'nucleotide' : 'amino acid') . ' palette, as plot_msa colors it' : '');
+		if ($r{format} eq 'svg') {
+			_alignment_svg($sub, $r{'output_file'}, \@blocks, $creator, $r{title});
+		} else {
+			_alignment_tex($sub, \%r, \@blocks, $creator);
+		}
 	}
-	close $tex or croak "$sub: can't write $args->{'output_tex_file'}: $!";
-	_wrote($args->{'output_tex_file'}, 46); # cyan
-	$args->{'output_tex_file'};
+	my $text = _alignment_text(\@blocks, $banner, 0);
+	utf8::encode($text);
+	return $text if $r{'return_only'};
+	my $shown = $text;
+	if (-t $r{to}) {
+		$shown = _alignment_text(\@blocks, $banner, 1);
+		utf8::encode($shown);
+	}
+	print { $r{to} } $shown or croak "$sub: can't print to \"to\": $!";
+	_wrote($r{'output_file'}, 46) if $r{format} ne ''; # cyan
+	$text;
 }
 
 1;
@@ -4122,6 +4597,10 @@ __END__
      title       => 'EF-3',
  );
  plot_phylo('tree_file' => 'orthologs.newick', 'output_file' => 'tree.svg', title => 'EF-3');
+
+ # the alignment in the terminal, as Stats::LikeR's view shows a table, and as an SVG
+ view_alignment('orthologs.fa', output_file => 'aln.svg', track => 'S.cerevisiae',
+     color_residues => { 'S.cerevisiae' => { 3 => 'red', 8 => 'blue' } });
 
  # a polygenic score for each sample of a VCF, from a PGS Catalog scoring file
  my $scores = pgs_score(vcf => 'genome.vcf.gz', weights => 'PGS000138.txt.gz');
@@ -4164,8 +4643,10 @@ Nothing is exported by default; ask for functions by name or with C<:all>.
 Every function dies (via C<Carp::croak>) on bad arguments, with a message that
 starts with the name of the function that raised it, as in
 C<fasta2hash: couldn't find "four" in x.fa>. C<pdb_search>, C<pgs_score>, C<sex_check>,
-C<parent>, C<relatedness>, C<concordance>, C<blood_type>, C<hirisplex_genotypes>, C<trait_predict>, C<plot_msa>, C<plot_phylo>, C<msa_quality_table> and C<clustal_view_residues>
-take C<< name =E<gt> value >> pairs, not a hash ref.
+C<parent>, C<relatedness>, C<concordance>, C<blood_type>, C<hirisplex_genotypes>, C<trait_predict>, C<plot_msa>, C<plot_phylo> and C<msa_quality_table>
+take C<< name =E<gt> value >> pairs, not a hash ref; C<view_alignment> takes the
+alignment first, as a hash ref or a file name, and C<< name =E<gt> value >> pairs after
+it.
 
 =head2 Alien::Bioinf
 
@@ -4177,8 +4658,8 @@ x86_64) and it needs the network; PLINK 2 has no build for Linux on aarch64,
 so there it installs the rest. C<fasta2hash>, C<hash2fasta_file>,
 C<get_best_alignment_hit>, C<sex_check>, C<parent>, C<relatedness>, C<concordance>,
 C<hirisplex_genotypes> and C<trait_predict> work without it; C<pgs_score>, C<plot_msa>,
-C<plot_phylo>, C<msa_quality_table>, and C<clustal_view_residues> given an
-unaligned file, die saying that they need it. A CPAN client does not install a recommended module
+C<plot_phylo>, C<msa_quality_table>, and C<view_alignment> given
+sequences that are not aligned, die saying that they need it. A CPAN client does not install a recommended module
 unless asked, so install it first:
 
  cpanm Alien::Bioinf
@@ -4499,7 +4980,7 @@ C<l50>; and C<nx> and C<lx>, hash refs of those two for every tenth from 10 to 1
 N50 is the length of the sequence at which the lengths, added from the longest
 down, first reach half of their total, and L50 is how many sequences that took;
 C<< $s-E<gt>{nx}{90} >> and C<< $s-E<gt>{lx}{90} >> are the same for 90%. With no sequences
-every number is 0.
+every number is 0, and with no sequence of any length every Nx and Lx is.
 
 =head2 molecular_weight($seq, %args)
 
@@ -4761,7 +5242,9 @@ which C<Alien::Bioinf> installs, reads the genotypes and does the arithmetic
  #               alleles => 24030, missing => 10259, mismatched => 0 } }
 
 Both arguments may also be data frames, as Stats::LikeR's C<read_table>
-returns them, which this module takes without loading Stats::LikeR; a VCF
+returns them, which this module takes without loading Stats::LikeR. Every row
+of an array of arrays has as many fields as its header, and every column of a
+hash of arrays as many values as the others, or the frame dies. A VCF
 given as a frame is written to a temporary VCF for PLINK 2. Files cost less
 memory, since a frame is all in perl: on 2026-10-17, PGS000907's 1,773,528
 variants were scored from files against a 3.5-million-record genome in 25 s,
@@ -4802,7 +5285,9 @@ CPU.
 =back
 
 Returns a hash ref keyed by sample, a hash of hashes that C<write_table> can
-write, with these fields for each sample:
+write, with these fields for each sample. A sample is named by its IID, so a
+PLINK 2 fileset in which two samples share an IID, in different families, dies
+rather than adding their scores together.
 
 =over
 
@@ -5638,7 +6123,10 @@ call there, and nobody without it has. One such call makes a sample RhD
 positive, written C<D.>, since SNVs cannot say whether the second chromosome
 has the gene too: the ratio of heterozygous to homozygous-ALT calls inside the
 gene, which tells sex on X, got a tenth to a quarter of 2,343 people wrong at
-any cutoff. No such call makes a sample C<dd>, RhD negative.
+any cutoff. No such call makes a sample C<dd>, RhD negative, as long as it has
+a genotype at one site at least: a call, or a site the file has no record of
+that is read as REF (see below). A sample whose calls at every site are
+missing, are not diploid, or have a DP below C<min_depth> has no RhD type.
 
 The sites were chosen, and counted, in 1000 Genomes: the 30x calls of the
 2,493 people whose deletion genotype phase 3 gives. Of the 150 with no gene,
@@ -5919,7 +6407,8 @@ category's intercept. A category whose only row is an intercept of 0 is the
 reference category, which is how a model of I<k> categories is written with
 I<k> - 1 sets of betas; every category that should appear in the result needs at
 least one row. Traits and their categories come out in the order the table
-first names them.
+first names them. A frame's rows and columns must be of one length, as
+C<pgs_score>'s must, and a gzipped file that ends early dies.
 
 For each category the linear predictor is its intercept plus the sum of its
 betas times the genotypes, and the probabilities are C<exp> of those over their
@@ -6127,30 +6616,83 @@ is not a number.
 
 C<msa_file> is accepted and ignored, for old callers.
 
-=head2 clustal_view_residues(%args)
+=head2 view_alignment($alignment, %args)
 
-Writes an alignment as LaTeX tables with chosen residues coloured, and returns
-C<output_tex_file>, printing C<wrote> and that file name to STDOUT, the name in
-black on cyan when STDOUT is a terminal. Protein names and residues are
-written so that LaTeX prints them as they are, C<_>, C<^>, C<{>, C<|>, C<< E<lt> >> and the
-like included.
+Shows an alignment in the terminal, as Stats::LikeR's C<view> shows a
+dataframe, and draws it as an SVG or writes it as LaTeX tables when asked, with
+chosen residues colored. It was C<clustal_view_residues> until 2026-11-16,
+which wrote only the LaTeX.
+
+ my %seqs = (a => 'MK-LV', b => 'M-QLV');
+ view_alignment(\%seqs, row_width => 3, track => 'a',
+     color_residues => { a => { 2 => 'red', 3 => [1, 0, 0] } });
+
+prints
+
+ # alignment: 2 sequences x 5 columns
+          1 3
+ a        MK-  2
+ a track  -2-
+ b        M-Q  2
+
+          4
+ a        LV   4
+ a track  3-
+ b        LV   4
+ # alignment: 2 sequences x 5 columns
+
+Each block of C<row_width> columns has its first and last alignment column
+above it, and each row ends with how many residues that sequence has had so
+far. Colored residues are in their colors when the output is a terminal. As
+in C<view>, the banner comes first and last, so that an alignment longer than
+the screen still says what it is where the scrolling stops.
+
+ view_alignment('orthologs.fa', output_file => 'orthologs.svg');      # an SVG too
+ view_alignment(msa_file => 'orthologs.fa', output_file => 'aln.tex'); # LaTeX tables
+ my $text = view_alignment(\%seqs, return_only => 1);                 # print nothing
+
+The alignment is the first argument, a hash ref of C<< name =E<gt> sequence >> or a FASTA
+file name, followed by C<< name =E<gt> value >> pairs. It can also be given as
+C<msa_file> among the pairs. If its sequences are all one length (such as the
+alignment C<plot_msa> keeps), it is shown as it is. If not, it is first aligned
+with Clustal Omega, which needs Alien::Bioinf; a FASTA file given is never
+written. C<view_alignment> always returns the text, as UTF-8 bytes and without
+the colors, whether or not it also prints it. When it writes a file, it then
+prints C<wrote> and that file name to STDOUT, the name in black on cyan when
+STDOUT is a terminal.
 
 =over
 
-=item * C<msa_file> (required): a FASTA file. If its sequences are all one length
-(such as the alignment C<plot_msa> keeps) it is shown as it is; if not, it is
-first aligned with Clustal Omega into a temporary file, and C<msa_file>
-itself is never written.
+=item * C<msa_file>: the FASTA file, when it is not given first.
 
-=item * C<output_tex_file> (required): the LaTeX file to write, meant to be
-C<\input> into a document whose preamble loads C<xcolor> (for the colours)
-and C<placeins> (for the C<\FloatBarrier> after each table).
+=item * C<output_file>: a file to write as well, whose name says what it is: a
+C<.svg> is drawn as the terminal shows the alignment, and a C<.tex> is written
+as LaTeX tables, to be C<\input> into a document whose preamble loads
+C<xcolor> (for the colors) and C<placeins> (for the C<\FloatBarrier> after each
+table). Any other ending dies.
 
-=item * C<color_residues>: C<< { protein =E<gt> { residue number =E<gt> colour } } >>, where
-residue numbers are 1-based and a colour is an xcolor name or
-C<[r, g, b]>; a coloured column is coloured in every protein.
+=item * C<title>: a line above the alignment in C<output_file>. The SVG draws it
+in bold above the first block, and widens the image when the title is wider
+than the alignment. The LaTeX writes it in bold above each table, with
+"(continued)" after the first table. It is plain text, written so that LaTeX
+prints it as it is, so C<_>, C<&> and C<%> need no escaping. The terminal and the
+text returned do not show it. Without an C<output_file> it dies, and so does
+a title that holds a control character, such as a newline. The default is no
+title.
 
-=item * C<track>: a protein that gets a row under it showing its coloured residue
+=item * C<color_residues>: C<< { protein =E<gt> { residue number =E<gt> color } } >>, where
+residue numbers are 1-based and a color is one of xcolor's 19 base colors
+(C<black>, C<blue>, C<brown>, C<cyan>, C<darkgray>, C<gray>, C<green>,
+C<lightgray>, C<lime>, C<magenta>, C<olive>, C<orange>, C<pink>, C<purple>, C<red>,
+C<teal>, C<violet>, C<white> and C<yellow>, with the RGB values xcolor 3.01
+gives them) or C<[r, g, b]>, each 0 to 1. A colored column is colored in every
+protein.
+
+=item * C<color>: 1 to put every residue on its own color, as C<plot_msa> colors it
+and as other alignment viewers do (default 0, which colors only
+C<color_residues>). See L</"Coloring every residue">.
+
+=item * C<track>: a protein that gets a row under it showing its colored residue
 numbers, each starting at its residue's column, or just after the number
 before it. A number that would run past the end of its block ends at the
 block's last column instead, and is left out only when it would then
@@ -6160,6 +6702,21 @@ overwrite the number before it.
 sorted, ignoring case).
 
 =item * C<row_width>: alignment columns per block (default 100).
+
+=item * C<to>: the filehandle to print to (default: the one C<select> names, which is
+STDOUT unless the program changed it).
+
+=item * C<return_only>: 1 to print nothing, not even the C<wrote> line, and only
+return the text (default 0).
+
+=item * C<threads>, C<clustal_args>: clustalo threads (default 1) and an array ref of
+further clustalo arguments, when the sequences have to be aligned.
+
+=back
+
+These four shape the LaTeX only, and die with any other C<output_file>:
+
+=over
 
 =item * C<split>: blocks per LaTeX table (default 4); further tables are captioned
 "(continued)".
@@ -6172,10 +6729,54 @@ sorted, ignoring case).
 =item * C<table_text_size>: the LaTeX size command put at the start of each table
 (default C<\footnotesize>).
 
-=item * C<threads>, C<clustal_args>: clustalo threads (default 1) and an array ref of
-further clustalo arguments, when C<msa_file> has to be aligned.
-
 =back
+
+In the terminal and the SVG, a tab, carriage return or newline in a name is
+shown as C<\t>, C<\r> or C<\n>, and any other control character as C<\x{..}>. A
+sequence that holds a control character dies. In LaTeX, names and residues are
+written so that LaTeX prints them as they are, C<_>, C<^>, C<{>, C<|>, C<< E<lt> >> and the
+like included.
+
+=head3 Coloring every residue
+
+With C<< color =E<gt> 1 >>, every residue is on the color C<plot_msa> draws it in:
+CIAlign's color-blind-safe "CBS" palette (Tumescheit, Firth & Brown, PeerJ
+2022), which gives residues of like chemistry one color (D and E, K and R, S
+and T, F and Y, N and Q, and L, V and I share theirs). The nucleotide palette is
+used instead when every character is a nucleotide code or a gap, as C<plot_msa>
+decides it, so a protein made only of letters that are also IUPAC nucleotide
+codes (such as C<ACGT>) is colored as DNA. Gaps and C<*> stay uncolored. Each
+residue's letter is white or black, whichever contrasts more with its color
+by WCAG 2.2's contrast ratio.
+
+The residues of C<color_residues> are then on their own colors instead, and
+are bold and underlined. In the terminal the colors are 24-bit ANSI
+backgrounds, which most terminals show; the text returned has none. In the SVG
+each run of a color is one rectangle under the row. In LaTeX each residue is a
+C<\colorbox>, and each table sets C<\fboxsep> to 0 so that the boxes meet.
+
+ view_alignment('orthologs.fa', color => 1, output_file => 'aln.svg');
+
+=head3 The SVG
+
+The SVG is written by this module, not by matplotlib, so an aligned input
+needs neither Alien::Bioinf nor Python. Its text stays text: a sequence can be
+selected and copied out of it, and searched for in a browser. Each
+residue is placed at the center of its own column, so the letters line up with
+each other and with their colors in any font and any viewer, Eye of GNOME
+(librsvg) included. Each colored residue has a
+tooltip that names its sequence, its residue number and its alignment column,
+such as C<a: K2, alignment column 2>.
+
+Its provenance is where Matplotlib::Simple puts it, as the only metadata in
+the file, in C<< E<lt>dc:creatorE<gt>E<lt>cc:AgentE<gt>E<lt>dc:titleE<gt> >>, on one line:
+
+ /home/me/view.pl called using "view_alignment" in .../Cn/Bioinf.pm version 0.02 by user me on host box (linux) with Perl 5.44.0 (/usr/bin/perl), written as SVG by .../Cn/Bioinf.pm itself; from the FASTA file /home/me/orthologs.fa (SHA-256 781f...) of 4 sequences; showing 4 of 4 sequences in blocks of 100 columns, tracking S.cerevisiae, coloring 3 columns
+
+When the sequences had to be aligned, the clause after "itself" says how, as
+C<plot_msa>'s does: the ungapped file clustalo read, the Clustal Omega and
+Alien::Bioinf versions, the alignment it wrote, each with its SHA-256, and the
+command. A LaTeX file has the same line as its first, a C<%> comment.
 
 =head1 Thanks
 
