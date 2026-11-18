@@ -544,11 +544,22 @@ running, the only Windows signal is a CPAN Testers report after the release.
 
 ## Releasing
 
-`sh dzil.sh` runs `md2pod.pl`, **commits every changed tracked file with
-`git commit -am`**, then runs `dzil clean` and `dzil build`, and fails if a
-build product reached the tarball. It stops before `dzil release`. So:
+`sh dzil.sh` (or `sh dzil.sh --trial`) works as `~/Scripts/stats/dzil.sh`
+does, since 2026-11-18. It runs `md2pod.pl` and checks that the newest section
+of `Changes` is `$VERSION`'s. It then **`git add`s the shipped paths, untracked
+files included, and commits every change with `git commit -am`, under the
+version as its message**. Then it runs `dzil clean` (which empties `.build/`,
+`test.all.perls.pl`'s logs included) and `dzil build`, fails if a build
+product reached the tarball, and **pushes**. It stops before `dzil release`
+(`dzil release --trial` for a trial). Until 2026-11-18 it committed tracked
+files alone, so the first build of 0.03 left out `t/popgen.t` and
+`t/admixture.t`, which were untracked. So:
 
-- Do not run `sh dzil.sh` without being asked, since it commits.
+- Do not run `sh dzil.sh` without being asked, since it commits and pushes.
+- A file that should not be committed must not sit untracked under `lib/`,
+  `t/` or `share/`, since `dzil.sh` adds everything there except `*.orig` and
+  `*.rej`. A new path that ships outside those must be added to its
+  `git add` line.
 - Never run `dzil release`. Do not commit or push unless asked.
 - Anything added to the root that should not ship must be kept out by the
   `[PruneFiles]` pattern in `dist.ini`; `[Git::GatherDir]` takes every tracked

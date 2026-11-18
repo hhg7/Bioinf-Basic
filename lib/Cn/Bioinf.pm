@@ -31,7 +31,7 @@ use File::Spec;
 use Sys::Hostname 'hostname';
 use Exporter 'import';
 use XSLoader;
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 our @EXPORT_OK = qw(
 	admixture assembly_stats back_transcribe blood_type complement concordance fasta2hash fasta_index
 	fasta_region find_orfs fst gc_content get_best_alignment_hit gwas hardy_weinberg hash2fasta_file hirisplex_genotypes
@@ -7732,7 +7732,7 @@ such as C<a: K2, alignment column 2>.
 Its provenance is where Matplotlib::Simple puts it, as the only metadata in
 the file, in C<< E<lt>dc:creatorE<gt>E<lt>cc:AgentE<gt>E<lt>dc:titleE<gt> >>, on one line:
 
- /home/me/view.pl called using "view_alignment" in .../Cn/Bioinf.pm version 0.02 by user me on host box (linux) with Perl 5.44.0 (/usr/bin/perl), written as SVG by .../Cn/Bioinf.pm itself; from the FASTA file /home/me/orthologs.fa (SHA-256 781f...) of 4 sequences; showing 4 of 4 sequences in blocks of 100 columns, tracking S.cerevisiae, coloring 3 columns
+ /home/me/view.pl called using "view_alignment" in .../Cn/Bioinf.pm version 0.03 by user me on host box (linux) with Perl 5.44.0 (/usr/bin/perl), written as SVG by .../Cn/Bioinf.pm itself; from the FASTA file /home/me/orthologs.fa (SHA-256 781f...) of 4 sequences; showing 4 of 4 sequences in blocks of 100 columns, tracking S.cerevisiae, coloring 3 columns
 
 When the sequences had to be aligned, the clause after "itself" says how, as
 C<plot_msa>'s does: the ungapped file clustalo read, the Clustal Omega and

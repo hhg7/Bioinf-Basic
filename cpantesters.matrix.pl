@@ -38,7 +38,7 @@
 # every root-level script, and Makefile.PL's libscan keeps it out of
 # `make install`), so it may use modern perl.
 
-use 5.036;
+use 5.044;
 use warnings FATAL => 'all';
 use Getopt::Long 'GetOptions';
 use HTTP::Tiny;
@@ -48,6 +48,8 @@ use File::Temp ();
 use File::Spec ();
 use FindBin ();
 use version ();
+use DDP;
+use Devel::Confess 'color';
 use Matplotlib::Simple 'colored_table';
 
 my %opt = (
@@ -127,7 +129,7 @@ colored_table(
 	set_figwidth  => 2.5 + 1.1 * $ncols,
 );
 say "wrote $output: $total reports, " . @rows . " perls x $ncols $opt{columns} values";
-
+p %grades;
 # The top-level "name = ..." of a dist.ini: the key before its first [section].
 sub dist_ini_name ($ini) {
 	open my $in, '<', $ini or die "no --dist given, and cannot read \"$ini\": $!\n";

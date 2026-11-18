@@ -1,5 +1,80 @@
 Revision history for Cn-Bioinf
 
+0.03 2026-11-18 CST
+
+ [Incompatible changes]
+
+ - clustal_view_residues is now view_alignment, and the old name is gone.
+   Its "output_tex_file" is now "output_file", whose ending says what is
+   written: a .tex is the LaTeX tables it wrote before, and a .svg is an
+   image of the alignment. view_alignment also prints the alignment in the
+   terminal, with colored residues in color, and returns that text; give
+   it "return_only => 1" to print nothing. The alignment may be given
+   first, as a hash ref of name => sequence or a FASTA file name, as well
+   as by "msa_file".
+
+ [New functions]
+
+ - pca, fst, hardy_weinberg, ld, ld_prune and gwas: a cohort's principal
+   components, Fst between populations, Hardy-Weinberg tests, linkage
+   disequilibrium and its pruning, and association tests. Each hands the
+   genotypes of the autosomes' biallelic variants to the PLINK 2 that
+   Alien::Bioinf installs, and returns what it computes as perl data.
+   t/popgen.t checks them against PLINK 2's own output, and skips without
+   Alien::Bioinf.
+
+ - admixture: each sample's ancestry as fractions of k populations, and
+   each population's allele frequencies, by ADMIXTURE's model, fitted in
+   XS from the best of 10 random starts. It needs no PLINK 2.
+   t/admixture.t checks it against ADMIXTURE 1.3.0's fit.
+
+ - 0.01-TRIAL and 0.02-TRIAL also shipped functions that their sections
+   here do not list: sex_check, parent, relatedness, concordance,
+   hirisplex_genotypes, trait_predict, blood_type, pdb_search and
+   pgs_score; the sequence functions complement, reverse_complement,
+   transcribe, back_transcribe, translate, translate_six_frames,
+   find_orfs, gc_content, kmer_count, assembly_stats, molecular_weight,
+   isoelectric_point, protein_charge, subseq and motif_search; and
+   fasta_index and fasta_region. README.md describes each.
+
+ [Bug fixes]
+
+ - blood_type called a sample RhD negative ("dd") when it had no usable
+   genotype at any RHD site: every call missing, not diploid, or with a DP
+   below min_depth. Such a call was counted as REF. That sample now has no
+   RhD type, and the reason says why. Two of t/blood.t's samples, BB and
+   OO, changed, and t/data/blood_reference.py, which shares no code with
+   the module, was changed to match and gives the same types.
+
+ - The command line recorded in the Creator of an image from plot_msa,
+   plot_phylo or msa_quality_table could not be pasted back into a shell
+   when an argument held an apostrophe, and left out an argument that was
+   empty. Both are now quoted.
+
+ [Speed and memory]
+
+ - fasta_index, and fasta_region on a FASTA with no .fai, read the file in
+   XS. A 305 MB FASTA was indexed in 0.10 s rather than 2.0 s, with the
+   same index.
+
+ - fasta_region keeps only the index entries its regions can name. For
+   two regions of a FASTA of 1,000,000 contigs it peaked at 13 MB rather
+   than 458 MB with a .fai, and at 194 MB rather than 468 MB without.
+
+ - pca, fst, hardy_weinberg, ld, ld_prune and gwas keep each variant's
+   columns in a temporary file rather than in perl, and pca, and fst
+   without "per_variant", keep none. On 1,000,000 variants of 60 samples,
+   pca peaked at 19 MB rather than 109 MB, and ld at 26 MB rather than
+   109 MB.
+
+ - pgs_score holds each row of the weights in less memory. A score of
+   1,000,000 variants peaked at 325 MB rather than 629 MB.
+
+ [Build]
+
+ - On a long-double perl, Makefile.PL link-tests logl() and sqrtl() for
+   admixture's fit, and uses log() and sqrt() where the libm lacks them.
+
 0.02 2026-11-11 CST
 
  [Test fixes]
