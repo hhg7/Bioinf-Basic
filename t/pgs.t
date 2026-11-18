@@ -129,6 +129,14 @@ my ($vcf_copy, $weights_copy) = (dclone($vcf), dclone($weights));
 score_is pgs_score(vcf => $vcf, weights => $weights), $plink, 'hoh and aoh';
 is_deeply [$vcf, $weights], [$vcf_copy, $weights_copy], 'the frames given are not changed';
 score_is pgs_score(vcf => $vcf, weights => $weights, match => 'position'), $plink, 'match => "position" is the default';
+# Weights that list every variant twice put two rows on every record, which
+# pgs_score hands PLINK 2's --score in two passes, since it takes one line for
+# each record: every count and score is twice PLINK 2's above, and every
+# average the same. (Since 2026-11-18 the passes are told apart by a bit for
+# each record, where a hash of every record's count did it before; the two
+# gave the same here.)
+my $twice = { map { my $s = $_; $s => { map { $_ => ($_ eq 'average' ? 1 : 2) * $plink->{$s}{$_} } @fields } } keys %{ $plink } };
+score_is pgs_score(vcf => $vcf, weights => [@{ $weights }, @{ $weights }]), $twice, 'every row of weights twice, scored in two passes';
 
 my @vcf_rows = map { $vcf->{$_} } sort keys %{ $vcf };
 my @vcf_cols = sort keys %{ $vcf_rows[0] };

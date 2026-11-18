@@ -68,9 +68,11 @@ come from a reference and are frozen".
 - Gene prediction and annotation.
 - RNA-seq quantification and differential expression.
 - Enrichment analysis against GO and KEGG.
-- Population genetics beyond kinship: PCA, admixture, Fst, Hardy-Weinberg
-  tests, linkage disequilibrium and GWAS association tests. PLINK 2, which
-  Alien::Bioinf already installs, does most of these.
+- Population genetics was done on 2026-11-17: `pca`, `fst`, `hardy_weinberg`,
+  `ld`, `ld_prune` and `gwas` by PLINK 2, and `admixture` in Bioinf.xs. Left:
+  X in all of them, which needs each sample's sex; `ld_prune`'s list applied
+  to the next function without a filtered VCF; ADMIXTURE's cross-validation
+  error for choosing K (`--cv`), and its standard errors by bootstrap.
 
 ### Structure and databases
 

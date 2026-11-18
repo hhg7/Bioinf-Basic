@@ -239,7 +239,114 @@ is_deeply [keys %{ get_best_alignment_hit(spew('untitled.json', '{"BlastOutput2"
 	}
 }
 
-#  sex_check 
+#  pca, fst, hardy_weinberg, ld, ld_prune and gwas
+
+# Added with them on 2026-11-17; t/popgen.t has their results. Every case here
+# dies before PLINK 2 is looked for, so they run where Alien::Bioinf is not
+# installed.
+{
+	my $v = { 'chr1:5:A:G' => { CHROM => 'chr1', POS => 5, REF => 'A', ALT => 'G', 'S.GT' => '0/1', 'T.GT' => '1/1' } };
+	my @p = ({ IID => 'S', y => '1.5', age => 30, site => 'north' }, { IID => 'T', y => '2.5', age => 40, site => 'south' });
+	my $head = "#IID\ty\tage\n";
+	my @cases = (
+		[pca => [], qr/^pca: needs "vcf"/, 'no vcf'],
+		[pca => [vcf => $v, pcs => 3], qr/^pca: doesn't know "pcs"; it takes memory, n, threads, vcf/, 'a misspelled option'],
+		[pca => [vcf => $v, n => 0], qr/^pca: "n" must be a whole number, 1 or more, not "0"/, 'n 0'],
+		[pca => [vcf => $v, n => '2.5'], qr/^pca: "n" must be a whole number, 1 or more, not "2\.5"/, 'n 2.5'],
+		[pca => [vcf => $v, threads => 0], qr/^pca: "threads" must be a whole number, 1 or more, not "0"/, 'threads 0'],
+		[pca => [vcf => $v, memory => 639], qr/^pca: "memory" must be 640 or more \(MiB\), the least PLINK 2 takes, not 639/, 'memory 639'],
+		[pca => [vcf => \'calls'], qr/^pca: "vcf" must be a VCF, BCF or PLINK 2 \.pgen file, or a data frame, not a SCALAR ref/, 'a scalar ref'],
+		[pca => [vcf => catfile($dir, 'none.vcf')], qr/^pca: "vcf" file ".+none\.vcf" doesn't exist or isn't readable/, 'a VCF that is not there'],
+		[pca => [vcf => spew('calls.tsv', '')], qr/^pca: "vcf" file .+calls\.tsv must end in \.vcf, \.vcf\.gz, \.vcf\.bgz, \.bcf or \.pgen/, 'a VCF named .tsv'],
+		[fst => [vcf => $v], qr/^fst: needs "populations"/, 'no populations'],
+		[fst => [vcf => $v, populations => { S => 'A', T => 'B' }, method => 'nei'], qr/^fst: "method" must be "hudson" or "wc", not "nei"/, 'method "nei"'],
+		[fst => [vcf => $v, populations => { S => 'A', T => 'B' }, per_variant => 2], qr/^fst: "per_variant" must be 0 or 1, not "2"/, 'per_variant 2'],
+		[fst => [vcf => $v, populations => [S => 'A']], qr/^fst: "populations" must be a hash ref of sample => population, not an ARRAY ref/, 'populations as an array'],
+		[fst => [vcf => $v, populations => {}], qr/^fst: "populations" names no population, and Fst is between two or more/, 'no populations named'],
+		[fst => [vcf => $v, populations => { S => 'A', T => 'A' }], qr/^fst: "populations" names one population, and Fst is between two or more/, 'one population'],
+		[fst => [vcf => $v, populations => { S => 'A', T => undef }], qr/^fst: "populations" gives "T" the population undef, where a population is a name/, 'an undef population'],
+		[fst => [vcf => $v, populations => { S => 'A', T => '' }], qr/^fst: "populations" gives "T" the population "", where a population is a name/, 'an empty population'],
+		[hardy_weinberg => [vcf => $v, midp => 'yes'], qr/^hardy_weinberg: "midp" must be 0 or 1, not "yes"/, 'midp "yes"'],
+		[ld => [vcf => $v, window_kb => 0], qr/^ld: "window_kb" must be a number above 0, not "0"/, 'window_kb 0'],
+		[ld => [vcf => $v, window => 0], qr/^ld: "window" must be a whole number, 1 or more, not "0"/, 'window 0'],
+		[ld => [vcf => $v, min_r2 => 1.5], qr/^ld: "min_r2" must be a number from 0 to 1, not "1\.5"/, 'min_r2 1.5'],
+		[ld => [vcf => $v, phased => 2], qr/^ld: "phased" must be 0 or 1, not "2"/, 'phased 2'],
+		[ld_prune => [vcf => $v, window => 50, window_kb => 200], qr/^ld_prune: the window is given either in variants, as "window", or in kb, as "window_kb", not both/,
+			'window and window_kb'],
+		[ld_prune => [vcf => $v, window => 1], qr/^ld_prune: "window" must be a whole number, 2 or more, not "1"/, 'window 1'],
+		[ld_prune => [vcf => $v, window_kb => '200kb'], qr/^ld_prune: "window_kb" must be a whole number, 1 or more, not "200kb"/, 'window_kb "200kb"'],
+		[ld_prune => [vcf => $v, step => 0], qr/^ld_prune: "step" must be a whole number, 1 or more, not "0"/, 'step 0'],
+		[ld_prune => [vcf => $v, window_kb => 200, step => 5], qr/^ld_prune: "step" must be 1 with "window_kb", as PLINK 2 has it, not 5/, 'step 5 with window_kb'],
+		[ld_prune => [vcf => $v, r2 => 1], qr/^ld_prune: "r2" must be a number above 0 and below 1, not "1"/, 'r2 1'],
+		[ld_prune => [vcf => $v, r2 => 0], qr/^ld_prune: "r2" must be a number above 0 and below 1, not "0"/, 'r2 0'],
+		[gwas => [vcf => $v, phenotypes => \@p], qr/^gwas: needs "phenotype"/, 'no phenotype'],
+		[gwas => [vcf => $v, phenotypes => \@p, phenotype => ['y']], qr/^gwas: "phenotype" must be the name of a column of "phenotypes", not an ARRAY ref/, 'a phenotype that is an array'],
+		[gwas => [vcf => $v, phenotypes => \@p, phenotype => 'y', covariates => 'age'],
+			qr/^gwas: "covariates" must be an array ref of names of columns of "phenotypes", not "age"/, 'covariates as a string'],
+		[gwas => [vcf => $v, phenotypes => \@p, phenotype => 'y', covariates => [undef]], qr/^gwas: "covariates" must name columns of "phenotypes", and one is undef/, 'an undef covariate'],
+		[gwas => [vcf => $v, phenotypes => \@p, phenotype => 'y', covariates => ['y']], qr/^gwas: "covariates" names "y", which is already the phenotype/, 'the phenotype as a covariate'],
+		[gwas => [vcf => $v, phenotypes => \@p, phenotype => 'y', covariates => [qw(age age)]], qr/^gwas: "covariates" names "age", which is already a covariate/, 'a covariate twice'],
+		[gwas => [vcf => $v, phenotypes => \@p, phenotype => 'y', model => 'probit'], qr/^gwas: "model" must be "linear" or "logistic", not "probit"/, 'model "probit"'],
+		[gwas => [vcf => $v, phenotypes => \@p, phenotype => 'y', threads => 'all'], qr/^gwas: "threads" must be a whole number, 1 or more, not "all"/, 'threads "all"'],
+		[gwas => [vcf => $v, phenotypes => catfile($dir, 'none.tsv'), phenotype => 'y'], qr/^gwas: "phenotypes" file ".+none\.tsv" doesn't exist or isn't readable/,
+			'a phenotype file that is not there'],
+		[gwas => [vcf => $v, phenotypes => spew('head.tsv', $head), phenotype => 'y'], qr/^gwas: "phenotypes" file .+head\.tsv has no rows/, 'a phenotype file of a header alone'],
+		[gwas => [vcf => $v, phenotypes => spew('short.tsv', "$head" . "S\t1\n"), phenotype => 'y'],
+			qr/^gwas: line 2 of "phenotypes" file .+short\.tsv has 2 fields, and its header 3/, 'a short line'],
+		[gwas => [vcf => $v, phenotypes => [{ sample => 'S', y => 1 }], phenotype => 'y'], qr/^gwas: "phenotypes" has no "IID" column, which names each row's sample/, 'no IID'],
+		[gwas => [vcf => $v, phenotypes => \@p, phenotype => 'height', covariates => ['weight']], qr/^gwas: "phenotypes" has no "height", "weight" columns/, 'columns it lacks'],
+		[gwas => [vcf => $v, phenotypes => [@p, $p[0]], phenotype => 'y'], qr/^gwas: "phenotypes" has two rows for "S"/, 'a sample twice'],
+		[gwas => [vcf => $v, phenotypes => [@p, { %{ $p[0] }, IID => '' }], phenotype => 'y'], qr/^gwas: "phenotypes" has a row whose IID is ""/, 'an empty IID'],
+		[gwas => [vcf => $v, phenotypes => \@p, phenotype => 'site'], qr/^gwas: phenotype "site" has "north" for "S", which isn't a number/, 'a phenotype of words'],
+		[gwas => [vcf => $v, phenotypes => [@p, { IID => 'U', y => [] }], phenotype => 'y'], qr/^gwas: column "y" of "phenotypes" has an ARRAY ref for "U"/, 'a reference as a value'],
+		[gwas => [vcf => $v, phenotypes => [{ IID => 'S', y => 1 }, { IID => 'T', y => 'NA' }], phenotype => 'y'],
+			qr/^gwas: phenotype "y" has only the value 1, and a test needs two or more/, 'a phenotype of one value'],
+		[gwas => [vcf => $v, phenotypes => [{ IID => 'S', y => '' }], phenotype => 'y'], qr/^gwas: phenotype "y" has no values, and a test needs two or more/, 'a phenotype of no values'],
+		[gwas => [vcf => $v, phenotypes => [map { { IID => $_, y => ord($_) - 82 } } qw(S T U)], phenotype => 'y', model => 'logistic'],
+			qr/^gwas: "model" is logistic, and phenotype "y" has the values 1, 2, 3, where a case-control phenotype has two: 1 and 2, or 0 and 1/,
+			'a logistic model of three values'],
+		[gwas => [vcf => $v, phenotypes => [map { { %{ $_ }, site => "$_->{site} side" } } @p], phenotype => 'y', covariates => ['site']],
+			qr/^gwas: column "site" of "phenotypes" has "north side" for "S", and a covariate's values have no whitespace/, 'a covariate with a space'],
+	);
+	foreach my $c (@cases) {
+		my ($sub, $args, $re, $name) = @{ $c };
+		no strict 'refs';
+		dies_like sub { &{"Cn::Bioinf::$sub"}(@{ $args }) }, $re, "$sub: $name dies";
+	}
+}
+
+
+#  admixture
+
+# Added with it on 2026-11-17; t/admixture.t has its fit.
+{
+	my $v = spew('admix.vcf', "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tA\tB\tC\n"
+		. "1\t5\t.\tA\tG\t.\t.\t.\tGT\t0/1\t1/1\t0/0\n1\t9\t.\tC\tT\t.\t.\t.\tGT\t0/0\t0/1\t1/1\n");
+	is scalar keys %{ admixture(vcf => $v, k => 2, starts => 1)->{samples} }, 3, 'admixture: the arguments below differ from these only where they say';
+	my @cases = (
+		[[k => 2], qr/^admixture: needs "vcf"/, 'no vcf'],
+		[[vcf => $v], qr/^admixture: needs "k"/, 'no k'],
+		[[vcf => $v, k => 2, K => 3], qr/^admixture: doesn't know "K"; it takes k, max_iterations, min_depth, seed, starts, tolerance, vcf/, 'a misspelled option'],
+		[[vcf => $v, k => 1], qr/^admixture: "k" must be a whole number, 2 or more, not "1"/, 'k 1'],
+		[[vcf => $v, k => '2.5'], qr/^admixture: "k" must be a whole number, 2 or more, not "2\.5"/, 'k 2.5'],
+		[[vcf => $v, k => 3], qr/^admixture: "vcf" .+admix\.vcf has 3 samples, and "k" is 3; a sample's ancestry is a share of the k populations, which needs more samples than k/,
+			'k as many as the samples'],
+		[[vcf => $v, k => 2, starts => 0], qr/^admixture: "starts" must be a whole number, 1 or more, not "0"/, 'starts 0'],
+		[[vcf => $v, k => 2, seed => -1], qr/^admixture: "seed" must be a whole number, 0 or more, not "-1"/, 'seed -1'],
+		[[vcf => $v, k => 2, tolerance => 0], qr/^admixture: "tolerance" must be a number above 0, not "0"/, 'tolerance 0'],
+		[[vcf => $v, k => 2, max_iterations => 0], qr/^admixture: "max_iterations" must be a whole number, 1 or more, not "0"/, 'max_iterations 0'],
+		[[vcf => $v, k => 2, min_depth => 'deep'], qr/^admixture: "min_depth" must be a whole number, 0 or more, not "deep"/, 'min_depth "deep"'],
+		[[vcf => [], k => 2], qr/^admixture: "vcf" must be a file name, not an ARRAY ref/, 'a vcf that is an array'],
+		[[vcf => catfile($dir, 'none.vcf'), k => 2], qr/^admixture: "vcf" file ".+none\.vcf" doesn't exist or isn't readable/, 'a VCF that is not there'],
+		[[vcf => spew('admix.txt', ''), k => 2], qr/^admixture: "vcf" file .+admix\.txt must end in \.vcf, \.vcf\.gz, \.vcf\.bgz or \.vcf\.bz2/, 'a VCF named .txt'],
+	);
+	foreach my $c (@cases) {
+		my ($args, $re, $name) = @{ $c };
+		dies_like sub { admixture(@{ $args }) }, $re, "admixture: $name dies";
+	}
+}
+
+#  sex_check
 
 # Added with sex_check on 2026-10-18; t/sex.t has the counts themselves, and the
 # errors that come from reading the file.

@@ -1,7 +1,9 @@
-/*FASTA reading and writing for Cn::Bioinf, the genotype counts behind its
+/*FASTA reading and writing for Cn::Bioinf, (since 2026-11-18) the scan behind
+fasta_index and fasta_region, the genotype counts behind its
 sex_check, parent, relatedness, concordance, hirisplex_genotypes and
-blood_type, and (since 2026-11-11) the codon and k-mer loops behind translate,
-translate_six_frames, find_orfs and kmer_count.
+blood_type, (since 2026-11-11) the codon and k-mer loops behind translate,
+translate_six_frames, find_orfs and kmer_count, and (since 2026-11-17) the
+genotypes and the fit behind admixture.
 
 fasta2hash() and hash2fasta_file() used to be pure perl in ~/Scripts/bioinf.pm:
 one readline, chomp and string append per line in, and one substr-sized SV per
@@ -20,7 +22,7 @@ perl side (lib/Cn/Bioinf.pm) opens and closes the files.
 
 Every croak() and warn() here starts with C99's __func__, so a message names
 the C function that raised it (read_fasta, write_fasta, translate_codons,
-kmer_tally, or one of the vcf_, sex_, parent_, rel_, conc_, hps_ and bt_ ones)
+kmer_tally, or one of the vcf_, sex_, parent_, rel_, conc_, hps_, bt_ and admix_ ones)
 and stays right if one is renamed.*/
 #define PERL_NO_GET_CONTEXT
 #include "EXTERN.h"
@@ -89,7 +91,7 @@ static bool any_space(const char *p, const char *e) {
 	const uint64_t ones = UINT64_C(0x0101010101010101), low7 = ones * 0x7f, high = ones * 0x80;
 	for (; e - p >= 8; p += 8) {
 		uint64_t w;
-		memcpy(&w, p, 8); // not a cast to uint64_t *, since SPARC and some ARM fault on an unaligned load
+		memcpy(&w, p, 8);// not a cast to uint64_t *, since SPARC and some ARM fault on an unaligned load
 		const uint64_t sp = w ^ (ones * ' ');
 		if ((sp - ones) & ~sp & high) return 1;
 		if ((ones * (127 + 14) - (w & low7)) & ~w & ((w & low7) + ones * (127 - 8)) & high) return TRUE;
@@ -162,12 +164,12 @@ read.*/
 static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 	HV *out = (HV*)sv_2mortal((SV*)newHV());
 	SV *hdr = sv_2mortal(newSVpvs(""));
-	SV *seq = NULL; // record being filled; NULL before the first defline and while skipping
-	bool have_def = FALSE, in_hdr = FALSE, bol = TRUE, done = FALSE, fed = FALSE; // fed: the '\n' that ends an unterminated last line has been supplied
-	UV line = 0; // 1-based, as $. would count it
+	SV *seq = NULL;// record being filled; NULL before the first defline and while skipping
+	bool have_def = FALSE, in_hdr = FALSE, bol = TRUE, done = FALSE, fed = FALSE;// fed: the '\n' that ends an unterminated last line has been supplied
+	UV line = 0;// 1-based, as $. would count it
 	char *restrict buf;
 	Newx(buf, FASTA_BLOCK, char);
-	SAVEFREEPV(buf); // freed at the caller's LEAVE, croak or not
+	SAVEFREEPV(buf);// freed at the caller's LEAVE, croak or not
 	while (!done) {
 		SSize_t n = PerlIO_read(fh, buf, FASTA_BLOCK);
 		if (n < 0 || PerlIO_error(fh)) croak("%s: error reading %s: %s", __func__, name, Strerror(errno));
@@ -207,7 +209,7 @@ static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 			if (seq) SvPV_shrink_to_cur(seq);
 			bool is_key = key && sv_eq(hdr, key);
 			if (key && !is_key && hv_exists_ent(out, key, 0)) {
-				done = 1; // the wanted record is complete
+				done = 1;// the wanted record is complete
 				break;
 			}
 			have_def = 1;
@@ -225,7 +227,7 @@ static SV *read_fasta(pTHX_ PerlIO *fh, SV *key, const char *name, AV *order) {
 	if (seq) SvPV_shrink_to_cur(seq);
 	if (!key) return newRV_inc((SV*)out);
 	HE *he = hv_fetch_ent(out, key, 0, 0);
-	return he ? SvREFCNT_inc_simple_NN(HeVAL(he)) : newSV(0); // not a copy: out is mortal, so this becomes the only reference
+	return he ? SvREFCNT_inc_simple_NN(HeVAL(he)) : newSV(0);// not a copy: out is mortal, so this becomes the only reference
 }
 
 /*The bytes of sv for a FASTA file, as print to a :raw handle writes them: a
@@ -253,7 +255,7 @@ sequence that is a reference, unless it is an object that overloads its own
 text. Up to 2026-11-10 all three were written, the reference as
 "ARRAY(0x5ea732db32c8)".*/
 static void write_fasta(pTHX_ PerlIO *fh, HV *h, AV *order, STRLEN width) {
-	SV *kbuf = sv_newmortal(), *sbuf = sv_newmortal(); // fasta_bytes()'s scratch copies, of the key and of its sequence
+	SV *kbuf = sv_newmortal(), *sbuf = sv_newmortal();// fasta_bytes()'s scratch copies, of the key and of its sequence
 	for (SSize_t i = 0; i <= av_len(order); i++) {
 		SV **k = av_fetch(order, i, 0);
 		if (!k || !SvOK(*k)) croak("%s: element %" IVdf " of the order is undefined", __func__, (IV)i);
@@ -280,8 +282,210 @@ static void write_fasta(pTHX_ PerlIO *fh, HV *h, AV *order, STRLEN width) {
 	if (PerlIO_error(fh)) croak("%s: error writing FASTA: %s", __func__, Strerror(errno));
 }
 
+/*Building a FASTA index, samtools's .fai, for fasta_index() and fasta_region()
+(since 2026-11-18; until then a perl readline loop in lib/Cn/Bioinf.pm's
+_fai_scan, whose rules these are, line for line).
+
+What is and is not a sequence that can be indexed is decided as fai_build_core()
+of htslib 1.25's faidx.c decides it, and t/faidx.t checks the result against
+that library's own expected index. A line is read in pieces, as the blocks
+cut it, and only its length, the bytes of it that C's isgraph() takes, and its
+first byte are kept; only a defline is copied, for its name. The index is
+built as the .fai's own text, which fasta_index() writes as it is, rather than
+as a perl array for each sequence. On a 305 MB file of 60 random sequences of
+5 Mb in 60-column lines (2026-11-18, in the page cache, best of three), the
+perl loop took 2.00 s and this 0.097 s, and the two indexes were identical.
+
+Nothing croaks here. A file that cannot be indexed sets error, and the line
+and name it concerns, for the perl side to word the message, which names the
+public function the file was given to; a read error is one too.*/
+
+/*Whether c is a base as fai_build_core() counts one: isgraph() in the C
+locale, 0x21 '!' to 0x7e '~', 94 values in all.*/
+#define FAI_GRAPH(c) ((unsigned char)((c) - 0x21) < 0x5e)
+
+/*How many bytes of p..e FAI_GRAPH() takes, 8 at a time.
+
+A word all of whose bytes are bases, which is nearly every word of a FASTA, is
+counted whole: no byte below 0x21 is hasless(w, 0x21) and no byte above 0x7e
+hasmore(w, 0x7e), from Sean Eron Anderson's "Bit Twiddling Hacks"
+(graphics.stanford.edu/~seander/bithacks.html, sections HasLessInWord and
+HasMoreInWord). Either may report a byte that is not there (a carry out of a
+byte of 0xff reaches the next), but never misses one, so a word they flag is
+merely counted a byte at a time. Counted a byte at a time throughout, the
+file above took 0.22 s (gcc -O2 does not vectorize the loop).*/
+static uint64_t fai_graph(const char *p, const char *e) {
+	const uint64_t ones = UINT64_C(0x0101010101010101), high = ones * 0x80;
+	uint64_t n = 0;
+	for (; e - p >= 8; p += 8) {
+		uint64_t w;
+		memcpy(&w, p, 8);// not a cast to uint64_t *, since SPARC and some ARM fault on an unaligned load
+		if (!(((w - ones * 0x21) & ~w & high) | (((w + ones) | w) & high))) {
+			n += 8;
+			continue;
+		}
+		for (unsigned short int k = 0; k < 8; k++) n += FAI_GRAPH(p[k]);
+	}
+	for (; p < e; p++) n += FAI_GRAPH(*p);
+	return n;
+}
+
+/*The state of one scan. Positions and lengths are uint64_t, not UV, since a
+32-bit perl (5.44.0-i686 here) has a 32-bit UV and a genome can be more than
+4 GiB; perl's own arithmetic, which the readline loop used, went on in an NV.*/
+typedef struct {
+	SV *text;// the index so far, as .fai lines
+	HV *seen;// the names indexed so far
+	AV *dups;// each name met again after its first sequence, for the perl side to warn of
+	SV *def;// the defline being read, its '>' gone
+	SV *name;// the sequence being read: its defline's first word
+	uint64_t pos;// bytes of the file before the line being read
+	uint64_t line;// lines begun, counted from 1 as $. counts them
+	uint64_t len;// bases of the sequence being read
+	uint64_t offset;// where its first base is, in bytes
+	uint64_t bases;// bases in each of its lines, from the first
+	uint64_t width;// bytes in each of its lines, line ending included
+	uint64_t ll;// bytes of the line being read so far, its '\n' left out
+	uint64_t cl;// those of them FAI_GRAPH() takes
+	char first;// the first byte of the line being read
+	bool started;// a line has been begun and not yet ended
+	bool named;// a defline has been read, so name is set
+	bool inside;// TRUE = the sequence's lines are being read; FALSE = they have ended, and only a blank line or a defline may follow
+	bool any;// the sequence has had a line, without which htslib does not count it as a sequence
+	const char *error;// NULL, or why the file can't be indexed: "read", "no_sequence", "before_defline", "after_short", "longer" or "none"
+	int read_errno;// errno when error is "read"; int, as C declares errno
+} fai_state;
+
+/*n as decimal digits onto sv. sv_catpvf()'s %" UVuf " cannot take a uint64_t
+on a perl whose UV is 32 bits.*/
+static void fai_cat_u64(pTHX_ SV *sv, uint64_t n) {
+	char digits[20];// UINT64_MAX has 20
+	unsigned short int k = 0;
+	do {
+		digits[k++] = (char)('0' + n % 10);
+		n /= 10;
+	} while (n);
+	while (k) sv_catpvn(sv, &digits[--k], 1);
+}
+
+/*n as a perl number: a UV where one holds it, and an NV, exact to 2^53, where
+it does not, as perl's own arithmetic would have it.*/
+static SV *fai_number(pTHX_ uint64_t n) {
+	return n <= (uint64_t)UV_MAX ? newSVuv((UV)n) : newSVnv((NV)n);
+}
+
+/*The sequence that has been read added to the index, or, when one of its name
+is there already, to s->dups alone, since the first is the one indexed.*/
+static void fai_add(pTHX_ fai_state *s) {
+	if (hv_exists_ent(s->seen, s->name, 0)) {
+		av_push(s->dups, newSVsv(s->name));
+		return;
+	}
+	(void)hv_store_ent(s->seen, s->name, newSV(0), 0);
+	sv_catsv(s->text, s->name);
+	const uint64_t field[4] = { s->len, s->offset, s->bases, s->width };
+	for (unsigned short int k = 0; k < 4; k++) {
+		sv_catpvs(s->text, "\t");
+		fai_cat_u64(aTHX_ s->text, field[k]);
+	}
+	sv_catpvs(s->text, "\n");
+}
+
+/*The line that has been read ended: by a '\n' when nl, and otherwise by the
+end of the file.*/
+static void fai_line(pTHX_ fai_state *s, bool nl) {
+	s->started = FALSE;
+	s->pos += s->ll + (nl ? 1 : 0);
+	if (s->first == '>') {
+		if (s->any) fai_add(aTHX_ s);
+		if (!nl) {
+			s->error = "no_sequence";
+			return;
+		}
+		/*the name is the defline's first word, after any space that follows the
+		'>'. FASTA_SPACE() is C's isspace() less the '\n' a defline cannot hold,
+		which is what fai_build_core() tests (state IN_NAME, in the htslib source
+		at ~/prog/htslib, 1.21-34-gb14fffb4, read on 2026-11-18); the perl loop's
+		\s left '\v' out of it before perl 5.18.*/
+		STRLEN dl;
+		const char *d = SvPV_const(s->def, dl), *de = d + dl;// not restrict: perl's buffer
+		while (d < de && FASTA_SPACE(*d)) d++;
+		const char *w = d;
+		while (w < de && !FASTA_SPACE(*w)) w++;
+		sv_setpvn(s->name, d, (STRLEN)(w - d));
+		s->named = TRUE;
+		s->len = s->bases = s->width = 0;
+		s->offset = s->pos;
+		s->inside = TRUE;
+		s->any = FALSE;
+	} else if (s->inside && nl && s->ll == 0) {
+		s->inside = FALSE;
+	} else if (!s->inside) {
+		if (nl && (s->ll == 0 || (s->ll == 1 && s->first == '\r'))) return;// a blank line, LF or CRLF
+		s->error = s->named ? "after_short" : "before_defline";
+	} else {
+		/*the line's bytes with its line feed, which htslib counts even for a
+		last line that has none*/
+		const uint64_t width = s->ll + 1;
+		s->any = TRUE;
+		s->len += s->cl;
+		if (s->width == 0) {
+			s->width = width;
+			s->bases = s->cl;
+		} else if (width < s->width) {
+			s->inside = FALSE;
+		} else if (width > s->width) {
+			s->error = "longer";
+		}
+	}
+}
+
+/*The FASTA fh scanned into s, whose text, seen, dups, def and name the caller
+makes. buf is FASTA_BLOCK bytes.*/
+static void fai_scan(pTHX_ PerlIO *fh, fai_state *s, char *restrict buf) {
+	for (;;) {
+		const SSize_t n = PerlIO_read(fh, buf, FASTA_BLOCK);
+		if (n < 0 || PerlIO_error(fh)) {
+			s->error = "read";
+			s->read_errno = errno;
+			return;
+		}
+		if (n == 0) break;
+		const char *p = buf, *end = buf + n;
+		while (p < end) {
+			if (!s->started) {
+				s->started = TRUE;
+				s->line++;
+				s->ll = s->cl = 0;
+				s->first = *p;
+				if (*p == '>') {
+					SvCUR_set(s->def, 0);
+					s->ll = 1;
+					p++;
+					continue;
+				}
+			}
+			const char *nl = (const char*)memchr(p, '\n', (size_t)(end - p));
+			const char *e = nl ? nl : end;
+			if (s->first == '>') sv_catpvn(s->def, p, (STRLEN)(e - p));
+			else s->cl += fai_graph(p, e);
+			s->ll += (uint64_t)(e - p);
+			if (!nl) break;
+			p = nl + 1;
+			fai_line(aTHX_ s, TRUE);
+			if (s->error) return;
+		}
+	}
+	if (s->started) {
+		fai_line(aTHX_ s, FALSE);
+		if (s->error) return;
+	}
+	if (!s->any) s->error = s->named ? "no_sequence" : "none";
+	else fai_add(aTHX_ s);
+}
+
 /*Reading a VCF, for sex_check(), parent(), relatedness(), concordance(),
-hirisplex_genotypes() and blood_type().
+hirisplex_genotypes(), blood_type() and admixture().
 
 The file is read by perl, which knows gzip and bzip2 through IO::Uncompress
 (linking zlib and libbz2 here would be a build dependency on every platform),
@@ -291,16 +495,16 @@ one line a block can end inside; what each caller keeps is its own.*/
 
 typedef struct vcf_reader vcf_reader;
 struct vcf_reader {
-	const char *name; // the file's, for messages
-	UV line;          // 1-based, as $. would count it
-	UV min_depth;     // a genotype whose DP is below this is not counted
-	size_t n;         // samples; 0 until the #CHROM line
-	bool header;      // the #CHROM line has been read
-	bool stop;        // set by on_header to read no further, as concordance() does to learn the truth's samples
-	HV *samples;      // sample => its 0-based column among the samples
-	AV *names;        // the samples in file order
-	void (*on_header)(pTHX_ vcf_reader *r);                               // once the #CHROM line has been read
-	void (*on_record)(pTHX_ vcf_reader *r, const char *p, const char *e); // each record, its '\n' gone
+	const char *name;// the file's, for messages
+	UV line;// 1-based, as $. would count it
+	UV min_depth;// a genotype whose DP is below this is not counted
+	size_t n;// samples; 0 until the #CHROM line
+	bool header;// the #CHROM line has been read
+	bool stop;// set by on_header to read no further, as concordance() does to learn the truth's samples
+	HV *samples;// sample => its 0-based column among the samples
+	AV *names;// the samples in file order
+	void (*on_header)(pTHX_ vcf_reader *r);// once the #CHROM line has been read
+	void (*on_record)(pTHX_ vcf_reader *r, const char *p, const char *e);// each record, its '\n' gone
 };
 
 /*The end of the tab-separated field that starts at p, before e.*/
@@ -330,7 +534,7 @@ static unsigned short int vcf_chrom(const char *p, const char *f) {
 	if (f - p > 3 && (p[0] == 'c' || p[0] == 'C') && (p[1] == 'h' || p[1] == 'H') && (p[2] == 'r' || p[2] == 'R')) p += 3;
 	if (f - p == 1 && (*p == 'X' || *p == 'x')) return 23;
 	if (f - p == 1 && (*p == 'Y' || *p == 'y')) return 24;
-	if (f - p < 1 || f - p > 2 || *p < '1' || *p > '9') return 0; // "01" is not chromosome 1
+	if (f - p < 1 || f - p > 2 || *p < '1' || *p > '9') return 0;// "01" is not chromosome 1
 	unsigned short int c = (unsigned short int)(*p - '0');
 	if (f - p == 2) {
 		if (p[1] < '0' || p[1] > '9') return 0;
@@ -429,11 +633,11 @@ static short int vcf_call(const vcf_reader *r, const char *p, const char *e, siz
 	while (s < sf) {
 		if (++*alleles > 2 || *s == '.') return VCF_NO_CALL;
 		if (*s == '1') ++*alt;
-		else if (*s != '0') return VCF_NO_CALL; // no other allele exists at a biallelic site
+		else if (*s != '0') return VCF_NO_CALL;// no other allele exists at a biallelic site
 		s++;
 		if (s < sf) {
 			if (*s != '/' && *s != '|') return VCF_NO_CALL;
-			if (++s == sf) return VCF_NO_CALL; // "1/": a separator with no allele after it is a call cut short, not a haploid one
+			if (++s == sf) return VCF_NO_CALL;// "1/": a separator with no allele after it is a call cut short, not a haploid one
 		}
 	}
 	return VCF_CALL;
@@ -470,7 +674,7 @@ and its place in names, and then the reader's on_header is called.*/
 static void vcf_header(pTHX_ vcf_reader *r, const char *p, const char *e) {
 	if (r->header) croak("%s: %s line %" UVuf " is a second #CHROM line", __func__, r->name, r->line);
 	r->header = 1;
-	unsigned short int col = 0; // columns passed; the samples start after the 9th, FORMAT
+	unsigned short int col = 0;// columns passed; the samples start after the 9th, FORMAT
 	while (p <= e && col < 9) {
 		p = vcf_field_end(p, e) + 1;
 		col++;
@@ -524,7 +728,7 @@ static void vcf_read(pTHX_ SV *next, vcf_reader *r) {
 	r->header = FALSE;
 	r->samples = (HV*)sv_2mortal((SV*)newHV());
 	r->names = (AV*)sv_2mortal((SV*)newAV());
-	SV *carry = sv_2mortal(newSVpvs("")); // the start of a line that the last block ended inside
+	SV *carry = sv_2mortal(newSVpvs(""));// the start of a line that the last block ended inside
 	/*The block, copied out of the scope that next's own temporaries are freed
 	with, so that whatever on_header saves for freeing (with SAVEFREEPV, say)
 	lands in the caller's scope rather than that one; from perl 5.20 the copy
@@ -544,7 +748,7 @@ static void vcf_read(pTHX_ SV *next, vcf_reader *r) {
 		LEAVE;
 		if (!SvOK(block) || r->stop) break;
 		STRLEN n;
-		const char *b = SvPV_const(block, n), *end = b + n; // not restrict: perl's buffer
+		const char *b = SvPV_const(block, n), *end = b + n;// not restrict: perl's buffer
 		while (b < end && !r->stop) {
 			const char *nl = (const char*)memchr(b, '\n', (size_t)(end - b));
 			if (!nl) {
@@ -592,9 +796,9 @@ enum { SEX_X_HET, SEX_X_HOM_ALT, SEX_X_HOM_REF, SEX_X_HAPLOID, SEX_X_MISSING, SE
 static const char *const SEX_NAME[SEX_FIELDS] = { "x_het", "x_hom_alt", "x_hom_ref", "x_haploid", "x_missing", "y_called", "y_alt" };
 
 typedef struct {
-	vcf_reader r; // first, so that the vcf_reader * that sex_header() and sex_record() are given is this
-	UV x_sites; // non-PAR X SNVs read, for perl to say when there were none
-	UV *count; // r.n * SEX_FIELDS counters, sample by sample
+	vcf_reader r;// first, so that the vcf_reader * that sex_header() and sex_record() are given is this
+	UV x_sites;// non-PAR X SNVs read, for perl to say when there were none
+	UV *count;// r.n * SEX_FIELDS counters, sample by sample
 } sex_tally;
 
 /*Whether pos on chrom (23 for X, 24 for Y) lies in a pseudo-autosomal
@@ -609,7 +813,7 @@ there are.*/
 static void sex_header(pTHX_ vcf_reader *r) {
 	sex_tally *t = (sex_tally*)r;
 	Newxz(t->count, r->n * SEX_FIELDS, UV);
-	SAVEFREEPV(t->count); // freed at the caller's LEAVE, croak or not; see vcf_read()'s block
+	SAVEFREEPV(t->count);// freed at the caller's LEAVE, croak or not; see vcf_read()'s block
 }
 
 /*Whether the record of chrom (23 for X, 24 for Y), whose columns vcf_columns()
@@ -646,7 +850,7 @@ static void sex_count(const vcf_reader *r, UV *c, unsigned short int chrom, cons
 static void sex_record(pTHX_ vcf_reader *r, const char *p, const char *e) {
 	sex_tally *t = (sex_tally*)r;
 	const char *f = vcf_field_end(p, e);
-	unsigned short int chrom = vcf_chrom(p, f); // only 23 (X) and 24 (Y) are read
+	unsigned short int chrom = vcf_chrom(p, f);// only 23 (X) and 24 (Y) are read
 	if (chrom != 23 && chrom != 24) return;
 	const char *col[9];
 	const char *format_end = vcf_columns(aTHX_ r, p, f, e, col);
@@ -667,7 +871,7 @@ as sample => hash of counts, in place of anything out held for it.*/
 static void sex_rows(pTHX_ HV *out, AV *names, const UV *count, size_t n, const char *name) {
 	for (size_t i = 0; i < n; i++) {
 		SV **sample = av_fetch(names, (SSize_t)i, 0);
-		if (!sample) croak("%s: sample %" UVuf " of %s has lost its name", __func__, (UV)i, name); // cannot happen: every sample read was pushed
+		if (!sample) croak("%s: sample %" UVuf " of %s has lost its name", __func__, (UV)i, name);// cannot happen: every sample read was pushed
 		HV *row = newHV();
 		for (unsigned short int k = 0; k < SEX_FIELDS; k++) (void)hv_store(row, SEX_NAME[k], (I32)strlen(SEX_NAME[k]), newSVuv(count[i * SEX_FIELDS + k]), 0);
 		(void)hv_store_ent(out, *sample, newRV_noinc((SV*)row), 0);
@@ -686,7 +890,7 @@ static HV *sex_tally_vcf(pTHX_ SV *next, const char *name, UV min_depth, UV *x_s
 	t.r.on_record = sex_record;
 	vcf_read(aTHX_ next, &t.r);
 	HV *out = t.r.samples;
-	sex_rows(aTHX_ out, t.r.names, t.count, t.r.n, name); // in place of the columns vcf_header() stored
+	sex_rows(aTHX_ out, t.r.names, t.count, t.r.n, name);// in place of the columns vcf_header() stored
 	*x_sites = t.x_sites;
 	*names = t.r.names;
 	return out;
@@ -728,7 +932,7 @@ more than one ALT, and code is the ALT count or PARENT_NONE.*/
 Renew() moves the array.*/
 typedef struct {
 	uint64_t *site;
-	size_t n, room; // sites used and allocated
+	size_t n, room;// sites used and allocated
 } parent_sites;
 
 static void parent_sites_free(pTHX_ void *p) {
@@ -738,11 +942,11 @@ static void parent_sites_free(pTHX_ void *p) {
 }
 
 typedef struct {
-	vcf_reader r;        // first, so that the vcf_reader * that the callbacks are given is this
-	SV *want[2];         // one VCF: the child's and the parent's sample names; unused for own VCFs
-	size_t col[2];       // one VCF: their columns among the samples
-	UV t[9];             // one VCF: t[3 * child + parent], sites by the two codes
-	parent_sites *sites; // own VCF: the file's sites
+	vcf_reader r;// first, so that the vcf_reader * that the callbacks are given is this
+	SV *want[2];// one VCF: the child's and the parent's sample names; unused for own VCFs
+	size_t col[2];// one VCF: their columns among the samples
+	UV t[9];// one VCF: t[3 * child + parent], sites by the two codes
+	parent_sites *sites;// own VCF: the file's sites
 } parent_reader;
 
 //The code of the call in the sample field p..e: its ALT count, or PARENT_NONE
@@ -777,7 +981,7 @@ static void parent_record_one(pTHX_ vcf_reader *r, const char *p, const char *e)
 	size_t gt, dp;
 	vcf_format(col[8], format_end, &gt, &dp);
 	if (gt == VCF_ABSENT) return;
-	unsigned short int code[2] = { PARENT_NONE, PARENT_NONE }; // the child's and the parent's
+	unsigned short int code[2] = { PARENT_NONE, PARENT_NONE };// the child's and the parent's
 	p = format_end + 1;
 	for (size_t i = 0; i < r->n; i++) {
 		const char *se = vcf_sample(aTHX_ r, p, e, i);
@@ -804,10 +1008,10 @@ static void parent_record_own(pTHX_ vcf_reader *r, const char *p, const char *e)
 	const char *col[9];
 	const char *format_end = vcf_columns(aTHX_ r, p, f, e, col);
 	if (!vcf_base(col[3], col[4] - 1)) return;
-	unsigned short int alt; // vcf_base_index()'s, or 4 for more than one ALT
+	unsigned short int alt;// vcf_base_index()'s, or 4 for more than one ALT
 	if (vcf_base(col[4], col[5] - 1)) alt = vcf_base_index(*col[4]);
 	else if (memchr(col[4], ',', (size_t)(col[5] - 1 - col[4]))) alt = 4;
-	else return; // an indel, or an ALT of "." or "<NON_REF>"
+	else return;// an indel, or an ALT of "." or "<NON_REF>"
 	UV pos = vcf_pos(aTHX_ r, col[1], col[2] - 1);
 	if (pos > UINT32_MAX) croak("%s: %s line %" UVuf " has POS %" UVuf ", beyond the 4294967295 that parent can compare", __func__, r->name, r->line, pos);
 	size_t gt, dp;
@@ -818,7 +1022,7 @@ static void parent_record_own(pTHX_ vcf_reader *r, const char *p, const char *e)
 	unsigned short int code = alt == 4 || gt == VCF_ABSENT ? PARENT_NONE : parent_code(r, p, se, gt, dp);
 	parent_sites *s = t->sites;
 	if (s->n == s->room) {
-		s->room = s->room ? 2 * s->room : 65536; // 512 KiB, a sixth of an exome's 280,000 records
+		s->room = s->room ? 2 * s->room : 65536;// 512 KiB, a sixth of an exome's 280,000 records
 		Renew(s->site, s->room, uint64_t);
 	}
 	s->site[s->n++] = (uint64_t)chrom << 39 | (uint64_t)pos << PARENT_POS_SHIFT | (uint64_t)vcf_base_index(*col[3]) << 5 | (uint64_t)alt << 2 | code;
@@ -833,7 +1037,7 @@ static int parent_cmp(const void *a, const void *b) {
 by t, whose name, min_depth and callbacks the caller has set, sorted.*/
 static parent_sites *parent_sites_read(pTHX_ parent_reader *t, SV *next) {
 	Newxz(t->sites, 1, parent_sites);
-	SAVEDESTRUCTOR_X(parent_sites_free, t->sites); // at the caller's LEAVE, croak or not
+	SAVEDESTRUCTOR_X(parent_sites_free, t->sites);// at the caller's LEAVE, croak or not
 	vcf_read(aTHX_ next, &t->r);
 	if (t->sites->n) qsort(t->sites->site, t->sites->n, sizeof *t->sites->site, parent_cmp);
 	return t->sites;
@@ -859,8 +1063,8 @@ static void parent_merge(const parent_sites *a, const parent_sites *b, UV *t, UV
 	size_t i = 0, j = 0;
 	while (i < a->n || j < b->n) {
 		const uint64_t pa = i < a->n ? a->site[i] >> PARENT_POS_SHIFT : UINT64_MAX, pb = j < b->n ? b->site[j] >> PARENT_POS_SHIFT : UINT64_MAX;
-		const uint64_t at = pa < pb ? pa : pb; // the position to compare
-		size_t na = 0, nb = 0;                 // its sites in each file
+		const uint64_t at = pa < pb ? pa : pb;// the position to compare
+		size_t na = 0, nb = 0;// its sites in each file
 		while (i + na < a->n && a->site[i + na] >> PARENT_POS_SHIFT == at) na++;
 		while (j + nb < b->n && b->site[j + nb] >> PARENT_POS_SHIFT == at) nb++;
 		const uint64_t ka = na ? a->site[i] : 0, kb = nb ? b->site[j] : 0;
@@ -870,7 +1074,7 @@ static void parent_merge(const parent_sites *a, const parent_sites *b, UV *t, UV
 		if (na && (PARENT_CODE(ka) == PARENT_NONE || PARENT_ALT(ka) == 4)) continue;
 		if (nb && (PARENT_CODE(kb) == PARENT_NONE || PARENT_ALT(kb) == 4)) continue;
 		if (na && nb && PARENT_ALLELES(ka) != PARENT_ALLELES(kb)) continue;
-		const unsigned short int c = na ? PARENT_CODE(ka) : 0, p = nb ? PARENT_CODE(kb) : 0; // a site absent from a file is hom-REF there
+		const unsigned short int c = na ? PARENT_CODE(ka) : 0, p = nb ? PARENT_CODE(kb) : 0;// a site absent from a file is hom-REF there
 		t[3 * c + p]++;
 		if (c || p) in[na && nb ? 0 : na ? 1 : 2]++;
 	}
@@ -925,11 +1129,11 @@ static unsigned short int rel_popcount(uint64_t w) {
 }
 
 typedef struct {
-	vcf_reader r;         // first, so that the vcf_reader * that the callbacks are given is this
-	uint64_t *plane;      // 3 words a sample: bit k of plane[3 * s + c] is set when sample s has c ALTs at the block's site k
-	unsigned short int k; // the block's sites so far, 0 to 63
-	UV *t;                // REL_T counters a pair
-	UV *sex;              // SEX_FIELDS counters a sample
+	vcf_reader r;// first, so that the vcf_reader * that the callbacks are given is this
+	uint64_t *plane;// 3 words a sample: bit k of plane[3 * s + c] is set when sample s has c ALTs at the block's site k
+	unsigned short int k;// the block's sites so far, 0 to 63
+	UV *t;// REL_T counters a pair
+	UV *sex;// SEX_FIELDS counters a sample
 } rel_reader;
 
 /*One VCF: its counters, once the #CHROM line has said how many samples there
@@ -939,7 +1143,7 @@ static void rel_header_one(pTHX_ vcf_reader *r) {
 	if (r->n < 2) croak("%s: %s has 1 sample, and relatedness compares two or more; give each person's VCF, as relatedness($file, $file2)", __func__, r->name);
 	size_t pairs = rel_pairs(aTHX_ r->n);
 	Newxz(t->plane, 3 * r->n, uint64_t);
-	SAVEFREEPV(t->plane); // these three at the caller's LEAVE, croak or not; see vcf_read()'s block
+	SAVEFREEPV(t->plane);// these three at the caller's LEAVE, croak or not; see vcf_read()'s block
 	Newxz(t->t, pairs * REL_T, UV);
 	SAVEFREEPV(t->t);
 	Newxz(t->sex, r->n * SEX_FIELDS, UV);
@@ -956,7 +1160,7 @@ static void rel_flush(rel_reader *t) {
 		const uint64_t a0 = pl[3 * i], a1 = pl[3 * i + 1], a2 = pl[3 * i + 2];
 		for (size_t j = i + 1; j < n; j++, c += REL_T) {
 			const uint64_t *b = pl + 3 * j;
-			c[0] += rel_popcount(a0 & b[1]); // c[3 * first + second - 1]
+			c[0] += rel_popcount(a0 & b[1]);// c[3 * first + second - 1]
 			c[1] += rel_popcount(a0 & b[2]);
 			c[2] += rel_popcount(a1 & b[0]);
 			c[3] += rel_popcount(a1 & b[1]);
@@ -1006,10 +1210,10 @@ static void rel_record_one(pTHX_ vcf_reader *r, const char *p, const char *e) {
 }
 
 typedef struct {
-	parent_reader p; // first, so that the vcf_reader * that the callbacks are given is this, and parent_record_own() can read it
-	UV *sex;         // the SEX_FIELDS counters of the file's one sample
-	HV *seen;        // every file's sample so far => that file's name
-	AV *names;       // every file's sample so far, in the files' order
+	parent_reader p;// first, so that the vcf_reader * that the callbacks are given is this, and parent_record_own() can read it
+	UV *sex;// the SEX_FIELDS counters of the file's one sample
+	HV *seen;// every file's sample so far => that file's name
+	AV *names;// every file's sample so far, in the files' order
 } rel_own_reader;
 
 /*Own VCF: one sample, or it isn't, and not one that an earlier file named.*/
@@ -1017,7 +1221,7 @@ static void rel_header_own(pTHX_ vcf_reader *r) {
 	rel_own_reader *t = (rel_own_reader*)r;
 	if (r->n != 1) croak("%s: %s has %" UVuf " samples, and each of several VCFs must have one; give a VCF of several samples alone, as relatedness($file)", __func__, r->name, (UV)r->n);
 	SV **sample = av_fetch(r->names, 0, 0);
-	if (!sample) croak("%s: the sample of %s has lost its name", __func__, r->name); // cannot happen: vcf_header() pushed it
+	if (!sample) croak("%s: the sample of %s has lost its name", __func__, r->name);// cannot happen: vcf_header() pushed it
 	HE *he = hv_fetch_ent(t->seen, *sample, 0, 0);
 	if (he) {
 		const char *first = SvPV_nolen(HeVAL(he)), *name = SvPV_nolen(*sample);
@@ -1059,11 +1263,11 @@ file's next site, which is n steps, and then counted for each file that
 carries the ALT there against every other file, so that a pair where both are
 hom-REF costs nothing.*/
 static void rel_merge(pTHX_ parent_sites *const *s, size_t n, UV *t) {
-	size_t *at, *carrier;      // each file's next site; the files that carry the ALT at this position
-	uint64_t *key;             // each file's site at this position, when REL_PRESENT
-	unsigned short int *state; // each file's REL_ABSENT, REL_PRESENT or REL_UNUSABLE at this position
+	size_t *at, *carrier;// each file's next site; the files that carry the ALT at this position
+	uint64_t *key;// each file's site at this position, when REL_PRESENT
+	unsigned short int *state;// each file's REL_ABSENT, REL_PRESENT or REL_UNUSABLE at this position
 	Newxz(at, n, size_t);
-	SAVEFREEPV(at); // these four at the caller's LEAVE, croak or not
+	SAVEFREEPV(at);// these four at the caller's LEAVE, croak or not
 	Newx(carrier, n, size_t);
 	SAVEFREEPV(carrier);
 	Newx(key, n, uint64_t);
@@ -1071,12 +1275,12 @@ static void rel_merge(pTHX_ parent_sites *const *s, size_t n, UV *t) {
 	Newx(state, n, unsigned short int);
 	SAVEFREEPV(state);
 	for (;;) {
-		uint64_t pos = UINT64_MAX; // the position to compare, as the sites' bits from PARENT_POS_SHIFT up
+		uint64_t pos = UINT64_MAX;// the position to compare, as the sites' bits from PARENT_POS_SHIFT up
 		for (size_t f = 0; f < n; f++) {
 			if (at[f] < s[f]->n && s[f]->site[at[f]] >> PARENT_POS_SHIFT < pos) pos = s[f]->site[at[f]] >> PARENT_POS_SHIFT;
 		}
 		if (pos == UINT64_MAX) break;
-		size_t m = 0; // carriers
+		size_t m = 0;// carriers
 		for (size_t f = 0; f < n; f++) {
 			size_t k = 0;
 			while (at[f] + k < s[f]->n && s[f]->site[at[f] + k] >> PARENT_POS_SHIFT == pos) k++;
@@ -1095,8 +1299,8 @@ static void rel_merge(pTHX_ parent_sites *const *s, size_t n, UV *t) {
 			for (size_t j = 0; j < n; j++) {
 				if (j == i || state[j] == REL_UNUSABLE) continue;
 				const bool both = state[j] == REL_PRESENT;
-				const unsigned short int cj = both ? PARENT_CODE(key[j]) : 0; // a site absent from a file is hom-REF there
-				if (cj && j < i) continue; // counted when j was the carrier
+				const unsigned short int cj = both ? PARENT_CODE(key[j]) : 0;// a site absent from a file is hom-REF there
+				if (cj && j < i) continue;// counted when j was the carrier
 				if (both && PARENT_ALLELES(key[i]) != PARENT_ALLELES(key[j])) continue;
 				UV *c = t + REL_T * (i < j ? rel_pair(n, i, j) : rel_pair(n, j, i));
 				c[i < j ? 3 * ci + cj - 1 : 3 * cj + ci - 1]++;
@@ -1231,39 +1435,39 @@ reference truth is a negative.*/
 bytes, two of which each test site keeps for each sample compared; conc_gt()
 dies on an allele above 65535, which no VCF of real data has.*/
 typedef struct {
-	uint16_t a, b;   // the alleles, in GT's order; b is 0 for a haploid call
-	unsigned char n; // 0 = no-call, 1 = haploid, 2 = diploid
-	bool phased;     // GT separated them with '|'
+	uint16_t a, b;// the alleles, in GT's order; b is 0 for a haploid call
+	unsigned char n;// 0 = no-call, 1 = haploid, 2 = diploid
+	bool phased;// GT separated them with '|'
 } conc_call;
 
 /*A site of the test.*/
 typedef struct {
-	uint64_t hash; // conc_hash()'s, of CHROM, POS, REF and ALT
+	uint64_t hash;// conc_hash()'s, of CHROM, POS, REF and ALT
 	UV pos;
-	size_t text;   // where its CHROM to ALT, as the test has them and ended by '\n', start in conc_store's text
-	bool found;    // the truth has it
+	size_t text;// where its CHROM to ALT, as the test has them and ended by '\n', start in conc_store's text
+	bool found;// the truth has it
 } conc_site;
 
 /*Everything the test's reading keeps and the truth's reading looks in, in a
 holder that the scope's destructor frees, since Renew() moves the arrays.*/
 typedef struct {
-	char *text;          // every site's CHROM to ALT, each ended by '\n'
+	char *text;// every site's CHROM to ALT, each ended by '\n'
 	size_t text_n, text_room;
 	conc_site *site;
-	size_t n, room;      // sites used and allocated
-	size_t *slot;        // an open-addressed table of the sites by hash: a site's index + 1, or 0 for an empty slot
-	size_t slots;        // 0, or a power of 2 at least twice n
-	conc_call *call;     // 2 * pairs a site: for each pair, the test's call and then the truth's
-	size_t *hit;         // the sites that one truth record matches
+	size_t n, room;// sites used and allocated
+	size_t *slot;// an open-addressed table of the sites by hash: a site's index + 1, or 0 for an empty slot
+	size_t slots;// 0, or a power of 2 at least twice n
+	conc_call *call;// 2 * pairs a site: for each pair, the test's call and then the truth's
+	size_t *hit;// the sites that one truth record matches
 	size_t hit_room;
-	conc_call *truth;    // a truth record's calls, one a pair
-	size_t pairs;        // samples compared
-	size_t *test_col;    // each pair's column among the test's samples
-	size_t *truth_col;   // and among the truth's
-	size_t *test_pair;   // each test column's pair + 1, or 0 when it is not compared
-	size_t *truth_pair;  // each truth column's pair + 1, or 0
-	size_t truth_n;      // the truth's samples, as read before the test
-	UV found;            // test sites that the truth has
+	conc_call *truth;// a truth record's calls, one a pair
+	size_t pairs;// samples compared
+	size_t *test_col;// each pair's column among the test's samples
+	size_t *truth_col;// and among the truth's
+	size_t *test_pair;// each test column's pair + 1, or 0 when it is not compared
+	size_t *truth_pair;// each truth column's pair + 1, or 0
+	size_t truth_n;// the truth's samples, as read before the test
+	UV found;// test sites that the truth has
 } conc_store;
 
 static void conc_store_free(pTHX_ void *p) {
@@ -1282,9 +1486,9 @@ static void conc_store_free(pTHX_ void *p) {
 }
 
 typedef struct {
-	vcf_reader r;     // first, so that the vcf_reader * that the callbacks are given is this
+	vcf_reader r;// first, so that the vcf_reader * that the callbacks are given is this
 	conc_store *s;
-	AV *truth_names;  // the test's reader: the truth's samples, in its order
+	AV *truth_names;// the test's reader: the truth's samples, in its order
 } conc_reader;
 
 /*CHROM p..f without a "chr" prefix, in any case, as vcf_chrom() drops it; the
@@ -1345,9 +1549,9 @@ static void conc_gt(pTHX_ const vcf_reader *r, const char *p, const char *e, siz
 	c->phased = FALSE;
 	const char *s, *sf;
 	if (gt == VCF_ABSENT || vcf_shallow(r, p, e, dp) || !vcf_subfield(p, e, gt, &s, &sf) || s == sf) return;
-	const char *g = s;  // GT, for messages
+	const char *g = s;// GT, for messages
 	UV allele[2] = { 0, 0 };
-	size_t n = 0;       // alleles
+	size_t n = 0;// alleles
 	bool missing = FALSE, phased = FALSE;
 	for (;;) {
 		UV v = 0;
@@ -1363,7 +1567,7 @@ static void conc_gt(pTHX_ const vcf_reader *r, const char *p, const char *e, siz
 					croak("%s: %s line %" UVuf " has GT \"%.*s\" for sample \"%s\", whose allele is beyond the 65535 that concordance can compare", __func__, r->name, r->line, (int)(sf - g), g, name ? SvPV_nolen(*name) : "");
 				}
 			}
-			if (s == d) break; // not an allele: said below
+			if (s == d) break;// not an allele: said below
 		}
 		if (n < 2) allele[n] = v;
 		n++;
@@ -1377,7 +1581,7 @@ static void conc_gt(pTHX_ const vcf_reader *r, const char *p, const char *e, siz
 		}
 		if (*s == '|') phased = TRUE;
 		else if (*s != '/') break;
-		if (++s == sf) break; // "0/"
+		if (++s == sf) break;// "0/"
 	}
 	SV **name = av_fetch(r->names, (SSize_t)i, 0);
 	croak("%s: %s line %" UVuf " has GT \"%.*s\" for sample \"%s\", which isn't a genotype", __func__, r->name, r->line, (int)(sf - g), g, name ? SvPV_nolen(*name) : "");
@@ -1404,13 +1608,13 @@ test's, by the script's assay_concordance(), in its order.*/
 static unsigned short int conc_kind(const conc_call *truth, const conc_call *test) {
 	const unsigned short int ct = conc_class(truth), cs = conc_class(test);
 	if (conc_same(truth, test)) return CONC_SAME[ct];
-	if (cs == CONC_NO_CALL) return CONC_LOST; // the truth is not, or the two would be the same
+	if (cs == CONC_NO_CALL) return CONC_LOST;// the truth is not, or the two would be the same
 	if (ct == CONC_NO_CALL) return CONC_GAINED;
 	if (ct == CONC_HOM_REF && cs == CONC_HAPLOID_REF) return CONC_DIPLOID_REF_TO_HAPLOID_REF;
 	if (ct == CONC_HAPLOID_REF && cs == CONC_HOM_REF) return CONC_HAPLOID_REF_TO_DIPLOID_REF;
 	if (ct == CONC_HOM_ALT && test->n == 1 && test->a == truth->a) return CONC_HOM_ALT_TO_DIPLOID_ALT;
 	if (cs == CONC_HOM_ALT && truth->n == 1 && truth->a == test->a) return CONC_HAPLOID_ALT_TO_HOM_ALT;
-	return (unsigned short int)CONC_DIFFERENT[ct][cs]; // never -1: those four pairs were taken above
+	return (unsigned short int)CONC_DIFFERENT[ct][cs];// never -1: those four pairs were taken above
 }
 
 /*Call c as GT would write it, a mortal: "." for a no-call.*/
@@ -1434,7 +1638,7 @@ static void conc_header_test(pTHX_ vcf_reader *r) {
 		s->pairs = 1;
 		s->test_pair[0] = s->truth_pair[0] = 1;
 	} else {
-		HV *truth = (HV*)sv_2mortal((SV*)newHV()); // the truth's sample => its column
+		HV *truth = (HV*)sv_2mortal((SV*)newHV());// the truth's sample => its column
 		for (size_t j = 0; j < s->truth_n; j++) {
 			SV **name = av_fetch(t->truth_names, (SSize_t)j, 0);
 			if (name) (void)hv_store_ent(truth, *name, newSVuv((UV)j), 0);
@@ -1465,7 +1669,7 @@ usemallocwrap (the default), where it died with "panic: memory wrap", naming
 nothing; on one built without, the calls were allocated too small.*/
 static void conc_grow(pTHX_ const vcf_reader *r, conc_store *s) {
 	if (s->n == s->room) {
-		const size_t room = s->room ? 2 * s->room : 1024; // small, since its calls are 12 bytes a pair each: 1,000 samples start at 12 MB
+		const size_t room = s->room ? 2 * s->room : 1024;// small, since its calls are 12 bytes a pair each: 1,000 samples start at 12 MB
 		if (room < s->room || room > ((size_t)-1 / sizeof(conc_call) / 2) / s->pairs)
 			croak("%s: %s has more sites of its %" UVuf " samples compared than this perl can hold (%" UVuf " already)", __func__, r->name, (UV)s->pairs, (UV)s->n);
 		s->room = room;
@@ -1497,10 +1701,10 @@ static void conc_record_test(pTHX_ vcf_reader *r, const char *p, const char *e) 
 	const char *chrom = conc_chrom(col[0], col[1] - 1);
 	site->hash = conc_hash(chrom, col[1] - 1, site->pos, col[3], col[4] - 1, col[4], col[5] - 1);
 	site->found = FALSE;
-	const size_t len = (size_t)(col[5] - p); // CHROM to ALT, and the tab after ALT, which becomes the '\n'
+	const size_t len = (size_t)(col[5] - p);// CHROM to ALT, and the tab after ALT, which becomes the '\n'
 	if (s->text_n + len > s->text_room) {
 		while (s->text_n + len > s->text_room) {
-			if (s->text_room > (size_t)-1 / 2) croak("%s: %s has more sites than this perl can hold (%" UVuf " already)", __func__, r->name, (UV)s->n); // doubling would wrap to 0, and loop for ever
+			if (s->text_room > (size_t)-1 / 2) croak("%s: %s has more sites than this perl can hold (%" UVuf " already)", __func__, r->name, (UV)s->n);// doubling would wrap to 0, and loop for ever
 			s->text_room = s->text_room ? 2 * s->text_room : 1 << 20;
 		}
 		Renew(s->text, s->text_room, char);
@@ -1513,7 +1717,7 @@ static void conc_record_test(pTHX_ vcf_reader *r, const char *p, const char *e) 
 	while (s->slot[at]) at = (at + 1) & (s->slots - 1);
 	s->slot[at] = ++s->n;
 	conc_call *call = s->call + (s->n - 1) * 2 * s->pairs;
-	Zero(call, 2 * s->pairs, conc_call); // the truth's calls stay no-calls unless it has the site
+	Zero(call, 2 * s->pairs, conc_call);// the truth's calls stay no-calls unless it has the site
 	size_t gt, dp;
 	vcf_format(col[8], format_end, &gt, &dp);
 	p = format_end + 1;
@@ -1536,7 +1740,7 @@ that it is. A site the truth lists twice gives the test its last calls, as the
 script's hash of the truth's sites did.*/
 static void conc_record_truth(pTHX_ vcf_reader *r, const char *p, const char *e) {
 	conc_store *s = ((conc_reader*)r)->s;
-	if (!s->slots) return; // the test has no sites
+	if (!s->slots) return;// the test has no sites
 	const char *f = vcf_field_end(p, e);
 	const char *col[9];
 	const char *format_end = vcf_columns(aTHX_ r, p, f, e, col);
@@ -1553,7 +1757,7 @@ static void conc_record_truth(pTHX_ vcf_reader *r, const char *p, const char *e)
 		if (!conc_eq(conc_chrom(fld[0], fld[1] - 1), fld[1] - 1, chrom, col[1] - 1) || !conc_eq(fld[3], fld[4] - 1, col[3], col[4] - 1)
 			|| !conc_eq(fld[4], fld[5] - 1, col[4], col[5] - 1)) continue;
 		if (hits == s->hit_room) {
-			s->hit_room = s->hit_room ? 2 * s->hit_room : 8; // a site the test lists more than once, which is rare
+			s->hit_room = s->hit_room ? 2 * s->hit_room : 8;// a site the test lists more than once, which is rare
 			Renew(s->hit, s->hit_room, size_t);
 		}
 		s->hit[hits++] = k;
@@ -1626,17 +1830,17 @@ static HV *conc_metrics(pTHX_ const UV *c) {
 and truth names, the sites s holds, and whether to list the discordant,
 gained and lost ones.*/
 static HV *conc_results(pTHX_ const conc_store *s, AV *test_names, AV *truth_names, bool discordances) {
-	UV *count; // CONC_KINDS a pair
+	UV *count;// CONC_KINDS a pair
 	Newxz(count, s->pairs * CONC_KINDS, UV);
 	SAVEFREEPV(count);
-	AV **list; // each pair's discordances, or NULL
+	AV **list;// each pair's discordances, or NULL
 	Newxz(list, s->pairs, AV*);
 	SAVEFREEPV(list);
 	for (size_t k = 0; k < s->pairs && discordances; k++) list[k] = (AV*)sv_2mortal((SV*)newAV());
 	for (size_t i = 0; i < s->n; i++) {
 		const conc_call *call = s->call + i * 2 * s->pairs;
 		const char *fld[6];
-		bool split = FALSE; // fld has been set
+		bool split = FALSE;// fld has been set
 		for (size_t k = 0; k < s->pairs; k++) {
 			const unsigned short int kind = conc_kind(call + 2 * k + 1, call + 2 * k);
 			count[k * CONC_KINDS + kind]++;
@@ -1660,7 +1864,7 @@ static HV *conc_results(pTHX_ const conc_store *s, AV *test_names, AV *truth_nam
 	HV *out = (HV*)sv_2mortal((SV*)newHV());
 	for (size_t k = 0; k < s->pairs; k++) {
 		SV **test = av_fetch(test_names, (SSize_t)s->test_col[k], 0), **truth = av_fetch(truth_names, (SSize_t)s->truth_col[k], 0);
-		if (!test || !truth) croak("%s: pair %" UVuf " has lost a sample's name", __func__, (UV)k); // cannot happen: both headers pushed every name
+		if (!test || !truth) croak("%s: pair %" UVuf " has lost a sample's name", __func__, (UV)k);// cannot happen: both headers pushed every name
 		const UV *c = count + k * CONC_KINDS;
 		HV *pair = newHV();
 		HV *counts = newHV();
@@ -1722,24 +1926,24 @@ enum {
 };
 
 typedef struct {
-	unsigned short int chrom; // vcf_chrom()'s numbering, 1 to 24; 0 when the panel gives no position
+	unsigned short int chrom;// vcf_chrom()'s numbering, 1 to 24; 0 when the panel gives no position
 	UV pos;
-	char allele;              // the base counted, or the base inserted when insertion is TRUE
-	bool insertion;           // TRUE = count the ALT that is REF with allele put in once, for the one marker of the panel that is an indel
-	size_t k;                 // the marker's place in the panel perl gave, which its genotypes are stored under
-	char id[HPS_ID];          // the marker's rs number, for matching by ID
+	char allele;// the base counted, or the base inserted when insertion is TRUE
+	bool insertion;// TRUE = count the ALT that is REF with allele put in once, for the one marker of the panel that is an indel
+	size_t k;// the marker's place in the panel perl gave, which its genotypes are stored under
+	char id[HPS_ID];// the marker's rs number, for matching by ID
 } hps_site;
 
 typedef struct {
-	vcf_reader r;        // first, so that the vcf_reader * hps_header() and hps_record() are given is this
-	hps_site *site;      // what is searched, sorted by chromosome and position, or by rs number when by_id
-	size_t entries;      // how many site's holds, which is more than sites when a marker is searched for under more than one rs number
-	size_t sites;        // markers in the panel, which is what each sample's genotypes are counted into
-	bool by_id;          // TRUE = match the ID column, FALSE = CHROM and POS
-	uint32_t chroms;     // bit c set for each chromosome c the panel uses, tested before POS is read
-	unsigned char *dose; // r.n * sites, sample-major: a count, or one of the codes above
-	bool *seen;          // one per marker: the file held a record for it
-	bool *carried;       // one per marker: a record of it held the counted allele among REF and the ALTs
+	vcf_reader r;// first, so that the vcf_reader * hps_header() and hps_record() are given is this
+	hps_site *site;// what is searched, sorted by chromosome and position, or by rs number when by_id
+	size_t entries;// how many site's holds, which is more than sites when a marker is searched for under more than one rs number
+	size_t sites;// markers in the panel, which is what each sample's genotypes are counted into
+	bool by_id;// TRUE = match the ID column, FALSE = CHROM and POS
+	uint32_t chroms;// bit c set for each chromosome c the panel uses, tested before POS is read
+	unsigned char *dose;// r.n * sites, sample-major: a count, or one of the codes above
+	bool *seen;// one per marker: the file held a record for it
+	bool *carried;// one per marker: a record of it held the counted allele among REF and the ALTs
 } hps_reader;
 
 /*Orders the panel by chromosome and position, for hps_find().*/
@@ -1777,7 +1981,7 @@ static const hps_site *hps_find_name(const hps_reader *t, const char *p, const c
 		size_t mid = lo + (hi - lo) / 2;
 		const hps_site *s = t->site + mid;
 		int c = strncmp(s->id, p, n);
-		if (c == 0 && s->id[n] != '\0') c = 1; // s->id runs on where p..f has ended, so it sorts after
+		if (c == 0 && s->id[n] != '\0') c = 1;// s->id runs on where p..f has ended, so it sorts after
 		if (c < 0) lo = mid + 1;
 		else if (c == 0) return s;
 		else hi = mid;
@@ -1807,7 +2011,7 @@ ALT. An MNV or a symbolic ALT such as <INS> fails it.*/
 static bool hps_inserts(char base, const char *r, const char *re, const char *a, const char *ae) {
 	const size_t rl = (size_t)(re - r);
 	if ((size_t)(ae - a) != rl + 1) return FALSE;
-	size_t i = 0; // the first place ALT differs from REF, read after the loop
+	size_t i = 0;// the first place ALT differs from REF, read after the loop
 	while (i < rl && toUPPER(r[i]) == toUPPER(a[i])) i++;
 	if (toUPPER(a[i]) != toUPPER(base)) return FALSE;
 	for (size_t j = i; j < rl; j++) {
@@ -1827,7 +2031,7 @@ static short int hps_allele(const hps_site *s, const char *ref, const char *ref_
 		const char *c = (const char*)memchr(q, ',', (size_t)(alt_end - q));
 		const char *ce = c ? c : alt_end;
 		if (s->insertion ? hps_inserts(s->allele, ref, ref_end, q, ce) : (ce - q == 1 && toUPPER(*q) == toUPPER(s->allele))) return i;
-		if (i == 127) break; // a short int holds no more, and no record of these markers has so many ALTs
+		if (i == 127) break;// a short int holds no more, and no record of these markers has so many ALTs
 		q = ce + 1;
 	}
 	return -1;
@@ -1844,7 +2048,7 @@ static unsigned char hps_dose(const vcf_reader *r, const char *p, const char *e,
 	if (gt == VCF_ABSENT || !vcf_subfield(p, e, gt, &s, &sf) || s == sf) return HPS_NO_CALL;
 	unsigned short int alleles = 0, carried = 0;
 	while (s < sf) {
-		if (*s < '0' || *s > '9') return HPS_NO_CALL; // missing ("."), or a separator where an allele belongs
+		if (*s < '0' || *s > '9') return HPS_NO_CALL;// missing ("."), or a separator where an allele belongs
 		UV a = 0;
 		for (; s < sf && *s >= '0' && *s <= '9'; s++) {
 			if (a > (UV_MAX - 9) / 10) return HPS_NO_CALL;
@@ -1854,7 +2058,7 @@ static unsigned char hps_dose(const vcf_reader *r, const char *p, const char *e,
 		if (idx >= 0 && a == (UV)idx) carried++;
 		if (s < sf) {
 			if (*s != '/' && *s != '|') return HPS_NO_CALL;
-			if (++s == sf) return HPS_NO_CALL; // a separator with no allele after it
+			if (++s == sf) return HPS_NO_CALL;// a separator with no allele after it
 		}
 	}
 	if (alleles != 2) return HPS_NO_CALL;
@@ -1864,7 +2068,7 @@ static unsigned char hps_dose(const vcf_reader *r, const char *p, const char *e,
 static void hps_header(pTHX_ vcf_reader *r) {
 	hps_reader *t = (hps_reader*)r;
 	Newx(t->dose, r->n * t->sites, unsigned char);
-	SAVEFREEPV(t->dose); // freed at the caller's LEAVE, croak or not; see vcf_read()'s block
+	SAVEFREEPV(t->dose);// freed at the caller's LEAVE, croak or not; see vcf_read()'s block
 	memset(t->dose, HPS_ABSENT, r->n * t->sites);
 	Newxz(t->seen, t->sites, bool);
 	SAVEFREEPV(t->seen);
@@ -1894,7 +2098,7 @@ static void hps_record(pTHX_ vcf_reader *r, const char *p, const char *e) {
 	const char *col[9];
 	const char *format_end = vcf_columns(aTHX_ r, p, f, e, col);
 	const char *ref = col[3], *ref_end = col[4] - 1;
-	if (!s->insertion && ref_end - ref != 1) return; // some other variant sharing the marker's position
+	if (!s->insertion && ref_end - ref != 1) return;// some other variant sharing the marker's position
 	short int idx = hps_allele(s, ref, ref_end, col[4], col[5] - 1);
 	// A site split into one record per ALT reaches here once for each, and only
 	// the record that carries the counted allele says anything about it; the
@@ -1977,14 +2181,14 @@ static HV *hps_dosage_vcf(pTHX_ SV *next, const char *name, UV min_depth, AV *pa
 	HV *out = t.r.samples;
 	for (size_t i = 0; i < t.r.n; i++) {
 		SV **sample = av_fetch(t.r.names, (SSize_t)i, 0);
-		if (!sample) croak("%s: sample %" UVuf " of %s has lost its name", __func__, (UV)i, name); // cannot happen: every sample read was pushed
+		if (!sample) croak("%s: sample %" UVuf " of %s has lost its name", __func__, (UV)i, name);// cannot happen: every sample read was pushed
 		AV *row = newAV();
 		av_extend(row, (SSize_t)t.sites - 1);
 		for (size_t k = 0; k < t.sites; k++) {
 			unsigned char d = t.dose[i * t.sites + k];
 			av_push(row, d <= 2 ? newSVuv(d) : newSV(0));
 		}
-		(void)hv_store_ent(out, *sample, newRV_noinc((SV*)row), 0); // in place of the column vcf_header() stored
+		(void)hv_store_ent(out, *sample, newRV_noinc((SV*)row), 0);// in place of the column vcf_header() stored
 	}
 	AV *was = newAV();
 	av_extend(was, (SSize_t)t.sites - 1);
@@ -2020,20 +2224,20 @@ What is kept is hps_reader's byte a sample a marker and one more byte a
 sample for the deletion.*/
 
 typedef struct {
-	hps_reader h;             // first, so that the vcf_reader * bt_header() and bt_record() are given is this, and is what hps_record() takes
-	unsigned short int chrom; // the gene's chromosome, in vcf_chrom()'s numbering
-	UV start, end;            // the gene, 1-based and inclusive, which a deletion has to cover
-	uint32_t chroms;          // bit c set for each chromosome c that a marker or the gene is on; a record of any other is read no further than CHROM
-	uint32_t seen;            // bit c set once a record of chromosome c has been read
-	uint32_t longer;          // bit c set once a record of chromosome c had a REF or an ALT longer than one base
-	unsigned char *deleted;   // one per sample: how many copies of a deletion covering the gene it has, 0 to 2, or HPS_ABSENT or HPS_NO_CALL
+	hps_reader h;// first, so that the vcf_reader * bt_header() and bt_record() are given is this, and is what hps_record() takes
+	unsigned short int chrom;// the gene's chromosome, in vcf_chrom()'s numbering
+	UV start, end;// the gene, 1-based and inclusive, which a deletion has to cover
+	uint32_t chroms;// bit c set for each chromosome c that a marker or the gene is on; a record of any other is read no further than CHROM
+	uint32_t seen;// bit c set once a record of chromosome c has been read
+	uint32_t longer;// bit c set once a record of chromosome c had a REF or an ALT longer than one base
+	unsigned char *deleted;// one per sample: how many copies of a deletion covering the gene it has, 0 to 2, or HPS_ABSENT or HPS_NO_CALL
 } bt_reader;
 
 static void bt_header(pTHX_ vcf_reader *r) {
 	bt_reader *t = (bt_reader*)r;
 	hps_header(aTHX_ r);
 	Newx(t->deleted, r->n, unsigned char);
-	SAVEFREEPV(t->deleted); // freed at the caller's LEAVE, croak or not; see vcf_read()'s block
+	SAVEFREEPV(t->deleted);// freed at the caller's LEAVE, croak or not; see vcf_read()'s block
 	memset(t->deleted, HPS_ABSENT, r->n);
 }
 
@@ -2059,7 +2263,7 @@ static short int bt_deletion(const char *p, const char *e) {
 		const char *ce = c ? c : e;
 		const size_t n = (size_t)(ce - q);
 		if ((n == 5 && (memcmp(q, "<CN0>", 5) == 0 || memcmp(q, "<DEL>", 5) == 0)) || (n > 5 && memcmp(q, "<DEL:", 5) == 0)) return i;
-		if (!c || i == 127) break; // a short int holds no more, and no record has so many ALTs
+		if (!c || i == 127) break;// a short int holds no more, and no record has so many ALTs
 		q = ce + 1;
 	}
 	return -1;
@@ -2097,7 +2301,7 @@ static void bt_record(pTHX_ vcf_reader *r, const char *p, const char *e) {
 	const char *f = vcf_field_end(p, e);
 	const unsigned short int chrom = vcf_chrom(p, f);
 	if (chrom == 0) return;
-	const uint32_t bit = (uint32_t)1 << chrom; // chrom is 24 at most
+	const uint32_t bit = (uint32_t)1 << chrom;// chrom is 24 at most
 	if (!(t->chroms & bit)) return;
 	t->seen |= bit;
 	const char *col[9];
@@ -2112,7 +2316,7 @@ static void bt_record(pTHX_ vcf_reader *r, const char *p, const char *e) {
 	const char *info = col[7], *info_end = col[8] - 1;
 	UV end = 0, len = 0;
 	if (!bt_info(info, info_end, "END=", &end) && bt_info(info, info_end, "SVLEN=", &len)) end = pos + len;
-	if (pos > t->start || end < t->end) return; // some other deletion, which leaves part of the gene
+	if (pos > t->start || end < t->end) return;// some other deletion, which leaves part of the gene
 	size_t gt, dp;
 	vcf_format(col[8], format_end, &gt, &dp);
 	p = format_end + 1;
@@ -2154,14 +2358,14 @@ static HV *bt_tally_vcf(pTHX_ SV *next, const char *name, UV min_depth, AV *pane
 	av_extend(lost, (SSize_t)t.h.r.n - 1);
 	for (size_t i = 0; i < t.h.r.n; i++) {
 		SV **sample = av_fetch(t.h.r.names, (SSize_t)i, 0);
-		if (!sample) croak("%s: sample %" UVuf " of %s has lost its name", __func__, (UV)i, name); // cannot happen: every sample read was pushed
+		if (!sample) croak("%s: sample %" UVuf " of %s has lost its name", __func__, (UV)i, name);// cannot happen: every sample read was pushed
 		AV *row = newAV();
 		av_extend(row, (SSize_t)t.h.sites - 1);
 		for (size_t k = 0; k < t.h.sites; k++) {
 			const unsigned char d = t.h.dose[i * t.h.sites + k];
 			av_push(row, d <= 2 ? newSVuv(d) : newSV(0));
 		}
-		(void)hv_store_ent(out, *sample, newRV_noinc((SV*)row), 0); // in place of the column vcf_header() stored
+		(void)hv_store_ent(out, *sample, newRV_noinc((SV*)row), 0);// in place of the column vcf_header() stored
 		av_push(lost, t.deleted[i] <= 2 ? newSVuv(t.deleted[i]) : newSV(0));
 	}
 	AV *was = newAV();
@@ -2198,16 +2402,16 @@ static unsigned char nt_set(char c) {
 		case 'C': case 'c': return 2;
 		case 'A': case 'a': return 4;
 		case 'G': case 'g': return 8;
-		case 'Y': case 'y': return 1 | 2; // C or T
-		case 'W': case 'w': return 1 | 4; // A or T
-		case 'K': case 'k': return 1 | 8; // G or T
-		case 'M': case 'm': return 2 | 4; // A or C
-		case 'S': case 's': return 2 | 8; // C or G
-		case 'R': case 'r': return 4 | 8; // A or G
-		case 'H': case 'h': return 1 | 2 | 4; // not G
-		case 'B': case 'b': return 1 | 2 | 8; // not A
-		case 'D': case 'd': return 1 | 4 | 8; // not C
-		case 'V': case 'v': return 2 | 4 | 8; // not T
+		case 'Y': case 'y': return 1 | 2;// C or T
+		case 'W': case 'w': return 1 | 4;// A or T
+		case 'K': case 'k': return 1 | 8;// G or T
+		case 'M': case 'm': return 2 | 4;// A or C
+		case 'S': case 's': return 2 | 8;// C or G
+		case 'R': case 'r': return 4 | 8;// A or G
+		case 'H': case 'h': return 1 | 2 | 4;// not G
+		case 'B': case 'b': return 1 | 2 | 8;// not A
+		case 'D': case 'd': return 1 | 4 | 8;// not C
+		case 'V': case 'v': return 2 | 4 | 8;// not T
 		case 'N': case 'n': return 1 | 2 | 4 | 8;
 		default: return 0;
 	}
@@ -2235,8 +2439,8 @@ its extended_protein_values that stand for two amino acids, and X is its
 pos_stop.*/
 static char codon_letter(const char *code, unsigned char s1, unsigned char s2, unsigned char s3) {
 	if (NT_ONE(s1) && NT_ONE(s2) && NT_ONE(s3)) return code[16 * NT_INDEX(s1) + 4 * NT_INDEX(s2) + NT_INDEX(s3)];
-	uint64_t seen = 0; // AA_BIT() of every letter the codon could be
-	char last = 'X'; // one of those letters, which is the answer when there is only one
+	uint64_t seen = 0;// AA_BIT() of every letter the codon could be
+	char last = 'X';// one of those letters, which is the answer when there is only one
 	for (unsigned short int i = 0; i < 4; i++) {
 		if (!(s1 >> i & 1)) continue;
 		for (unsigned short int j = 0; j < 4; j++) {
@@ -2264,17 +2468,17 @@ A codon with any other letter that is not a nucleotide's dies, and names the
 codon. The SV is mortal so that dying then does not leak it.*/
 static SV *translate_codons(pTHX_ SV *seq, SV *code_sv, char stop_symbol, bool to_stop, const char *gap) {
 	STRLEN code_len, len;
-	const char *code = SvPV_const(code_sv, code_len); // not restrict: perl's buffer
+	const char *code = SvPV_const(code_sv, code_len);// not restrict: perl's buffer
 	if (code_len != 64) croak("%s: a genetic code is 64 letters, not %" UVuf, __func__, (UV)code_len);
 	for (unsigned short int i = 0; i < 64; i++) {
 		if (code[i] != '*' && !isUPPER(code[i])) croak("%s: letter %" UVuf " of the genetic code \"%s\" is neither a capital letter nor *", __func__, (UV)i + 1, code);
 	}
-	const char *p = SvPV_const(seq, len); // not restrict: perl's buffer
+	const char *p = SvPV_const(seq, len);// not restrict: perl's buffer
 	const size_t codons = len / 3;
 	SV *out = sv_2mortal(newSV(codons ? codons : 1));
 	SvPOK_only(out);
 	char *o = SvPVX(out);
-	size_t n = 0; // letters written, which is read after the loop
+	size_t n = 0;// letters written, which is read after the loop
 	for (size_t i = 0; i < codons; i++) {
 		const char *c = p + 3 * i;
 		const unsigned char s1 = nt_set(c[0]), s2 = nt_set(c[1]), s3 = nt_set(c[2]);
@@ -2308,19 +2512,278 @@ above 255 itself. A hash key's length is an I32, and a negative one means a
 UTF-8 key, so a k beyond I32_MAX dies; perl refuses it first.*/
 static HV *kmer_tally(pTHX_ SV *seq, UV k, UV step) {
 	STRLEN len;
-	const char *p = SvPV_const(seq, len); // not restrict: perl's buffer
+	const char *p = SvPV_const(seq, len);// not restrict: perl's buffer
 	HV *h = (HV*)sv_2mortal((SV*)newHV());
 	if (k > (UV)I32_MAX) croak("%s: k is %" UVuf ", and a hash key can be no longer than %" IVdf, __func__, k, (IV)I32_MAX);
-	if (step == 0) croak("%s: a step of 0 would count the first k-mer for ever", __func__); // cannot happen: perl passes 1 or k
+	if (step == 0) croak("%s: a step of 0 would count the first k-mer for ever", __func__);// cannot happen: perl passes 1 or k
 	if (k == 0 || k > len) return h;
-	const size_t last = len - (size_t)k; // where the last k-mer starts
+	const size_t last = len - (size_t)k;// where the last k-mer starts
 	for (size_t i = 0; i <= last; i += (size_t)step) {
 		SV **count = hv_fetch(h, p + i, (I32)k, 1);
-		if (!count) croak("%s: couldn't count the k-mer at %" UVuf, __func__, (UV)i); // cannot happen: an lvalue fetch from a plain hash
+		if (!count) croak("%s: couldn't count the k-mer at %" UVuf, __func__, (UV)i);// cannot happen: an lvalue fetch from a plain hash
 		sv_setuv(*count, SvOK(*count) ? SvUV(*count) + 1 : 1);
-		if (step > last - i) break; // i + step would pass the end, and could wrap
+		if (step > last - i) break;// i + step would pass the end, and could wrap
 	}
 	return h;
+}
+
+/*Width-correct libm for NV, behind admixture()'s fit.
+
+This is the macro scheme of ~/Scripts/stats/LikeR.xs, cut down to the two
+functions the fit calls, log() and sqrt(), where LikeR.xs defines thirty:
+copying the rest would only be unused code. C's log() and sqrt() take a double,
+so on a long-double or __float128 perl an NV would be computed at a double's
+precision; the macros paste on the suffix for the width NV is. Makefile.PL
+link-tests logl() and sqrtl() on a long-double perl and defines
+BIOINF_HAVE_LONG_DOUBLE_MATH when both resolve, and the double functions are
+used otherwise. A quadmath perl's $Config{perllibs} already carries
+-lquadmath, and perl.h has already included <quadmath.h>.*/
+#if defined(USE_QUADMATH)
+#  define BIOINF_NVFN(base) base ## q
+#elif defined(USE_LONG_DOUBLE) && defined(BIOINF_HAVE_LONG_DOUBLE_MATH)
+#  define BIOINF_NVFN(base) base ## l
+#else
+#  define BIOINF_NVFN(base) base
+#endif
+#define nv_log(x)  BIOINF_NVFN(log)(x)
+#define nv_sqrt(x) BIOINF_NVFN(sqrt)(x)
+
+/*Admixture proportions, for admixture() (since 2026-11-17).
+
+The model is ADMIXTURE's (Alexander, Novembre and Lange 2009, "Fast
+model-based estimation of ancestry in unrelated individuals", Genome Research
+19:1655-1664): sample i descends from K ancestral populations in the
+fractions q[i][0..K-1], which sum to 1, and population l carries variant j's
+ALT allele at the frequency p[j][l]. Sample i's ALT count g at variant j is
+then binomial, of 2 draws with probability f = sum over l of q[i][l] p[j][l],
+and the log-likelihood is the sum over the called genotypes of
+g log f + (2 - g) log(1 - f), which leaves out the binomial coefficient, as
+ADMIXTURE's printed log-likelihood does.
+
+It is maximized by the EM algorithm of Tang, Peng, Wang and Risch (2005,
+"Estimation of individual admixture: analytical and study design
+considerations", Genetic Epidemiology 28:289-301, the method of their program
+frappe): with a = g q[i][l] p[j][l] / f and b = (2 - g) q[i][l] (1 - p[j][l]) /
+(1 - f), the new p[j][l] is the sum over i of a divided by the sum of a + b, and
+the new q[i][l] the sum over j of a + b divided by twice sample i's called
+genotypes. The steps are accelerated by SQUAREM (Varadhan and Roland 2008,
+"Simple and globally convergent methods for accelerating the convergence of any
+EM algorithm", Scandinavian Journal of Statistics 35:335-353), their scheme S3
+with the steplength held at -1 or below, a stabilizing EM step after each
+extrapolation, and the second plain EM step kept instead whenever the
+extrapolation lowers the likelihood, so that no iteration does. ADMIXTURE
+itself climbs the same likelihood by block relaxation and quasi-Newton
+acceleration. The likelihood has local maxima, so lib/Cn/Bioinf.pm fits from
+several random starts and keeps the best.*/
+#define ADMIX_MISSING 3 // a genotype byte with no call; 0 to 2 are its ALT count
+/*The least q and p, and 1 less it the most: ADMIXTURE 1.3.0's bounds, which
+its .Q files show as 0.000010 for a fraction it drove to the bound. A
+frequency of exactly 0 or 1 would make log(0) of a genotype that disagrees.*/
+#define ADMIX_BOUND ((NV)1e-5)
+
+typedef struct {
+	vcf_reader r;// first, so that the vcf_reader * that the callbacks are given is this
+	SV *g;// the genotype bytes, r.n to a variant, in the VCF's order
+	AV *variants;// each variant kept, as "CHROM\tPOS\tID\tREF\tALT"
+	UV *called;// each sample's called genotypes
+} admix_reader;
+
+static void admix_header(pTHX_ vcf_reader *r) {
+	admix_reader *t = (admix_reader*)r;
+	Newxz(t->called, r->n, UV);
+	SAVEFREEPV(t->called);// at the caller's LEAVE, croak or not; see vcf_read()'s block
+}
+
+/*The record p..e, kept when it is on an autosome and biallelic: one ALT,
+which is not "." (no ALT) or "*" (a deletion's overlap), as PLINK 2's
+--max-alleles 2 --min-alleles 2 keeps them, which is what made t/admixture.t's
+reference input. A call of one allele, or of none, is missing.*/
+static void admix_record(pTHX_ vcf_reader *r, const char *p, const char *e) {
+	admix_reader *t = (admix_reader*)r;
+	const char *f = vcf_field_end(p, e);
+	const unsigned short int chrom = vcf_chrom(p, f);
+	if (chrom == 0 || chrom > 22) return;
+	const char *col[9];
+	const char *format_end = vcf_columns(aTHX_ r, p, f, e, col);
+	const char *alt = col[4], *alt_end = col[5] - 1;
+	if (alt == alt_end || memchr(alt, ',', (size_t)(alt_end - alt)) || (alt_end - alt == 1 && (*alt == '.' || *alt == '*'))) return;
+	size_t gt, dp;
+	vcf_format(col[8], format_end, &gt, &dp);
+	if (gt == VCF_ABSENT) return;
+	const STRLEN at = SvCUR(t->g);
+	if ((STRLEN)r->n > ((STRLEN)-1 - at) / 2 - 1) croak("%s: %s has too many genotypes to hold, at line %" UVuf, __func__, r->name, r->line);
+	// doubled when full, so that the bytes are copied O(log variants) times, not once a record
+	if (SvLEN(t->g) < at + r->n + 1) SvGROW(t->g, 2 * (at + r->n) + 1);
+	unsigned char *row = (unsigned char*)SvPVX(t->g) + at;// not restrict: perl's buffer
+	p = format_end + 1;
+	for (size_t i = 0; i < r->n; i++) {
+		const char *se = vcf_sample(aTHX_ r, p, e, i);
+		unsigned short int alleles = 0, alts = 0;
+		const bool call = vcf_call(r, p, se, gt, dp, &alleles, &alts) == VCF_CALL && alleles == 2;
+		row[i] = call ? (unsigned char)alts : ADMIX_MISSING;
+		if (call) t->called[i]++;
+		p = se + 1;
+	}
+	vcf_samples_end(aTHX_ r, p, e);
+	SvCUR_set(t->g, at + r->n);
+	av_push(t->variants, newSVpvf("%.*s\t%.*s\t%.*s\t%.*s\t%.*s", (int)(col[1] - 1 - col[0]), col[0], (int)(col[2] - 1 - col[1]), col[1],
+		(int)(col[3] - 1 - col[2]), col[2], (int)(col[4] - 1 - col[3]), col[3], (int)(alt_end - alt), alt));
+}
+
+typedef struct {
+	const unsigned char *g;// m rows of n genotype bytes; perl's buffer, not written
+	size_t n, m, k;// samples, variants, ancestral populations
+	NV *twice;// each sample's called genotypes, twice: the alleles its q is a share of
+	NV *num, *den;// k each, admix_em()'s sums for one variant
+} admix_fit;
+
+/*The parameters, q (n rows of k) and then p (m rows of k), held to the
+bounds: each q row clamped and made to sum to 1 again, each p clamped.*/
+static void admix_bound(const admix_fit *a, NV *th) {
+	const size_t k = a->k;
+	for (size_t i = 0; i < a->n; i++) {
+		NV *q = th + i * k;
+		NV sum = 0;
+		for (size_t l = 0; l < k; l++) {
+			if (!(q[l] >= ADMIX_BOUND)) q[l] = ADMIX_BOUND;// also NaN, which an extrapolation can make
+			else if (q[l] > 1 - ADMIX_BOUND) q[l] = 1 - ADMIX_BOUND;
+			sum += q[l];
+		}
+		for (size_t l = 0; l < k; l++) q[l] /= sum;
+	}
+	NV *p = th + a->n * k;
+	for (size_t x = 0; x < a->m * k; x++) {
+		if (!(p[x] >= ADMIX_BOUND)) p[x] = ADMIX_BOUND;
+		else if (p[x] > 1 - ADMIX_BOUND) p[x] = 1 - ADMIX_BOUND;
+	}
+}
+
+static NV admix_loglik(const admix_fit *a, const NV *th) {
+	const size_t n = a->n, k = a->k;
+	const NV *q = th, *p = th + n * k;
+	NV ll = 0;
+	for (size_t j = 0; j < a->m; j++) {
+		const unsigned char *row = a->g + j * n;
+		const NV *pj = p + j * k;
+		for (size_t i = 0; i < n; i++) {
+			const unsigned char c = row[i];
+			if (c == ADMIX_MISSING) continue;
+			const NV *qi = q + i * k;
+			NV f = 0;
+			for (size_t l = 0; l < k; l++) f += qi[l] * pj[l];
+			if (c) ll += (NV)c * nv_log(f);
+			if (c < 2) ll += (NV)(2 - c) * nv_log(1 - f);
+		}
+	}
+	return ll;
+}
+
+/*One EM step from th into out, both laid out as admix_bound() describes.*/
+static void admix_em(const admix_fit *a, const NV *th, NV *out) {
+	const size_t n = a->n, k = a->k;
+	const NV *q = th, *p = th + n * k;
+	NV *q2 = out, *p2 = out + n * k;
+	Zero(q2, n * k, NV);
+	for (size_t j = 0; j < a->m; j++) {
+		const unsigned char *row = a->g + j * n;
+		const NV *pj = p + j * k;
+		Zero(a->num, k, NV);
+		Zero(a->den, k, NV);
+		for (size_t i = 0; i < n; i++) {
+			const unsigned char c = row[i];
+			if (c == ADMIX_MISSING) continue;
+			const NV *qi = q + i * k;
+			NV f = 0;
+			for (size_t l = 0; l < k; l++) f += qi[l] * pj[l];
+			const NV x = c ? (NV)c / f : 0, y = c < 2 ? (NV)(2 - c) / (1 - f) : 0;
+			NV *q2i = q2 + i * k;
+			for (size_t l = 0; l < k; l++) {
+				const NV alt = x * qi[l] * pj[l], ref = y * qi[l] * (1 - pj[l]);
+				q2i[l] += alt + ref;
+				a->num[l] += alt;
+				a->den[l] += alt + ref;
+			}
+		}
+		for (size_t l = 0; l < k; l++) p2[j * k + l] = a->den[l] > 0 ? a->num[l] / a->den[l] : pj[l];
+	}
+	for (size_t i = 0; i < n; i++) {
+		NV *q2i = q2 + i * k;
+		// a sample with no called genotype says nothing of its ancestry, and keeps an even share
+		for (size_t l = 0; l < k; l++) q2i[l] = a->twice[i] > 0 ? q2i[l] / a->twice[i] : (NV)1 / (NV)k;
+	}
+	admix_bound(a, out);
+}
+
+/*The next of the 64-bit numbers that *s seeds, by SplitMix64 (Steele, Lea
+and Flood 2014; the constants of Sebastiano Vigna's public-domain
+splitmix64.c, prng.di.unimi.it), which gives the same numbers on every
+platform, where rand() and perl's own do not.*/
+static uint64_t admix_rand(uint64_t *s) {
+	uint64_t z = (*s += UINT64_C(0x9E3779B97F4A7C15));
+	z = (z ^ (z >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
+	z = (z ^ (z >> 27)) * UINT64_C(0x94D049BB133111EB);
+	return z ^ (z >> 31);
+}
+
+/*A random start from seed: each q row uniform numbers made to sum to 1, and
+each p uniform, then held to the bounds. The top 53 bits of each number are
+used, which a double holds exactly, so that the start is the same on a
+long-double perl.*/
+static void admix_start(const admix_fit *a, NV *th, uint64_t seed) {
+	const NV unit = (NV)1 / (NV)UINT64_C(9007199254740992);// 2^-53
+	for (size_t x = 0; x < (a->n + a->m) * a->k; x++) th[x] = (NV)(admix_rand(&seed) >> 11) * unit;
+	admix_bound(a, th);
+}
+
+/*Fits from the start in th, leaving the fit there; returns its
+log-likelihood, with the iterations in *iterations, and whether it converged
+(the log-likelihood rose by less than tol in the last) in *converged. Each
+iteration is a SQUAREM cycle of three EM steps.*/
+static NV admix_run(pTHX_ const admix_fit *a, NV *th, UV max_iterations, NV tol, UV *iterations, bool *converged) {
+	const size_t len = (a->n + a->m) * a->k;
+	NV *t1, *t2, *t3;
+	Newx(t1, len, NV);
+	SAVEFREEPV(t1);
+	Newx(t2, len, NV);
+	SAVEFREEPV(t2);
+	Newx(t3, len, NV);
+	SAVEFREEPV(t3);
+	NV ll = admix_loglik(a, th);
+	*converged = FALSE;
+	*iterations = 0;
+	while (*iterations < max_iterations) {
+		++*iterations;
+		admix_em(a, th, t1);
+		admix_em(a, t1, t2);
+		NV sr = 0, sv = 0;
+		for (size_t x = 0; x < len; x++) {
+			const NV r = t1[x] - th[x], v = t2[x] - 2 * t1[x] + th[x];
+			sr += r * r;
+			sv += v * v;
+		}
+		NV next;
+		const NV *keep = t2;// the parameters this iteration ends at
+		if (sv > 0) {
+			NV alpha = -nv_sqrt(sr / sv);
+			if (alpha > -1) alpha = -1;
+			for (size_t x = 0; x < len; x++) t3[x] = th[x] - 2 * alpha * (t1[x] - th[x]) + alpha * alpha * (t2[x] - 2 * t1[x] + th[x]);
+			admix_bound(a, t3);
+			admix_em(a, t3, t1);// t1 is not needed again
+			next = admix_loglik(a, t1);
+			if (next >= ll) keep = t1;// not NaN, and no lower
+			else next = admix_loglik(a, t2);
+		} else {
+			next = admix_loglik(a, t2);
+		}
+		Copy(keep, th, len, NV);
+		const NV rise = next - ll;
+		ll = next;
+		if (rise < tol) {
+			*converged = TRUE;
+			break;
+		}
+	}
+	return ll;
 }
 
 MODULE = Cn::Bioinf	PACKAGE = Cn::Bioinf
@@ -2345,6 +2808,29 @@ _write_fasta(fh, h, order, width)
 	UV width
 CODE:
 	write_fasta(aTHX_ fh, h, order, (STRLEN)width);
+
+void
+_fai_build(fh)
+	PerlIO *fh
+PPCODE:
+	fai_state s;
+	Zero(&s, 1, fai_state);
+	s.text = sv_2mortal(newSVpvs(""));
+	s.seen = (HV*)sv_2mortal((SV*)newHV());
+	s.dups = (AV*)sv_2mortal((SV*)newAV());
+	s.def = sv_2mortal(newSVpvs(""));
+	s.name = sv_2mortal(newSVpvs(""));
+	char *restrict buf;
+	Newx(buf, FASTA_BLOCK, char);
+	SAVEFREEPV(buf);// freed at this call's LEAVE, croak or not
+	fai_scan(aTHX_ fh, &s, buf);
+	EXTEND(SP, 6);
+	PUSHs(s.text);
+	PUSHs(sv_2mortal(newRV_inc((SV*)s.dups)));
+	PUSHs(s.error ? sv_2mortal(newSVpv(s.error, 0)) : &PL_sv_undef);
+	PUSHs(sv_2mortal(fai_number(aTHX_ s.line)));
+	PUSHs(s.named ? s.name : &PL_sv_undef);
+	PUSHs(s.error && strEQ(s.error, "read") ? sv_2mortal(newSVpv(Strerror(s.read_errno), 0)) : &PL_sv_undef);
 
 void
 _sex_tally(next, name, min_depth)
@@ -2381,7 +2867,7 @@ PPCODE:
 	PUTBACK;
 	vcf_read(aTHX_ next, &t.r);
 	SPAGAIN;
-	UV in = 0; // the sites where either carries the ALT, every one of them in both, since there is one file
+	UV in = 0;// the sites where either carries the ALT, every one of them in both, since there is one file
 	for (unsigned short int k = 1; k < 9; k++) in += t.t[k];
 	EXTEND(SP, 12);
 	for (unsigned short int k = 0; k < 9; k++) PUSHs(sv_2mortal(newSVuv(t.t[k])));
@@ -2401,7 +2887,7 @@ PPCODE:
 	const parent_sites *a = parent_sites_vcf(aTHX_ child_next, child_name, min_depth);
 	const parent_sites *b = parent_sites_vcf(aTHX_ parent_next, parent_name, min_depth);
 	SPAGAIN;
-	UV t[9] = { 0 }, in[3] = { 0 }; // as parent_merge() fills them
+	UV t[9] = { 0 }, in[3] = { 0 };// as parent_merge() fills them
 	parent_merge(a, b, t, in);
 	EXTEND(SP, 12);
 	for (unsigned short int k = 0; k < 9; k++) PUSHs(sv_2mortal(newSVuv(t[k])));
@@ -2437,11 +2923,11 @@ _relatedness_own(nexts, files, min_depth)
 	UV min_depth
 PPCODE:
 	const size_t n = (size_t)(av_len(nexts) + 1);
-	if ((SSize_t)n != av_len(files) + 1) croak("_relatedness_own: %" UVuf " readers for %" UVuf " files", (UV)n, (UV)(av_len(files) + 1)); // cannot happen: perl makes one for each; named literally, since __func__ in an XSUB is XS_Cn__Bioinf__relatedness_own
-	parent_sites **s; // each file's sites, freed by parent_sites_read()'s destructor
+	if ((SSize_t)n != av_len(files) + 1) croak("_relatedness_own: %" UVuf " readers for %" UVuf " files", (UV)n, (UV)(av_len(files) + 1));// cannot happen: perl makes one for each; named literally, since __func__ in an XSUB is XS_Cn__Bioinf__relatedness_own
+	parent_sites **s;// each file's sites, freed by parent_sites_read()'s destructor
 	Newx(s, n, parent_sites*);
 	SAVEFREEPV(s);
-	UV *count; // SEX_FIELDS counters a file
+	UV *count;// SEX_FIELDS counters a file
 	Newxz(count, n * SEX_FIELDS, UV);
 	SAVEFREEPV(count);
 	HV *seen = (HV*)sv_2mortal((SV*)newHV());
@@ -2449,7 +2935,7 @@ PPCODE:
 	PUTBACK;
 	for (size_t f = 0; f < n; f++) {
 		SV **next = av_fetch(nexts, (SSize_t)f, 0), **file = av_fetch(files, (SSize_t)f, 0);
-		if (!next || !file) croak("_relatedness_own: file %" UVuf " has no reader", (UV)f); // cannot happen: perl fills both arrays
+		if (!next || !file) croak("_relatedness_own: file %" UVuf " has no reader", (UV)f);// cannot happen: perl fills both arrays
 		rel_own_reader t;
 		Zero(&t, 1, rel_own_reader);
 		t.p.r.name = SvPV_nolen(*file);
@@ -2462,7 +2948,7 @@ PPCODE:
 		s[f] = parent_sites_read(aTHX_ &t.p, *next);
 	}
 	SPAGAIN;
-	UV *t; // REL_T counters a pair
+	UV *t;// REL_T counters a pair
 	Newxz(t, rel_pairs(aTHX_ n) * REL_T, UV);
 	SAVEFREEPV(t);
 	rel_merge(aTHX_ (parent_sites *const *)s, n, t);
@@ -2500,7 +2986,7 @@ _concordance(test_next, test_name, truth_next, truth_name, truth_names, min_dept
 PPCODE:
 	conc_store *s;
 	Newxz(s, 1, conc_store);
-	SAVEDESTRUCTOR_X(conc_store_free, s); // at this call's LEAVE, croak or not
+	SAVEDESTRUCTOR_X(conc_store_free, s);// at this call's LEAVE, croak or not
 	s->truth_n = (size_t)(av_len(truth_names) + 1);
 	conc_reader test;
 	Zero(&test, 1, conc_reader);
@@ -2556,7 +3042,7 @@ _blood_type_tally(next, name, min_depth, panel, markers, chrom, start, end)
 	UV end
 PPCODE:
 	AV *names, *seen, *deleted;
-	UV flags[2]; // bt_tally_vcf()'s: the chromosomes read, and those with an allele longer than a base
+	UV flags[2];// bt_tally_vcf()'s: the chromosomes read, and those with an allele longer than a base
 	PUTBACK;
 	HV *out = bt_tally_vcf(aTHX_ next, name, min_depth, panel, (size_t)markers, chrom, start, end, &names, &seen, &deleted, flags);
 	SPAGAIN;
@@ -2590,6 +3076,82 @@ _kmer_count(seq, k, step)
 	UV k
 	UV step
 CODE:
-	RETVAL = newRV_inc((SV*)kmer_tally(aTHX_ seq, k, step)); // inc, since the hash is mortal
+	RETVAL = newRV_inc((SV*)kmer_tally(aTHX_ seq, k, step));// inc, since the hash is mortal
 OUTPUT:
 	RETVAL
+
+void
+_admixture_genotypes(next, name, min_depth)
+	SV *next
+	const char *name
+	UV min_depth
+PPCODE:
+	admix_reader t;
+	Zero(&t, 1, admix_reader);
+	t.r.name = name;
+	t.r.min_depth = min_depth;
+	t.r.on_header = admix_header;
+	t.r.on_record = admix_record;
+	t.g = sv_2mortal(newSVpvs(""));
+	t.variants = (AV*)sv_2mortal((SV*)newAV());
+	PUTBACK;
+	vcf_read(aTHX_ next, &t.r);
+	SPAGAIN;
+	AV *called = (AV*)sv_2mortal((SV*)newAV());
+	for (size_t i = 0; i < t.r.n; i++) av_push(called, newSVuv(t.called[i]));
+	EXTEND(SP, 4);
+	PUSHs(t.g);
+	PUSHs(sv_2mortal(newRV_inc((SV*)t.variants)));
+	PUSHs(sv_2mortal(newRV_inc((SV*)t.r.names)));
+	PUSHs(sv_2mortal(newRV_inc((SV*)called)));
+
+void
+_admixture_fit(g, n, k, seed, max_iterations, tolerance)
+	SV *g
+	UV n
+	UV k
+	UV seed
+	UV max_iterations
+	NV tolerance
+PPCODE:
+	STRLEN len;
+	const unsigned char *bytes = (const unsigned char*)SvPV_const(g, len);// not restrict: perl's buffer
+	// named literally, since __func__ in an XSUB is XS_Cn__Bioinf__admixture_fit
+	if (n == 0 || k == 0 || len % n) croak("_admixture_fit: %" UVuf " genotype bytes for %" UVuf " samples and K %" UVuf, (UV)len, n, k);// cannot happen: perl checks
+	admix_fit a;
+	a.g = bytes;
+	a.n = (size_t)n;
+	a.m = len / n;
+	a.k = (size_t)k;
+	if (a.k > ((size_t)-1 / sizeof(NV) / 4) / (a.n + a.m)) croak("_admixture_fit: %" UVuf " samples and %" UVuf " variants at K %" UVuf " are too many to fit", n, (UV)a.m, k);
+	const size_t params = (a.n + a.m) * a.k;
+	NV *th;
+	Newx(th, params, NV);
+	SAVEFREEPV(th);
+	Newxz(a.twice, a.n, NV);
+	SAVEFREEPV(a.twice);
+	Newx(a.num, a.k, NV);
+	SAVEFREEPV(a.num);
+	Newx(a.den, a.k, NV);
+	SAVEFREEPV(a.den);
+	for (size_t j = 0; j < a.m; j++) {
+		for (size_t i = 0; i < a.n; i++) {
+			if (bytes[j * a.n + i] != ADMIX_MISSING) a.twice[i] += 2;
+		}
+	}
+	admix_start(&a, th, (uint64_t)seed);
+	UV iterations;
+	bool converged;
+	const NV ll = admix_run(aTHX_ &a, th, max_iterations, tolerance, &iterations, &converged);
+	AV *q = (AV*)sv_2mortal((SV*)newAV()), *p = (AV*)sv_2mortal((SV*)newAV());
+	for (size_t i = 0; i < a.n + a.m; i++) {
+		AV *row = newAV();
+		for (size_t l = 0; l < a.k; l++) av_push(row, newSVnv(th[i * a.k + l]));
+		av_push(i < a.n ? q : p, newRV_noinc((SV*)row));
+	}
+	EXTEND(SP, 5);
+	PUSHs(sv_2mortal(newRV_inc((SV*)q)));
+	PUSHs(sv_2mortal(newRV_inc((SV*)p)));
+	PUSHs(sv_2mortal(newSVnv(ll)));
+	PUSHs(sv_2mortal(newSVuv(iterations)));
+	PUSHs(sv_2mortal(newSVuv(converged ? 1 : 0)));

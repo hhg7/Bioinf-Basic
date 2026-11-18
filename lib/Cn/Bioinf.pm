@@ -33,10 +33,10 @@ use Exporter 'import';
 use XSLoader;
 our $VERSION = '0.02';
 our @EXPORT_OK = qw(
-	assembly_stats back_transcribe blood_type complement concordance fasta2hash fasta_index
-	fasta_region find_orfs gc_content get_best_alignment_hit hash2fasta_file hirisplex_genotypes isoelectric_point
-	kmer_count molecular_weight motif_search msa_quality_table parent pdb_search pgs_score plot_msa plot_phylo
-	protein_charge relatedness reverse_complement sex_check subseq trait_predict transcribe translate
+	admixture assembly_stats back_transcribe blood_type complement concordance fasta2hash fasta_index
+	fasta_region find_orfs fst gc_content get_best_alignment_hit gwas hardy_weinberg hash2fasta_file hirisplex_genotypes
+	isoelectric_point kmer_count ld ld_prune molecular_weight motif_search msa_quality_table parent pca pdb_search
+	pgs_score plot_msa plot_phylo protein_charge relatedness reverse_complement sex_check subseq trait_predict transcribe translate
 	translate_six_frames view_alignment
 );
 # Nothing is in @EXPORT: a caller names what it wants, or asks for ":all".
@@ -1022,79 +1022,55 @@ sub subseq {
 # length, the byte in the file where it starts, how many bases each of its
 # lines holds, and how many bytes each takes with its line ending. What is and
 # is not a sequence that can be indexed is decided as fai_build_core() of
-# htslib 1.25's faidx.c decides it, and t/faidx.t checks the result against
-# that library's own expected index.
+# htslib 1.25's faidx.c decides it, by Bioinf.xs's fai_scan() (since
+# 2026-11-18, and by a readline loop here until then), and t/faidx.t checks
+# the result against that library's own expected index.
 
-# The index of the FASTA $file, read from the file itself, for $sub: an array
-# ref of [name, length, offset, line bases, line width] in the file's order.
+# The index of the FASTA $file, read from the file itself, for $sub: the text
+# of its .fai, with the sequences in the file's order.
 sub _fai_scan {
 	my ($sub, $file) = @_;
 	open my $fh, '<:raw', $file or croak "$sub: can't read $file: $!";
-	my (@index, %seen);
-	my ($name, $len, $offset, $bases, $width); # the sequence being read
-	my $inside = 0; # 1 = its lines are being read; 0 = they have ended, and only a blank line or a defline may follow
-	my $any = 0; # 1 = it has had a line, without which htslib does not count it as a sequence
-	my $pos = 0; # bytes read
-	my $add = sub {
-		if ($seen{$name}++) {
-			carp "$sub: $file has more than one sequence named \"$name\", and the first is the one indexed";
-		} else {
-			push @index, [$name, $len, $offset, $bases, $width];
-		}
-	};
-	local $/ = "\n";
-	while (defined(my $line = <$fh>)) {
-		$pos += length $line;
-		if (substr($line, 0, 1) eq '>') {
-			$add->() if $any;
-			croak "$sub: the last sequence of $file has a defline and nothing more" unless $line =~ /\n\z/;
-			# the name is the defline's first word, after any space that follows the ">"
-			($name) = $line =~ /\A>[^\S\n]*(\S*)/;
-			($len, $offset, $bases, $width, $inside, $any) = (0, $pos, 0, 0, 1, 0);
-		} elsif ($inside && $line eq "\n") {
-			$inside = 0;
-		} elsif (!$inside) {
-			next if $line eq "\n" || $line eq "\r\n";
-			croak "$sub: line $. of $file " . (defined $name
-				? "follows a shorter line of \"$name\", and only a sequence's last line can be shorter than its others"
-				: "comes before any defline");
-		} else {
-			# htslib counts the line feed even of a last line that has none
-			my $ll = length($line) + ($line =~ /\n\z/ ? 0 : 1);
-			my $cl = ($line =~ tr/\x21-\x7e//); # what C's isgraph() takes: the bases
-			$any = 1;
-			$len += $cl;
-			if ($width == 0) {
-				($width, $bases) = ($ll, $cl);
-			} elsif ($ll < $width) {
-				$inside = 0;
-			} elsif ($ll > $width) {
-				croak "$sub: line $. of $file is longer than the lines before it of \"$name\", and only a sequence's last line can differ";
-			}
-		}
+	# $error is undef or one of fai_scan()'s, which Bioinf.xs lists at
+	# fai_state; $line and $name are the line and the sequence it is in, and
+	# $why is the system's reason for a read error
+	my ($index, $dups, $error, $line, $name, $why) = _located(sub { _fai_build($fh) });
+	carp "$sub: $file has more than one sequence named \"$_\", and the first is the one indexed" foreach @{ $dups };
+	if (!defined $error) {
+		close $fh or croak "$sub: can't read $file: $!";
+		return $index;
 	}
-	close $fh or croak "$sub: can't read $file: $!";
-	croak "$sub: " . (defined $name ? "the last sequence of $file has a defline and nothing more" : "$file has no sequences") unless $any;
-	$add->();
-	\@index;
+	croak "$sub: can't read $file: $why" if $error eq 'read';
+	croak "$sub: the last sequence of $file has a defline and nothing more" if $error eq 'no_sequence';
+	croak "$sub: $file has no sequences" if $error eq 'none';
+	croak "$sub: line $line of $file comes before any defline" if $error eq 'before_defline';
+	croak "$sub: line $line of $file follows a shorter line of \"$name\", and only a sequence's last line can be shorter than its others"
+		if $error eq 'after_short';
+	croak "$sub: line $line of $file is longer than the lines before it of \"$name\", and only a sequence's last line can differ"
+		if $error eq 'longer';
+	croak "_fai_scan: Bioinf.xs's fai_scan() gave \"$error\", which it has no message for"; # cannot happen
 }
 
-# The index in the .fai file $fai, for $sub, as _fai_scan() returns one.
-sub _fai_read {
-	my ($sub, $fai) = @_;
-	open my $fh, '<', $fai or croak "$sub: can't read $fai: $!";
-	my @index;
+# The entries of a FASTA index, read a line at a time from $fh, which is the
+# .fai $what of $sub, for the names in %$want alone: a hash ref of name =>
+# [name, length, offset, line bases, line width], each the first line of its
+# name. Every line is checked, wanted or not, so that a file that isn't an
+# index dies whatever was asked of it.
+sub _fai_entries {
+	my ($sub, $fh, $what, $want) = @_;
+	my %entry;
+	my $any = 0; # 1 = the index has had a line
 	while (defined(my $line = <$fh>)) {
 		$line =~ s/\r?\n\z//;
 		my @f = split /\t/, $line, -1;
 		# a FASTQ's index has a sixth column, where its qualities start
-		croak "$sub: line $. of $fai isn't a line of a FASTA index: it needs a name, a length, an offset, a line's bases and a line's width"
+		croak "$sub: line $. of $what isn't a line of a FASTA index: it needs a name, a length, an offset, a line's bases and a line's width"
 			unless @f == 5 && !grep { !/\A[0-9]+\z/ } @f[1 .. 4];
-		push @index, [$f[0], map { 0 + $_ } @f[1 .. 4]];
+		$any = 1;
+		$entry{ $f[0] } //= [$f[0], map { 0 + $_ } @f[1 .. 4]] if $want->{ $f[0] };
 	}
-	close $fh or croak "$sub: can't read $fai: $!";
-	croak "$sub: $fai has no sequences" unless @index;
-	\@index;
+	croak "$sub: $what has no sequences" unless $any;
+	\%entry;
 }
 
 # Dies, for $sub, unless $file is a FASTA that can be indexed: a file that is
@@ -1114,7 +1090,7 @@ sub fasta_index {
 	my $index = _fai_scan($sub, $file);
 	my $fai = "$file.fai";
 	open my $fh, '>:raw', $fai or croak "$sub: can't write $fai: $!";
-	print {$fh} join("\t", @{ $_ }), "\n" or croak "$sub: can't write $fai: $!" for @{ $index };
+	print {$fh} $index or croak "$sub: can't write $fai: $!";
 	close $fh or croak "$sub: can't write $fai: $!";
 	_wrote($fai, 46); # cyan
 	$fai;
@@ -1128,17 +1104,32 @@ sub fasta_region {
 	foreach my $r (@regions) {
 		croak "$sub: a region must be a string, such as \"chr1:100-200\", not " . _what($r) if !defined $r || ref $r;
 	}
+	# Only the entries of the index that a region could name are kept: the
+	# region whole, and the name before the colon of one that could be a range
+	# (by the pattern below). Until 2026-11-18 every entry was, as an array of
+	# five: for two regions of a FASTA of 1,000,000 contigs (perl 5.44.0), the
+	# peak RSS was 458 MB with its .fai and 468 MB without, and is now 13 MB
+	# and 194 MB, most of the last being fai_scan()'s hash of every name, which
+	# it keeps to warn of a name used twice.
+	my %asked; # each name a region could be of => 1
+	foreach my $r (@regions) {
+		$asked{$r} = 1;
+		$asked{$1} = 1 if $r =~ /\A(.*):[0-9,]*(?:-[0-9,]*)?\z/s;
+	}
 	my $fai = "$file.fai";
-	my $index;
+	my ($by, $ifh);
 	if (-f $fai) {
-		$index = _fai_read($sub, $fai);
+		open $ifh, '<', $fai or croak "$sub: can't read $fai: $!";
+		$by = _fai_entries($sub, $ifh, $fai, \%asked);
+		close $ifh or croak "$sub: can't read $fai: $!";
 		# as htslib warns; -M is the age in days, so the older file has the larger
 		carp "$sub: $fai is older than $file, and may no longer describe it" if -M $fai > -M $file;
 	} else {
-		$index = _fai_scan($sub, $file);
+		my $index = _fai_scan($sub, $file);
+		open $ifh, '<', \$index or croak "$sub: can't read the index of $file: $!";
+		$by = _fai_entries($sub, $ifh, "the index of $file", \%asked);
+		close $ifh or croak "$sub: can't read the index of $file: $!";
 	}
-	my %by;
-	$by{ $_->[0] } //= $_ for @{ $index };
 	open my $fh, '<:raw', $file or croak "$sub: can't read $file: $!";
 	my %seq;
 	foreach my $region (@regions) {
@@ -1146,13 +1137,13 @@ sub fasta_region {
 		# A region that is a sequence's whole name is that sequence, even when
 		# it could be read as a name and a range, which is how htslib's
 		# hts_parse_region() reads "HLA-A*01:01:01:01".
-		my ($entry, $start, $end) = ($by{$region});
+		my ($entry, $start, $end) = ($by->{$region});
 		# "name:start-end", "name:start", "name:start-" and "name:-end", with
 		# commas allowed in the numbers
-		if (!$entry && $region =~ /\A(.*):([0-9,]*)(?:-([0-9,]*))?\z/s && $by{$1}) {
+		if (!$entry && $region =~ /\A(.*):([0-9,]*)(?:-([0-9,]*))?\z/s && $by->{$1}) {
 			my ($name, $from, $to) = ($1, $2, $3 // '');
 			tr/,//d for $from, $to;
-			($entry, $start, $end) = ($by{$name}, $from, $to) if length "$from$to";
+			($entry, $start, $end) = ($by->{$name}, $from, $to) if length "$from$to";
 		}
 		croak "$sub: $file has no sequence named \"$region\"" . ($region =~ /:/ ? ', nor is it a range of one' : '') unless $entry;
 		my (undef, $len, $offset, $bases, $width) = @{ $entry };
@@ -1571,6 +1562,83 @@ sub _plink2 {
 	croak "$sub: \"$plink2 @args\" failed ($why): $said";
 }
 
+# Dies unless "memory" and "threads" of $sub's $args are numbers PLINK 2
+# takes, or were not given. Returns plink2's arguments for them, after the
+# --allow-extra-chr that every run here passes, so that a contig PLINK 2 has no
+# code for (chrUn_..., say) is read rather than refused.
+sub _plink2_resources {
+	my ($sub, $args) = @_;
+	foreach my $k (qw(memory threads)) {
+		# undef = PLINK 2's own default: half the machine's memory, every CPU
+		croak "$sub: \"$k\" must be a whole number, 1 or more, not " . _what($args->{$k})
+			if defined $args->{$k} && (ref $args->{$k} || $args->{$k} !~ /\A[1-9][0-9]*\z/);
+	}
+	my ($memory, $threads) = @{ $args }{qw(memory threads)};
+	# PLINK 2 v2.0.0-a.7.13LM refuses less: "Invalid --memory argument '256' (minimum 640)"
+	croak "$sub: \"memory\" must be 640 or more (MiB), the least PLINK 2 takes, not $memory" if defined $memory && $memory < 640;
+	('--allow-extra-chr', (defined $memory ? ('--memory', $memory) : ()), (defined $threads ? ('--threads', $threads) : ()));
+}
+
+# plink2's arguments that read "vcf" of $sub, a file, which dies unless it is
+# one PLINK 2 reads by its name; or () for a data frame, which the caller
+# writes to a VCF with _frame_vcf once its other arguments have been checked.
+sub _plink2_input {
+	my ($sub, $vcf) = @_;
+	if (!ref $vcf) {
+		croak "$sub: \"vcf\" file \"$vcf\" doesn't exist or isn't readable" unless -f $vcf && -r _;
+		if ($vcf =~ /\A(.*)\.pgen\z/is) {
+			my $prefix = $1;
+			croak "$sub: \"vcf\" $vcf has no $prefix.pvar (or .pvar.zst) beside it" unless grep { -f "$prefix.$_" } qw(pvar pvar.zst);
+			croak "$sub: \"vcf\" $vcf has no $prefix.psam beside it" unless -f "$prefix.psam";
+			return ('--pfile', $prefix);
+		}
+		return ('--bcf', $vcf) if $vcf =~ /\.bcf\z/i;
+		return ('--vcf', $vcf) if $vcf =~ /\.vcf(?:\.b?gz)?\z/i;
+		croak "$sub: \"vcf\" file $vcf must end in .vcf, .vcf.gz, .vcf.bgz, .bcf or .pgen, as PLINK 2 reads it by its name";
+	}
+	croak "$sub: \"vcf\" must be a VCF, BCF or PLINK 2 .pgen file, or a data frame, not " . _what($vcf)
+		unless ref $vcf eq 'ARRAY' || ref $vcf eq 'HASH';
+	();
+}
+
+# Alien::Bioinf's plink2, for $sub, or a death that says why there is none.
+sub _plink2_program {
+	my ($sub) = @_;
+	my $plink2 = eval { _alien($sub)->plink2 };
+	return $plink2 if defined $plink2;
+	(my $why = $@) =~ s/ at \S+ line \d+\.?\n?\z//;
+	croak "$sub: needs PLINK 2, which Alien::Bioinf installs, and hasn't here: $why";
+}
+
+# The IIDs of the .psam $file, in its order, for $sub, which returns its
+# $what (such as "scores") keyed by IID. PLINK 2 tells samples apart by FID and
+# IID together, so two samples that share an IID, in different families, die
+# here, rather than having their results added into one.
+sub _psam_iids {
+	my ($sub, $file, $what) = @_;
+	open my $psam, '<', $file or croak "$sub: can't read $file: $!";
+	my ($iid, $fid); # the columns of the IID and of the FID, which a .psam need not have
+	my %family; # IID => its FID, or '' with no FID column
+	my @samples;
+	while (my $line = <$psam>) {
+		chomp $line;
+		my @f = split /\t/, $line;
+		if ($line =~ /\A#/) {
+			($iid) = grep { $f[$_] =~ /\A#?IID\z/ } 0 .. $#f;
+			($fid) = grep { $f[$_] =~ /\A#?FID\z/ } 0 .. $#f;
+			next;
+		}
+		my $id = $f[$iid // 0];
+		my $family = defined $fid ? $f[$fid] : '';
+		croak "$sub: \"vcf\" has two samples whose IID is \"$id\"" . (defined $fid ? ", in families \"$family{$id}\" and \"$family\"" : '')
+			. "; the $what are returned by IID, so each sample's must be unique" if exists $family{$id};
+		$family{$id} = $family;
+		push @samples, $id;
+	}
+	close $psam;
+	@samples;
+}
+
 sub pgs_score {
 	my $sub = 'pgs_score';
 	my $args = _args(\@_, $sub, [qw(vcf weights)], [qw(build match memory threads)]);
@@ -1581,33 +1649,9 @@ sub pgs_score {
 	$r{build} = $args->{build}; # undef = the sex chromosomes are left out; hg19, b37, hg38 or b38 = PLINK 2 reads them, with X's pseudo-autosomal regions placed for that build
 	croak "$sub: \"build\" must be hg19, b37, hg38 or b38, not " . _what($r{build})
 		if defined $r{build} && (ref $r{build} || $r{build} !~ /\A(?:hg19|b37|hg38|b38)\z/);
-	foreach my $k (qw(memory threads)) {
-		# undef = PLINK 2's own default: half the machine's memory, every CPU
-		croak "$sub: \"$k\" must be a whole number, 1 or more, not " . _what($args->{$k})
-			if defined $args->{$k} && (ref $args->{$k} || $args->{$k} !~ /\A[1-9][0-9]*\z/);
-		$r{$k} = $args->{$k};
-	}
-	# PLINK 2 v2.0.0-a.7.13LM refuses less: "Invalid --memory argument '256' (minimum 640)"
-	croak "$sub: \"memory\" must be 640 or more (MiB), the least PLINK 2 takes, not $r{memory}" if defined $r{memory} && $r{memory} < 640;
+	my @common = _plink2_resources($sub, $args);
 	my $vcf = $args->{vcf};
-	my @input; # plink2's arguments that read the genotypes; filled below
-	if (!ref $vcf) {
-		croak "$sub: \"vcf\" file \"$vcf\" doesn't exist or isn't readable" unless -f $vcf && -r _;
-		if ($vcf =~ /\A(.*)\.pgen\z/is) {
-			my $prefix = $1;
-			croak "$sub: \"vcf\" $vcf has no $prefix.pvar (or .pvar.zst) beside it" unless grep { -f "$prefix.$_" } qw(pvar pvar.zst);
-			croak "$sub: \"vcf\" $vcf has no $prefix.psam beside it" unless -f "$prefix.psam";
-			@input = ('--pfile', $prefix);
-		} elsif ($vcf =~ /\.bcf\z/i) {
-			@input = ('--bcf', $vcf);
-		} elsif ($vcf =~ /\.vcf(?:\.b?gz)?\z/i) {
-			@input = ('--vcf', $vcf);
-		} else {
-			croak "$sub: \"vcf\" file $vcf must end in .vcf, .vcf.gz, .vcf.bgz, .bcf or .pgen, as PLINK 2 reads it by its name";
-		}
-	} elsif (ref $vcf ne 'ARRAY' && ref $vcf ne 'HASH') {
-		croak "$sub: \"vcf\" must be a VCF, BCF or PLINK 2 .pgen file, or a data frame, not " . _what($vcf);
-	}
+	my @input = _plink2_input($sub, $vcf); # plink2's arguments that read the genotypes; set below for a data frame
 
 	my ($next, $cols) = _weight_rows($sub, $args->{weights});
 	my %have = map { $_ => 1 } @{ $cols };
@@ -1631,9 +1675,19 @@ sub pgs_score {
 	my $dir = File::Temp::tempdir(CLEANUP => 1);
 	my $regions = File::Spec->catfile($dir, 'regions.txt');
 	open my $rfh, '>', $regions or croak "$sub: can't write $regions: $!";
-	# Each row of weights is kept as "effect\tother\tweight", the alleles in upper
-	# case and the weight as written, which a few million rows can afford.
-	my @variant;
+	# Each row of weights is kept as a line "effect\tother\tweight\n" of $rows,
+	# the alleles in upper case and the weight as written, and where its line
+	# starts is packed into $row_at as a C double, exact to 2^53 on every perl.
+	# Until 2026-11-18 each row was a perl string of its own, of 82 bytes on
+	# perl 5.44.0, and these take 8 and the line. With @use an array, the bit vector $taken and
+	# %at freed early (all below), a score of 1,000,000 variants against a VCF
+	# of all of them peaked at 325 MB rather than 629 MB (perl 5.44.0, on
+	# 2026-11-18), and scored the same.
+	my ($rows, $row_at, $n_rows) = ('', '', 0);
+	my $row = sub { # row $_[0] of weights as (effect, other, weight)
+		my $from = unpack 'd', substr $row_at, 8 * $_[0], 8;
+		split /\t/, substr($rows, $from, index($rows, "\n", $from) - $from), -1;
+	};
 	my %at;     # key (CHROM:POS or rsID) => the rows of weights at it, joined by commas
 	my %chroms; # chromosome, as _chrom names it => 1, for each of the rows' chromosomes
 	while (my ($w, $label) = $next->()) {
@@ -1649,8 +1703,9 @@ sub pgs_score {
 		croak "$sub: $label of \"weights\" has no effect_allele" unless defined $e && length $e;
 		croak "$sub: $label of \"weights\" has effect_weight " . _what($weight) . ', which isn\'t a number'
 			unless defined $weight && !ref $weight && $weight =~ $Number;
-		my $i = @variant;
-		push @variant, join "\t", uc $e, defined $o && length $o ? uc $o : '', $weight;
+		my $i = $n_rows++;
+		$row_at .= pack 'd', length $rows;
+		$rows .= join("\t", uc $e, defined $o && length $o ? uc $o : '', $weight) . "\n";
 		my $chr = defined $chr_col && defined $w->{$chr_col} && length $w->{$chr_col} ? _chrom($w->{$chr_col}) : undef;
 		my $key;
 		if ($r{match} eq 'id') {
@@ -1672,19 +1727,14 @@ sub pgs_score {
 		$at{$key} = defined $at{$key} ? "$at{$key},$i" : $i if defined $key && length $key;
 	}
 	close $rfh or croak "$sub: can't write $regions: $!";
-	croak "$sub: \"weights\" has no rows" unless @variant;
+	croak "$sub: \"weights\" has no rows" unless $n_rows;
 	my @sex = grep { $chroms{$_} } qw(X Y);
 	croak "$sub: \"weights\" has variants on " . join(' and ', @sex) . ', which PLINK 2 reads only when "build" says where X\'s'
 		. ' pseudo-autosomal regions are: hg19 (b37) or hg38 (b38)' if @sex && !defined $r{build};
 	_frame_vcf($sub, $vcf, File::Spec->catfile($dir, 'frame.vcf'), $r{match}) if ref $vcf;
 	@input = ('--vcf', File::Spec->catfile($dir, 'frame.vcf')) if ref $vcf;
 
-	my $plink2 = eval { _alien($sub)->plink2 };
-	unless (defined $plink2) {
-		(my $why = $@) =~ s/ at \S+ line \d+\.?\n?\z//;
-		croak "$sub: needs PLINK 2, which Alien::Bioinf installs, and hasn't here: $why";
-	}
-	my @common = ('--allow-extra-chr', (defined $r{memory} ? ('--memory', $r{memory}) : ()), (defined $r{threads} ? ('--threads', $r{threads}) : ()));
+	my $plink2 = _plink2_program($sub);
 	push @input, '--vcf-half-call', 'missing' unless $input[0] eq '--pfile';
 	# The samples, each of unknown sex, written by PLINK 2 without reading the
 	# sex chromosomes, which it would refuse to without each one's sex.
@@ -1722,35 +1772,13 @@ sub pgs_score {
 	my $none = eval { _plink2($sub, $plink2, $dir, @import, '--make-pgen', '--out', $g); 0 }
 		// ($@ =~ /\((?:exit 13\): Error: No variants remaining|exit 7\): Error: All \d+ variant\(s\) in --vcf file excluded by --chr)/ ? 1 : die $@);
 
-	my @samples; # in PLINK 2's order
-	open my $psam, '<', "$samples.psam" or croak "$sub: can't read $samples.psam: $!";
-	my ($iid, $fid); # the columns of the IID and of the FID, which a .psam need not have
-	# IID => its FID, or '' with no FID column. The scores are keyed by IID,
-	# where PLINK 2 tells samples apart by FID and IID together, so two samples
-	# that share an IID would have their scores added into one.
-	my %family;
-	while (my $line = <$psam>) {
-		chomp $line;
-		my @f = split /\t/, $line;
-		if ($line =~ /\A#/) {
-			($iid) = grep { $f[$_] =~ /\A#?IID\z/ } 0 .. $#f;
-			($fid) = grep { $f[$_] =~ /\A#?FID\z/ } 0 .. $#f;
-			next;
-		}
-		my $id = $f[$iid // 0];
-		my $family = defined $fid ? $f[$fid] : '';
-		croak "$sub: \"vcf\" has two samples whose IID is \"$id\"" . (defined $fid ? ", in families \"$family{$id}\" and \"$family\"" : '')
-			. '; the scores are returned by IID, so each sample\'s must be unique' if exists $family{$id};
-		$family{$id} = $family;
-		push @samples, $id;
-	}
-	close $psam;
+	my @samples = _psam_iids($sub, "$samples.psam", 'scores'); # in PLINK 2's order
 
 	# The .pvar a record at a time, matched against the rows of weights, and
 	# written again with each record's ID made v1, v2, ..., which --score finds
 	# it by, since a VCF's own IDs are often "." and need not be unique.
 	my $found = ''; # bit $i set: row $i of weights is at a position (or ID) of the VCF
-	my %use;        # row $i => "record number\tA1 as the record writes it\tits CHROM:POS:REF:ALT\t1, or 0 when the record lacks the effect allele", for the record whose alleles agree with it
+	my @use;        # row $i => "record number\tA1 as the record writes it\tits CHROM:POS:REF:ALT\t1, or 0 when the record lacks the effect allele", for the record whose alleles agree with it; an array, whose slot is 8 bytes a row, where a hash gave each a key and an entry too
 	my ($in, $out);
 	unless ($none) {
 		open $in, '<', "$g.pvar" or croak "$sub: can't read $g.pvar: $!";
@@ -1784,7 +1812,7 @@ sub pgs_score {
 		my $sort = join ':', $chrom, $pos, $ref, $alt;
 		foreach my $i (@here) {
 			vec($found, $i, 1) = 1;
-			my ($e, $o) = split /\t/, $variant[$i];
+			my ($e, $o) = $row->($i);
 			# The alleles agree when both of the variant's are the record's, or,
 			# for a record with no ALT, when either is its REF.
 			next unless @alleles == 1
@@ -1795,31 +1823,41 @@ sub pgs_score {
 			# string is used, so that the order of the file does not decide it.
 			# That is not genomic order ("1:100" sorts before "1:99"), and need
 			# not be: the choice only has to be the same every time.
-			next if defined $use{$i} && (split /\t/, $use{$i})[2] le $sort;
+			next if defined $use[$i] && (split /\t/, $use[$i])[2] le $sort;
 			# An effect allele the record lacks (its REF being the other allele)
 			# has no copies; it is given as the REF with a weight of 0, which
 			# counts the sample's alleles there and adds nothing.
-			$use{$i} = join "\t", $n, $named{$e} // $ref, $sort, defined $named{$e} ? 1 : 0;
+			$use[$i] = join "\t", $n, $named{$e} // $ref, $sort, defined $named{$e} ? 1 : 0;
 		}
 	}
 	unless ($none) {
 		close $in;
 		close $out or croak "$sub: can't write $g.ids.pvar: $!";
 	}
+	undef %at; # no longer needed, and the largest of these, with a key and an entry for every row
 
 	my %score = map { $_ => { alleles => 0, mismatched => 0, missing => 0, score => 0, variants => 0 } } @samples;
-	my $agree = keys %use;
+	my $agree = grep { defined } @use;
 	my $disagree = unpack('%32b*', $found) - $agree;
 	# --score takes one line for each record, so a record that two rows of
 	# weights fall on is scored in a second pass, and so on.
 	# Pass $p's score file and list of records are written as the rows are
 	# read, rather than gathered first, so that a score of millions of variants
 	# is not held twice.
-	my %layer; # record => how many rows have taken it so far
-	my @pass;  # pass => [its file's prefix, score file handle, ID list handle]
-	foreach my $i (sort { $a <=> $b } keys %use) {
-		my ($rec, $a1, undef, $has) = split /\t/, $use{$i};
-		my $p = $layer{$rec}++;
+	# A record is in pass 0 when it is the first row's to take it, and in pass
+	# $again{record} when it is a later one's; nearly every record is taken by
+	# one row alone, so a bit for each is all that most need.
+	my $taken = ''; # bit $rec set: a row has taken record $rec
+	my %again;      # record => how many rows have taken it, less 1, for a record taken by more than one
+	my @pass;       # pass => [its file's prefix, score file handle, ID list handle]
+	foreach my $i (grep { defined $use[$_] } 0 .. $#use) {
+		my ($rec, $a1, undef, $has) = split /\t/, $use[$i];
+		my $p = 0;
+		if (vec $taken, $rec, 1) {
+			$p = ++$again{$rec};
+		} else {
+			vec($taken, $rec, 1) = 1;
+		}
 		unless ($pass[$p]) {
 			my $file = File::Spec->catfile($dir, "score$p");
 			open my $fh, '>', "$file.txt" or croak "$sub: can't write $file.txt: $!";
@@ -1827,10 +1865,12 @@ sub pgs_score {
 			print {$fh} "ID\tA1\tWEIGHT\n";
 			$pass[$p] = [$file, $fh, $ids];
 		}
-		print { $pass[$p][1] } "v$rec\t$a1\t", ($has ? (split /\t/, $variant[$i])[2] : 0), "\n";
+		print { $pass[$p][1] } "v$rec\t$a1\t", ($has ? ($row->($i))[2] : 0), "\n";
 		print { $pass[$p][2] } "v$rec\n";
 	}
-	undef %layer;
+	undef $taken;
+	undef %again;
+	undef @use;
 	foreach my $pass (@pass) {
 		my ($file, $fh, $ids) = @{ $pass };
 		close $fh or croak "$sub: can't write $file.txt: $!";
@@ -1858,7 +1898,7 @@ sub pgs_score {
 		}
 	}
 	foreach my $s (values %score) {
-		$s->{missing} = @variant - $s->{variants};
+		$s->{missing} = $n_rows - $s->{variants};
 		$s->{mismatched} = $disagree;
 		$s->{average} = $s->{alleles} ? $s->{score} / $s->{alleles} : undef;
 	}
@@ -1868,7 +1908,7 @@ sub pgs_score {
 	# as a stand-in for the wrong build, they agreed at 9 of the 58 found.
 	# Disagreement at more than half the variants found is the second case.
 	if (!$agree) {
-		carp "$sub: none of the " . scalar(@variant) . ' variants of "weights" was found in "vcf" with its alleles; check that the two'
+		carp "$sub: none of the $n_rows" . ' variants of "weights" was found in "vcf" with its alleles; check that the two'
 			. ($r{match} eq 'id' ? ' use the same rsIDs' : ' are on the same genome build and name chromosomes alike');
 	} elsif ($disagree > $agree) {
 		carp "$sub: the alleles disagree at $disagree of the " . ($agree + $disagree) . ' variants of "weights" found in "vcf"; check that'
@@ -1877,6 +1917,575 @@ sub pgs_score {
 	require File::Path;
 	File::Path::rmtree($dir);
 	\%score;
+}
+
+# ---- population genetics, by PLINK 2 (since 2026-11-17)
+
+# The genotypes of "vcf" of $sub, given as plink2's arguments @$input (from
+# _plink2_input) and @$common (from _plink2_resources), made a PLINK 2 fileset
+# in $dir of the autosomes' biallelic variants alone, with each variant's ID
+# made v1, v2, ... in the fileset's order, which every command's output then
+# names it by: a VCF's own IDs are often "." and need not be unique, and
+# --indep-pairwise refuses IDs that are not. The sex chromosomes are left out,
+# since PLINK 2 reads them only once told each sample's sex and where X's
+# pseudo-autosomal regions are. Returns plink2's arguments that read the
+# fileset, the variants in its order, for _popgen_variant to look up, and the
+# samples' IIDs in its order, $what being what $sub returns by IID.
+#
+# The variants are a hash ref, whose "count" is how many there are. With
+# $keep, each one's CHROM, POS, ID, REF and ALT are also written, a line of
+# them for each, to $dir/variants.tsv ("file"), and where each line starts in
+# it is packed into "offsets" as a C double, exact to 2^53 bytes on every
+# perl. Until 2026-11-18 they were held as a perl string each, 98 bytes a
+# variant (measured on perl 5.44.0), which for the 70 million or so of a
+# whole-genome cohort is about 7 GB; the offsets take 8 bytes a variant, and
+# pca, which reports only the count, keeps nothing.
+sub _popgen_genotypes {
+	my ($sub, $vcf, $input, $common, $plink2, $dir, $what, $keep) = @_;
+	my @input = @{ $input };
+	if (ref $vcf) {
+		my $file = File::Spec->catfile($dir, 'frame.vcf');
+		_frame_vcf($sub, $vcf, $file, 'position');
+		@input = ('--vcf', $file);
+	}
+	push @input, '--vcf-half-call', 'missing' unless $input[0] eq '--pfile';
+	my $g = File::Spec->catfile($dir, 'g');
+	# PLINK 2 exits 7 when a VCF has nothing on the autosomes (it filters by
+	# --autosome as it reads), and 13 when a fileset has none left
+	unless (eval { _plink2($sub, $plink2, $dir, @input, @{ $common }, '--autosome', '--min-alleles', 2, '--max-alleles', 2, '--make-pgen', '--out', $g); 1 }) {
+		# die, not croak, which would give _plink2's message a second "at ... line"
+		die $@ unless $@ =~ /\((?:exit 13\): Error: No variants remaining|exit 7\): Error: All \d+ variant\(s\) in --[bv]cf file excluded)/;
+		croak "$sub: \"vcf\" has no biallelic variant on the autosomes (1 to 22), which are all that $sub reads";
+	}
+	my %variants = (count => 0, file => File::Spec->catfile($dir, 'variants.tsv'), offsets => '');
+	my $at = 0; # bytes written to variants.tsv
+	my ($list, %col);
+	if ($keep) {
+		open $list, '>:raw', $variants{file} or croak "$sub: can't write $variants{file}: $!";
+	}
+	open my $in, '<', "$g.pvar" or croak "$sub: can't read $g.pvar: $!";
+	open my $out, '>', "$g.ids.pvar" or croak "$sub: can't write $g.ids.pvar: $!";
+	while (my $line = <$in>) {
+		if ($line =~ /\A##/) {
+			print {$out} $line;
+			next;
+		}
+		chomp $line;
+		my @f = split /\t/, $line, -1;
+		if ($line =~ /\A#CHROM/) {
+			%col = map { $f[$_] => $_ } 0 .. $#f;
+			print {$out} "$line\n";
+			next;
+		}
+		if ($keep) {
+			my $v = join("\t", @f[ @col{'#CHROM', 'POS', 'ID', 'REF', 'ALT'} ]) . "\n";
+			print {$list} $v or croak "$sub: can't write $variants{file}: $!";
+			$variants{offsets} .= pack 'd', $at;
+			$at += length $v;
+		}
+		$f[ $col{ID} ] = 'v' . ++$variants{count};
+		print {$out} join("\t", @f), "\n";
+	}
+	close $in;
+	close $out or croak "$sub: can't write $g.ids.pvar: $!";
+	if ($keep) {
+		close $list or croak "$sub: can't write $variants{file}: $!";
+	} else {
+		delete @variants{qw(file offsets)};
+	}
+	my @samples = _psam_iids($sub, "$g.psam", $what);
+	(['--pgen', "$g.pgen", '--pvar', "$g.ids.pvar", '--psam', "$g.psam", @{ $common }], \%variants, \@samples);
+}
+
+# The variant that PLINK 2's output names $id ("v<n>", as _popgen_genotypes
+# named it) as a hash ref of chrom, pos, id, ref and alt, read from the file
+# of $variants (which _popgen_genotypes kept). Its handle is kept open in
+# $variants, with "next" the variant it will read next, so that variants
+# asked for in order, as every output but --r2's lists them, are read on
+# without a seek.
+sub _popgen_variant {
+	my ($variants, $id) = @_;
+	croak "_popgen_variant: PLINK 2 named a variant \"$id\", which it was not given"
+		unless defined $id && $id =~ /\Av([1-9][0-9]*)\z/ && $1 <= $variants->{count};
+	my $n = $1 - 1;
+	my $file = $variants->{file};
+	unless ($variants->{fh}) {
+		open $variants->{fh}, '<:raw', $file or croak "_popgen_variant: can't read $file: $!";
+		$variants->{next} = 0;
+	}
+	my $fh = $variants->{fh};
+	if ($variants->{next} != $n) {
+		my $offset = unpack 'd', substr $variants->{offsets}, 8 * $n, 8;
+		seek $fh, $offset, 0 or croak "_popgen_variant: can't seek to byte $offset of $file: $!";
+	}
+	my $line = <$fh>;
+	croak "_popgen_variant: $file ends before variant " . ($n + 1) unless defined $line && chomp $line;
+	$variants->{next} = $n + 1;
+	my %v;
+	@v{qw(chrom pos id ref alt)} = split /\t/, $line, -1;
+	$v{pos} += 0;
+	\%v;
+}
+
+# Each line of PLINK 2's tab-separated output $file, for $sub, given to $code
+# as a hash ref keyed by its header's columns (the header's "#" dropped), with
+# PLINK 2's "NA" and "nan" made undef.
+my $Plink2_na = qr/\A(?:NA|-?nan)\z/i;
+sub _plink2_rows {
+	my ($sub, $file, $code) = @_;
+	open my $fh, '<', $file or croak "$sub: can't read $file: $!";
+	my $head = <$fh>;
+	croak "$sub: PLINK 2 wrote $file with no header" unless defined $head;
+	chomp $head;
+	$head =~ s/\A#//;
+	my @cols = split /\t/, $head;
+	while (my $line = <$fh>) {
+		chomp $line;
+		my %row;
+		@row{@cols} = map { $_ =~ $Plink2_na ? undef : $_ } split /\t/, $line, -1;
+		$code->(\%row);
+	}
+	close $fh;
+}
+
+# $x as a number, or undef for undef, so that a JSON encoder writes it as one.
+sub _number { defined $_[0] ? 0 + $_[0] : undef }
+
+# The temporary directory $dir removed, as a function of this section returns,
+# once the handle _popgen_variant keeps in $variants is closed: Windows will
+# not remove a file that is open.
+sub _popgen_cleanup {
+	my ($dir, $variants) = @_;
+	if (my $fh = delete $variants->{fh}) {
+		close $fh or croak "_popgen_cleanup: can't read $variants->{file}: $!";
+	}
+	require File::Path;
+	File::Path::rmtree($dir);
+}
+
+# Dies unless $sub's option $key, $v, is 0 or 1.
+sub _flag {
+	my ($sub, $key, $v) = @_;
+	croak "$sub: \"$key\" must be 0 or 1, not " . _what($v) unless !ref $v && ($v eq '0' || $v eq '1');
+}
+
+# The setup every function of this section shares: "vcf" of $sub checked, PLINK
+# 2 found, a temporary directory made, and the genotypes read into it by
+# _popgen_genotypes, which keeps each variant's columns when $keep is 1 and
+# only their count when it is 0. Returns that directory, the plink2 program,
+# and what _popgen_genotypes returns.
+sub _popgen_setup {
+	my ($sub, $args, $what, $keep) = @_;
+	my @common = _plink2_resources($sub, $args);
+	my @input = _plink2_input($sub, $args->{vcf});
+	my $plink2 = _plink2_program($sub);
+	# removed as $sub returns, or, after an error, as the program ends, as
+	# pgs_score's is
+	require File::Temp;
+	my $dir = File::Temp::tempdir(CLEANUP => 1);
+	($dir, $plink2, _popgen_genotypes($sub, $args->{vcf}, \@input, \@common, $plink2, $dir, $what, $keep));
+}
+
+sub pca {
+	my $sub = 'pca';
+	my $args = _args(\@_, $sub, ['vcf'], [qw(memory n threads)]);
+	my %r;
+	$r{n} = $args->{n} // 10; # how many principal components; 10 is PLINK 2's own default
+	croak "$sub: \"n\" must be a whole number, 1 or more, not " . _what($r{n}) unless !ref $r{n} && $r{n} =~ /\A[1-9][0-9]*\z/;
+	my ($dir, $plink2, $files, $variants, $samples) = _popgen_setup($sub, $args, 'principal components', 0);
+	my $out = File::Spec->catfile($dir, 'pca');
+	_plink2($sub, $plink2, $dir, @{ $files }, '--pca', $r{n}, '--out', $out);
+	open my $fh, '<', "$out.eigenval" or croak "$sub: can't read $out.eigenval: $!";
+	chomp(my @eigenvalues = <$fh>);
+	close $fh;
+	@eigenvalues = map { 0 + $_ } @eigenvalues;
+	my %pcs;
+	_plink2_rows($sub, "$out.eigenvec", sub {
+		my ($row) = @_;
+		$pcs{ $row->{IID} } = [ map { _number($row->{"PC$_"}) } 1 .. @eigenvalues ];
+	});
+	_popgen_cleanup($dir, $variants);
+	{ eigenvalues => \@eigenvalues, samples => \%pcs, variants => 0 + $variants->{count} };
+}
+
+sub fst {
+	my $sub = 'fst';
+	my $args = _args(\@_, $sub, [qw(vcf populations)], [qw(memory method per_variant threads)]);
+	my %r;
+	$r{method} = $args->{method} // 'hudson'; # 'hudson' = Bhatia et al. (2013), PLINK 2's default; 'wc' = Weir and Cockerham (1984)
+	croak "$sub: \"method\" must be \"hudson\" or \"wc\", not " . _what($r{method})
+		unless !ref $r{method} && ($r{method} eq 'hudson' || $r{method} eq 'wc');
+	$r{per_variant} = $args->{per_variant} // 0; # 1 = each variant's Fst too, for each pair of populations; 0 = each pair's alone
+	_flag($sub, 'per_variant', $r{per_variant});
+	my $pops = $args->{populations};
+	croak "$sub: \"populations\" must be a hash ref of sample => population, not " . _what($pops) unless ref $pops eq 'HASH';
+	foreach my $s (sort keys %{ $pops }) {
+		my $p = $pops->{$s};
+		croak "$sub: \"populations\" gives \"$s\" the population " . _what($p) . ', where a population is a name'
+			unless defined $p && !ref $p && length $p;
+	}
+	my %named = map { $_ => 1 } values %{ $pops };
+	croak "$sub: \"populations\" names " . (%named ? 'one population' : 'no population') . ', and Fst is between two or more' if keys %named < 2;
+	my ($dir, $plink2, $files, $variants, $samples) = _popgen_setup($sub, $args, 'populations', $r{per_variant});
+	# Each population is named in PLINK 2's file by a code, P1, P2, ..., in the
+	# order of the names, since PLINK 2 would take a name that is a number as a
+	# quantitative value, and one with a space as two fields.
+	my @names = sort keys %named;
+	my %code = map { $names[$_] => 'P' . ($_ + 1) } 0 .. $#names;
+	my %name = reverse %code;
+	my %size; # population => its samples in the VCF
+	my $pheno = File::Spec->catfile($dir, 'populations.tsv');
+	open my $fh, '>', $pheno or croak "$sub: can't write $pheno: $!";
+	print {$fh} "#IID\tPOP\n";
+	foreach my $s (@{ $samples }) {
+		my $p = $pops->{$s};
+		$size{$p}++ if defined $p;
+		# NONE is PLINK 2's missing category (--missing-catname); it refuses NA there
+		print {$fh} "$s\t", defined $p ? $code{$p} : 'NONE', "\n";
+	}
+	close $fh or croak "$sub: can't write $pheno: $!";
+	croak "$sub: " . (%size ? 'only "' . join('', keys %size) . '", one' : 'none') . ' of the ' . @names
+		. ' populations of "populations" has a sample in "vcf", and Fst is between two or more' if keys %size < 2;
+	my $out = File::Spec->catfile($dir, 'fst');
+	_plink2($sub, $plink2, $dir, @{ $files }, '--pheno', $pheno, '--fst', 'POP', "method=$r{method}",
+		$r{per_variant} ? 'report-variants' : (), '--out', $out);
+	my $column = $r{method} eq 'hudson' ? 'HUDSON_FST' : 'WC_FST';
+	my (%fst, %per);
+	_plink2_rows($sub, "$out.fst.summary", sub {
+		my ($row) = @_;
+		my ($x, $y) = @{ $row }{qw(POP1 POP2)};
+		my ($p, $q) = @name{$x, $y};
+		$fst{$p}{$q} = $fst{$q}{$p} = _number($row->{$column});
+		return unless $r{per_variant};
+		my @each;
+		_plink2_rows($sub, "$out.$x.$y.fst.var", sub {
+			my ($v) = @_;
+			my $variant = _popgen_variant($variants, $v->{ID});
+			$variant->{fst} = _number($v->{$column});
+			push @each, $variant;
+		});
+		$per{$p}{$q} = $per{$q}{$p} = \@each;
+	});
+	_popgen_cleanup($dir, $variants);
+	{ method => $r{method}, populations => \%size, fst => \%fst, variants => $r{per_variant} ? \%per : undef };
+}
+
+sub hardy_weinberg {
+	my $sub = 'hardy_weinberg';
+	my $args = _args(\@_, $sub, ['vcf'], [qw(memory midp threads)]);
+	my %r;
+	$r{midp} = $args->{midp} // 0; # 1 = the mid-p (Graffelman and Moreno 2013); 0 = the exact test's own p (Wigginton et al. 2005), PLINK 2's default
+	_flag($sub, 'midp', $r{midp});
+	my ($dir, $plink2, $files, $variants) = _popgen_setup($sub, $args, 'genotype counts', 1);
+	my $out = File::Spec->catfile($dir, 'hardy');
+	_plink2($sub, $plink2, $dir, @{ $files }, '--hardy', $r{midp} ? 'midp' : (), '--out', $out);
+	my @out;
+	_plink2_rows($sub, "$out.hardy", sub {
+		my ($row) = @_;
+		my $v = _popgen_variant($variants, $row->{ID});
+		# PLINK 2 counts by A1, which may be either allele
+		my $a1_ref = uc $row->{A1} eq uc $v->{ref} ? 1 : 0;
+		@{ $v }{qw(hom_ref het hom_alt)} = map { 0 + $_ } @{ $row }{ $a1_ref ? qw(HOM_A1_CT HET_A1_CT TWO_AX_CT) : qw(TWO_AX_CT HET_A1_CT HOM_A1_CT) };
+		$v->{observed_het} = _number($row->{'O(HET_A1)'});
+		$v->{expected_het} = _number($row->{'E(HET_A1)'});
+		$v->{p} = _number($row->{ $r{midp} ? 'MIDP' : 'P' });
+		push @out, $v;
+	});
+	_popgen_cleanup($dir, $variants);
+	\@out;
+}
+
+sub ld {
+	my $sub = 'ld';
+	my $args = _args(\@_, $sub, ['vcf'], [qw(memory min_r2 phased threads window window_kb)]);
+	my %r;
+	$r{window_kb} = $args->{window_kb} // 1000; # the farthest apart, in kb, the two variants of a pair are; 1000 is PLINK 2's default
+	croak "$sub: \"window_kb\" must be a number above 0, not " . _what($r{window_kb})
+		unless !ref $r{window_kb} && $r{window_kb} =~ $Number && $r{window_kb} > 0;
+	$r{window} = $args->{window}; # undef = no limit, PLINK 2's default; n = the two variants of a pair are at most n variants apart (1 = adjacent)
+	croak "$sub: \"window\" must be a whole number, 1 or more, not " . _what($r{window})
+		if defined $r{window} && (ref $r{window} || $r{window} !~ /\A[1-9][0-9]*\z/);
+	$r{min_r2} = $args->{min_r2} // 0.2; # the least r² of a pair reported; 0.2 is PLINK 2's default, and 0 reports every pair
+	croak "$sub: \"min_r2\" must be a number from 0 to 1, not " . _what($r{min_r2})
+		unless !ref $r{min_r2} && $r{min_r2} =~ $Number && $r{min_r2} >= 0 && $r{min_r2} <= 1;
+	$r{phased} = $args->{phased} // 0; # 0 = r² of the genotypes' allele counts (--r2-unphased); 1 = r² of the haplotypes, and D' (--r2-phased)
+	_flag($sub, 'phased', $r{phased});
+	my ($dir, $plink2, $files, $variants) = _popgen_setup($sub, $args, 'pairs', 1);
+	my $out = File::Spec->catfile($dir, 'ld');
+	# PLINK 2's --ld-window counts the second variant: 2 is adjacent pairs alone
+	_plink2($sub, $plink2, $dir, @{ $files }, $r{phased} ? ('--r2-phased', 'cols=+dprime') : '--r2-unphased',
+		'--ld-window-kb', $r{window_kb}, '--ld-window-r2', $r{min_r2}, (defined $r{window} ? ('--ld-window', $r{window} + 1) : ()), '--out', $out);
+	my $column = $r{phased} ? 'PHASED_R2' : 'UNPHASED_R2';
+	my @pairs;
+	_plink2_rows($sub, "$out.vcor", sub {
+		my ($row) = @_;
+		push @pairs, { a => _popgen_variant($variants, $row->{ID_A}), b => _popgen_variant($variants, $row->{ID_B}),
+			r2 => _number($row->{$column}), dprime => $r{phased} ? _number($row->{DPRIME}) : undef };
+	});
+	_popgen_cleanup($dir, $variants);
+	\@pairs;
+}
+
+sub ld_prune {
+	my $sub = 'ld_prune';
+	my $args = _args(\@_, $sub, ['vcf'], [qw(memory r2 step threads window window_kb)]);
+	my %r;
+	croak "$sub: the window is given either in variants, as \"window\", or in kb, as \"window_kb\", not both"
+		if defined $args->{window} && defined $args->{window_kb};
+	$r{window_kb} = $args->{window_kb}; # undef = the window is counted in variants, by "window"; n = n kb
+	croak "$sub: \"window_kb\" must be a whole number, 1 or more, not " . _what($r{window_kb})
+		if defined $r{window_kb} && (ref $r{window_kb} || $r{window_kb} !~ /\A[1-9][0-9]*\z/);
+	# 50, 5 and 0.5 are the example the PLINK 1.9 manual gives for --indep-pairwise
+	$r{window} = defined $r{window_kb} ? undef : $args->{window} // 50; # the variants in each window; undef with "window_kb"
+	croak "$sub: \"window\" must be a whole number, 2 or more, not " . _what($r{window})
+		if defined $r{window} && (ref $r{window} || $r{window} !~ /\A[1-9][0-9]*\z/ || $r{window} < 2);
+	$r{step} = $args->{step} // (defined $r{window_kb} ? 1 : 5); # the variants the window moves on by; PLINK 2 takes only 1 with a window in kb
+	croak "$sub: \"step\" must be a whole number, 1 or more, not " . _what($r{step}) unless !ref $r{step} && $r{step} =~ /\A[1-9][0-9]*\z/;
+	croak "$sub: \"step\" must be 1 with \"window_kb\", as PLINK 2 has it, not $r{step}" if defined $r{window_kb} && $r{step} != 1;
+	$r{r2} = $args->{r2} // 0.5; # of two variants whose r² is above this, one is pruned
+	croak "$sub: \"r2\" must be a number above 0 and below 1, not " . _what($r{r2})
+		unless !ref $r{r2} && $r{r2} =~ $Number && $r{r2} > 0 && $r{r2} < 1;
+	my ($dir, $plink2, $files, $variants) = _popgen_setup($sub, $args, 'variants', 1);
+	my $out = File::Spec->catfile($dir, 'prune');
+	_plink2($sub, $plink2, $dir, @{ $files }, '--indep-pairwise', defined $r{window_kb} ? "$r{window_kb}kb" : $r{window}, $r{step}, $r{r2}, '--out', $out);
+	my %list;
+	foreach my $k (qw(in out)) {
+		open my $fh, '<', "$out.prune.$k" or croak "$sub: can't read $out.prune.$k: $!";
+		chomp(my @ids = <$fh>);
+		close $fh;
+		# in the VCF's order, which PLINK 2's lists already are, and need not be
+		$list{$k} = [ map { _popgen_variant($variants, "v$_") } sort { $a <=> $b } map { /\Av([0-9]+)\z/ ? $1 : -1 } @ids ];
+	}
+	_popgen_cleanup($dir, $variants);
+	{ keep => $list{in}, remove => $list{out} };
+}
+
+# The rows of "phenotypes" of $sub as an array of hash refs: a data frame, or a
+# tab-separated file whose first line is its header, which may begin with "#",
+# as PLINK 2's own phenotype files' does; the "#" is dropped.
+sub _phenotype_rows {
+	my ($sub, $phenotypes) = @_;
+	return _frame_rows($sub, 'phenotypes', $phenotypes) if ref $phenotypes;
+	croak "$sub: \"phenotypes\" file \"$phenotypes\" doesn't exist or isn't readable" unless -f $phenotypes && -r _;
+	open my $fh, '<', $phenotypes or croak "$sub: can't read $phenotypes: $!";
+	my (@cols, @rows);
+	while (my $line = <$fh>) {
+		$line =~ s/\r?\n\z//;
+		next if $line eq '';
+		unless (@cols) {
+			$line =~ s/\A#//;
+			@cols = split /\t/, $line, -1;
+			next;
+		}
+		my @f = split /\t/, $line, -1;
+		croak "$sub: line $. of \"phenotypes\" file $phenotypes has " . @f . ' fields, and its header ' . @cols unless @f == @cols;
+		my %row;
+		@row{@cols} = @f;
+		push @rows, \%row;
+	}
+	close $fh;
+	croak "$sub: \"phenotypes\" file $phenotypes has no rows" unless @rows;
+	\@rows;
+}
+
+# A value of a phenotype or covariate that is missing: undef, empty, or NA.
+sub _missing_value { !defined $_[0] || $_[0] eq '' || $_[0] eq 'NA' ? 1 : 0 }
+
+sub gwas {
+	my $sub = 'gwas';
+	my $args = _args(\@_, $sub, [qw(vcf phenotypes phenotype)], [qw(covariates memory model threads)]);
+	my %r;
+	$r{phenotype} = $args->{phenotype};
+	croak "$sub: \"phenotype\" must be the name of a column of \"phenotypes\", not " . _what($r{phenotype})
+		if ref $r{phenotype} || $r{phenotype} eq '';
+	$r{covariates} = $args->{covariates} // []; # the columns of "phenotypes" the test adjusts for; [] = none
+	croak "$sub: \"covariates\" must be an array ref of names of columns of \"phenotypes\", not " . _what($r{covariates})
+		unless ref $r{covariates} eq 'ARRAY';
+	my %seen = ($r{phenotype} => 'phenotype');
+	foreach my $c (@{ $r{covariates} }) {
+		croak "$sub: \"covariates\" must name columns of \"phenotypes\", and one is " . _what($c) if !defined $c || ref $c || $c eq '';
+		croak "$sub: \"covariates\" names \"$c\", which is already " . ($seen{$c} eq 'phenotype' ? 'the phenotype' : 'a covariate') if $seen{$c};
+		$seen{$c} = 'covariate';
+	}
+	$r{model} = $args->{model}; # undef = decided by the phenotype's values; 'linear' = linear regression; 'logistic' = logistic (Firth's where it fails to converge)
+	croak "$sub: \"model\" must be \"linear\" or \"logistic\", not " . _what($r{model})
+		if defined $r{model} && (ref $r{model} || ($r{model} ne 'linear' && $r{model} ne 'logistic'));
+	_plink2_resources($sub, $args);
+	_plink2_input($sub, $args->{vcf});
+	my $rows = _phenotype_rows($sub, $args->{phenotypes});
+	my ($id_col) = grep { exists $rows->[0]{$_} } 'IID', '#IID';
+	croak "$sub: \"phenotypes\" has no \"IID\" column, which names each row's sample" unless defined $id_col;
+	my @cols = ($r{phenotype}, @{ $r{covariates} });
+	my @absent = grep { !exists $rows->[0]{$_} } @cols;
+	croak "$sub: \"phenotypes\" has no " . join(', ', map { "\"$_\"" } @absent) . ' column' . (@absent > 1 ? 's' : '') if @absent;
+	my %value; # column => sample => its value, missing ones left out
+	foreach my $row (@{ $rows }) {
+		my $id = $row->{$id_col};
+		croak "$sub: \"phenotypes\" has a row whose IID is " . _what($id) if ref $id || _missing_value($id);
+		croak "$sub: \"phenotypes\" has two rows for \"$id\"" if exists $value{''}{$id};
+		$value{''}{$id} = 1; # '' is no column's name: it holds the samples seen
+		foreach my $c (@cols) {
+			my $v = $row->{$c};
+			croak "$sub: column \"$c\" of \"phenotypes\" has " . _what($v) . " for \"$id\"" if ref $v;
+			$value{$c}{$id} = $v unless _missing_value($v);
+		}
+	}
+	my %numeric; # column => 1 when every value of it is a number, else 0, when it is a categorical covariate
+	foreach my $c (@cols) {
+		my ($word) = grep { $value{$c}{$_} !~ $Number } sort keys %{ $value{$c} };
+		$numeric{$c} = defined $word ? 0 : 1;
+		croak "$sub: phenotype \"$c\" has \"$value{$c}{$word}\" for \"$word\", which isn't a number" if !$numeric{$c} && $c eq $r{phenotype};
+		croak "$sub: column \"$c\" of \"phenotypes\" has \"$value{$c}{$word}\" for \"$word\", and a covariate's values have no whitespace"
+			if !$numeric{$c} && $value{$c}{$word} =~ /\s/;
+	}
+	my %level = map { (0 + $_) => 1 } values %{ $value{ $r{phenotype} } };
+	my @levels = sort { $a <=> $b } keys %level;
+	croak "$sub: phenotype \"$r{phenotype}\" has " . (@levels ? "only the value $levels[0]" : 'no values') . ', and a test needs two or more' if @levels < 2;
+	my $case_control = @levels == 2 && ($levels[0] == 1 && $levels[1] == 2 || $levels[0] == 0 && $levels[1] == 1) ? 1 : 0;
+	$r{model} //= $case_control ? 'logistic' : 'linear';
+	croak "$sub: \"model\" is logistic, and phenotype \"$r{phenotype}\" has the values " . join(', ', @levels[0 .. ($#levels < 3 ? $#levels : 3)])
+		. (@levels > 4 ? ', ...' : '') . ', where a case-control phenotype has two: 1 and 2, or 0 and 1' if $r{model} eq 'logistic' && !$case_control;
+	my ($dir, $plink2, $files, $variants, $samples) = _popgen_setup($sub, $args, 'phenotypes', 1);
+	my $with = grep { exists $value{ $r{phenotype} }{$_} } @{ $samples };
+	croak "$sub: none of the " . @{ $samples } . " samples of \"vcf\" has a value of \"$r{phenotype}\" in \"phenotypes\"; check that its IIDs are the VCF's sample names"
+		unless $with;
+	# PLINK 2 takes a column whose values are all 0, 1 and 2 for case-control,
+	# 0 being missing, whatever is meant, so such a quantitative phenotype or
+	# covariate is moved up by 3, which changes no test of a variant: a linear
+	# regression's slopes, and their standard errors, do not depend on where its
+	# phenotype's or covariates' zeroes are.
+	my %shift = map {
+		my $c = $_;
+		($c => $numeric{$c} && !($c eq $r{phenotype} && $r{model} eq 'logistic') && !(grep { $_ != 0 && $_ != 1 && $_ != 2 } values %{ $value{$c} }) ? 3 : 0);
+	} @cols;
+	# A categorical covariate's values are written as codes, C1, C2, ..., in the
+	# order of the values, since PLINK 2 refuses one that begins with a number.
+	my %category = map {
+		my $c = $_;
+		my @v = sort keys %{ { map { $_ => 1 } values %{ $value{$c} } } };
+		($c => { map { $v[$_] => 'C' . ($_ + 1) } 0 .. $#v });
+	} grep { !$numeric{$_} } @{ $r{covariates} };
+	my $pheno = File::Spec->catfile($dir, 'phenotypes.tsv');
+	open my $fh, '>', $pheno or croak "$sub: can't write $pheno: $!";
+	# The columns are named Y and X1, X2, ..., since a column's own name could
+	# hold a space, or be one PLINK 2 reserves.
+	my @names = ('Y', map { "X$_" } 1 .. @{ $r{covariates} });
+	print {$fh} join("\t", '#IID', @names), "\n";
+	foreach my $s (@{ $samples }) {
+		print {$fh} join("\t", $s, map {
+			my $c = $_;
+			my $v = $value{$c}{$s};
+			# NONE is PLINK 2's missing category, which it refuses NA for
+			!defined $v ? ($numeric{$c} ? 'NA' : 'NONE')
+				: $category{$c} ? $category{$c}{$v}
+				: $c eq $r{phenotype} && $r{model} eq 'logistic' ? ($v == $levels[0] ? 1 : 2)
+				: $shift{$c} ? $v + $shift{$c}
+				: $v;
+		} @cols), "\n";
+	}
+	close $fh or croak "$sub: can't write $pheno: $!";
+	my @covar = map { $names[$_] } 1 .. $#names;
+	my $out = File::Spec->catfile($dir, 'gwas');
+	# omit-ref makes A1, the allele whose copies are counted, the ALT, where
+	# PLINK 2 would otherwise count the minor allele's.
+	_plink2($sub, $plink2, $dir, @{ $files }, '--pheno', $pheno, '--pheno-name', 'Y', '--no-input-missing-phenotype',
+		(@covar ? ('--covar', $pheno, '--covar-name', join(',', @covar)) : ()),
+		# so that a covariate of large values, such as a year, does not make the
+		# regression's matrix too ill-conditioned for PLINK 2 to solve
+		((grep { $numeric{$_} } @{ $r{covariates} }) ? '--covar-variance-standardize' : ()),
+		'--glm', 'omit-ref', 'hide-covar', (@covar ? () : 'allow-no-covars'), 'cols=a1freq,firth,test,nobs,beta,se,tz,p,err', '--out', $out);
+	my ($result) = grep { -f } map { "$out.Y.glm.$_" } $r{model} eq 'linear' ? 'linear' : qw(logistic.hybrid logistic logistic.firth);
+	croak "$sub: PLINK 2 wrote no results of its regression to $out.Y.glm.*" unless defined $result;
+	my @out;
+	_plink2_rows($sub, $result, sub {
+		my ($row) = @_;
+		my $v = _popgen_variant($variants, $row->{ID});
+		croak "$sub: PLINK 2 counted the copies of $row->{A1} at $v->{chrom}:$v->{pos}, which isn't its ALT, $v->{alt}" unless uc $row->{A1} eq uc $v->{alt};
+		$v->{alt_freq} = _number($row->{A1_FREQ});
+		$v->{n} = _number($row->{OBS_CT});
+		@{ $v }{qw(beta se stat p)} = map { _number($_) } @{ $row }{ 'BETA', 'SE', $r{model} eq 'linear' ? 'T_STAT' : 'Z_STAT', 'P' };
+		$v->{firth} = ($row->{'FIRTH?'} // 'N') eq 'Y' ? 1 : 0;
+		$v->{error} = defined $row->{ERRCODE} && $row->{ERRCODE} ne '.' ? $row->{ERRCODE} : undef;
+		push @out, $v;
+	});
+	_popgen_cleanup($dir, $variants);
+	{ model => $r{model}, samples => $with, variants => \@out };
+}
+
+# ---- admixture proportions, in Bioinf.xs (since 2026-11-17)
+
+sub admixture {
+	my $sub = 'admixture';
+	my $args = _args(\@_, $sub, [qw(vcf k)], [qw(max_iterations min_depth seed starts tolerance)]);
+	my %r;
+	$r{k} = $args->{k}; # the ancestral populations
+	croak "$sub: \"k\" must be a whole number, 2 or more, not " . _what($r{k}) unless !ref $r{k} && $r{k} =~ /\A[1-9][0-9]*\z/ && $r{k} >= 2;
+	# On t/data/popgen.vcf at K 3, ADMIXTURE 1.3.0 found the lesser of two
+	# maxima from 2 of the 6 seeds tried (t/admixture.t), so a single start
+	# finds the greater with a chance of about 2 in 3; ten fail together about
+	# once in 60,000 such fits, if the starts' chances are alike.
+	$r{starts} = $args->{starts} // 10; # the random starts fitted, of which the one of the highest likelihood is kept
+	croak "$sub: \"starts\" must be a whole number, 1 or more, not " . _what($r{starts}) unless !ref $r{starts} && $r{starts} =~ /\A[1-9][0-9]*\z/;
+	$r{seed} = $args->{seed} // 1; # start s (counting from 0) is drawn from seed + s
+	croak "$sub: \"seed\" must be a whole number, 0 or more, not " . _what($r{seed})
+		unless !ref $r{seed} && $r{seed} =~ /\A[0-9]+\z/ && $r{seed} <= ~0 - $r{starts};
+	# The fit stops when an iteration raises the log-likelihood by less than
+	# this, as ADMIXTURE 1.3.0's -C does, whose default is 1e-4. That is too
+	# loose for these EM steps, which creep where the likelihood is flat. On
+	# t/data/popgen.vcf at K 3 (2026-11-17), against ADMIXTURE's fit at
+	# -C=1e-12: 1e-4 stopped the best of ten starts 1.1e-3 below its maximum,
+	# with q 8e-4 from its. The 10 starts of seeds 1 and 3 to 12 that reached
+	# the greater maximum came, at worst, within 1.4e-4 of its q at 1e-8, 1.9e-5
+	# at 1e-10 and 1.75e-5 at 1e-12, the last being ADMIXTURE's own
+	# convergence, for 2,550, 3,030 and 3,172 iterations in all.
+	$r{tolerance} = $args->{tolerance} // 1e-10;
+	croak "$sub: \"tolerance\" must be a number above 0, not " . _what($r{tolerance})
+		unless !ref $r{tolerance} && $r{tolerance} =~ $Number && $r{tolerance} > 0;
+	$r{max_iterations} = $args->{max_iterations} // 10_000; # SQUAREM cycles, of three EM steps each, after which a start that has not converged stops
+	croak "$sub: \"max_iterations\" must be a whole number, 1 or more, not " . _what($r{max_iterations})
+		unless !ref $r{max_iterations} && $r{max_iterations} =~ /\A[1-9][0-9]*\z/;
+	$r{min_depth} = $args->{min_depth} // 0; # 0 = every genotype counts, whatever its DP; n = a genotype of DP below n is missing
+	croak "$sub: \"min_depth\" must be a whole number, 0 or more, not " . _what($r{min_depth})
+		unless !ref $r{min_depth} && $r{min_depth} =~ /\A[0-9]+\z/;
+	my $vcf = $args->{vcf};
+	my ($next, $close) = _vcf_open($sub, 'vcf', $vcf);
+	my ($g, $variants, $names, $called) = _located(sub { _admixture_genotypes($next, $vcf, $r{min_depth}) });
+	$close->();
+	my $n = @{ $names };
+	croak "$sub: \"vcf\" $vcf has no biallelic variant on the autosomes (1 to 22), which are all that $sub reads" unless @{ $variants };
+	croak "$sub: \"vcf\" $vcf has $n sample" . ($n == 1 ? '' : 's') . ", and \"k\" is $r{k}; a sample's ancestry is a share of the k populations, which needs more samples than k"
+		unless $n > $r{k};
+	my ($best, @ll); # the best start's [q, p, log-likelihood, iterations, converged]; each start's log-likelihood
+	foreach my $s (0 .. $r{starts} - 1) {
+		my @fit = _located(sub { _admixture_fit($g, $n, $r{k}, $r{seed} + $s, $r{max_iterations}, $r{tolerance}) });
+		push @ll, $fit[2];
+		# the first of equal ones, so that the order of the starts decides a tie
+		$best = \@fit if !$best || $fit[2] > $best->[2];
+	}
+	my ($q, $p, $ll, $iterations, $converged) = @{ $best };
+	carp "$sub: the best of the $r{starts} start" . ($r{starts} == 1 ? '' : 's') . " stopped after $iterations iterations without converging"
+		. " (its log-likelihood still rising by $r{tolerance} or more); give a larger \"max_iterations\"" unless $converged;
+	my @none = grep { !$called->[$_] } 0 .. $n - 1;
+	carp "$sub: " . scalar(@none) . ' sample' . (@none == 1 ? ' has' : 's have') . ' no called genotype, and so an even share of each population: '
+		. join(', ', map { "\"$names->[$_]\"" } @none[0 .. ($#none < 4 ? $#none : 4)]) . (@none > 5 ? ', ...' : '') if @none;
+	# The populations' order is the fit's own, which differs from start to
+	# start, so they are put in an order that does not: by their share of the
+	# samples, the largest first.
+	my @share = (0) x $r{k};
+	foreach my $row (@{ $q }) {
+		$share[$_] += $row->[$_] foreach 0 .. $r{k} - 1;
+	}
+	my @order = sort { $share[$b] <=> $share[$a] || $a <=> $b } 0 .. $r{k} - 1;
+	my %samples = map { $names->[$_] => [ @{ $q->[$_] }[@order] ] } 0 .. $n - 1;
+	my @variants = map {
+		my %v;
+		@v{qw(chrom pos id ref alt)} = split /\t/, $variants->[$_];
+		$v{pos} += 0;
+		$v{freq} = [ @{ $p->[$_] }[@order] ];
+		\%v;
+	} 0 .. $#{ $variants };
+	{ k => 0 + $r{k}, loglik => $ll, iterations => $iterations, converged => $converged, starts => \@ll,
+		samples => \%samples, variants => \@variants };
 }
 
 # ---- VCF genotypes: sex and parentage
@@ -4605,6 +5214,17 @@ __END__
  # a polygenic score for each sample of a VCF, from a PGS Catalog scoring file
  my $scores = pgs_score(vcf => 'genome.vcf.gz', weights => 'PGS000138.txt.gz');
 
+ # population genetics of a cohort's VCF, by PLINK 2
+ my $pruned = ld_prune(vcf => 'cohort.vcf.gz');                 # { keep => [...], remove => [...] }
+ my $pcs    = pca(vcf => 'cohort.vcf.gz', n => 4);              # { samples => { sample => [PC1 .. PC4] }, ... }
+ my $fst    = fst(vcf => 'cohort.vcf.gz', populations => \%population_of);
+ print $fst->{fst}{CEU}{YRI};
+ my $hwe    = hardy_weinberg(vcf => 'cohort.vcf.gz');           # [ { chrom, pos, het, p, ... }, ... ]
+ my $ld     = ld(vcf => 'cohort.vcf.gz', window_kb => 250);      # [ { a => {...}, b => {...}, r2 }, ... ]
+ my $gwas   = gwas(vcf => 'cohort.vcf.gz', phenotypes => 'pheno.tsv', phenotype => 'height',
+                   covariates => [qw(age sex)]);                # [ { beta, se, p, ... }, ... ]
+ my $anc    = admixture(vcf => 'cohort.vcf.gz', k => 3);        # { samples => { sample => [3 fractions] }, ... }
+
  # each sample's sex, from its heterozygosity on X
  my $sex = sex_check(vcf => 'cohort.vcf.bz2'); # { sample => { sex => 'female', ... } }
 
@@ -4637,12 +5257,12 @@ everyday operations on a sequence (its reverse complement, its translation
 under any of NCBI's genetic codes, its open reading frames, GC content, k-mers,
 motifs, molecular weight and isoelectric point, and an assembly's N50); BLAST
 hit ranking, a search of the PDB's structures for a
-sequence, and multiple-sequence-alignment plots and LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, how every two people are related, how well one VCF's calls agree with another's, each sample's ABO and RhD blood type, and the genotypes of the HIrisPlex-S eye, hair and skin colour panel, with a trait predictor for any multinomial logistic model you supply.
+sequence, and multiple-sequence-alignment plots and LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; a cohort's principal components, Fst between populations, Hardy-Weinberg tests, linkage disequilibrium and its pruning, and association tests (GWAS), by PLINK 2; admixture proportions; and, from VCFs, each sample's sex, whether two people are parent and child, how every two people are related, how well one VCF's calls agree with another's, each sample's ABO and RhD blood type, and the genotypes of the HIrisPlex-S eye, hair and skin colour panel, with a trait predictor for any multinomial logistic model you supply.
 
 Nothing is exported by default; ask for functions by name or with C<:all>.
 Every function dies (via C<Carp::croak>) on bad arguments, with a message that
 starts with the name of the function that raised it, as in
-C<fasta2hash: couldn't find "four" in x.fa>. C<pdb_search>, C<pgs_score>, C<sex_check>,
+C<fasta2hash: couldn't find "four" in x.fa>. C<pdb_search>, C<pgs_score>, C<pca>, C<fst>, C<hardy_weinberg>, C<ld>, C<ld_prune>, C<gwas>, C<admixture>, C<sex_check>,
 C<parent>, C<relatedness>, C<concordance>, C<blood_type>, C<hirisplex_genotypes>, C<trait_predict>, C<plot_msa>, C<plot_phylo> and C<msa_quality_table>
 take C<< name =E<gt> value >> pairs, not a hash ref; C<view_alignment> takes the
 alignment first, as a hash ref or a file name, and C<< name =E<gt> value >> pairs after
@@ -5390,6 +6010,347 @@ download and score:
      printf "%s\t%s\t%g\t%d variants\n", $pgs->{'Polygenic Score ID & Name'}, $_, @{ $s->{$_} }{qw(score variants)}
          foreach sort keys %{ $s };
  }
+
+=head2 Population genetics: pca, fst, hardy_weinberg, ld, ld_prune and gwas
+
+Six functions of a cohort's genotypes, each of which hands them to
+L<PLINK 2|https://www.cog-genomics.org/plink/2.0/>, which C<Alien::Bioinf>
+installs, and returns what it computes as perl data. The genotypes are never
+held in perl. What they share:
+
+=over
+
+=item * C<vcf> (required) is given as to C<pgs_score>: a C<.vcf>, C<.vcf.gz>,
+C<.vcf.bgz> or C<.bcf> file, a PLINK 2 fileset given by its C<.pgen>, or a data
+frame, as Stats::LikeR's C<read_table> returns one, whose genotypes are
+columns named C<< E<lt>sampleE<gt>.GT >>.
+
+=item * Only the biallelic variants on the autosomes (1 to 22) are read. A
+multi-allelic record is left out, and so are X, Y and the mitochondrion,
+which PLINK 2 reads only once told each sample's sex. A VCF with no
+biallelic variant on the autosomes dies.
+
+=item * Only C<GT> is read, and a genotype that is partly missing (C<./1>) is
+missing.
+
+=item * C<memory> and C<threads> are the MiB of memory (640 or more) and the CPUs
+PLINK 2 may use, as for C<pgs_score>.
+
+=item * A variant is returned as a hash of C<chrom>, C<pos>, C<id>, C<ref> and C<alt>,
+plus what the function says. C<chrom> is PLINK 2's name for the chromosome,
+1 to 22 without a C<chr> prefix, whatever the VCF calls it, and C<id> is the
+VCF's C<ID>, C<.> included. Variants come in the VCF's order.
+
+=item * Samples are named by their IIDs: a VCF's sample names, or a fileset's IIDs.
+A fileset in which two samples share an IID, in different families, dies.
+A fileset's C<.psam> may name each sample's parents, and PLINK 2 then counts
+only the founders for allele frequencies and for C<hardy_weinberg>; a VCF
+names none, so every sample is a founder.
+
+=item * PLINK 2 prints its numbers to 6 significant figures, so that is what each
+number returned is good to. A C<NA> or C<nan> of PLINK 2's is undef.
+
+=back
+
+The usual order is to prune first, and to compute principal components or Fst
+on the variants kept, since PLINK 2's own help advises a set of variants in
+approximate linkage equilibrium for C<--pca>, with no very rare ones. The
+functions take no list of variants, so filter the VCF with the variants
+C<ld_prune> keeps, or with C<bcftools view -i>, before handing it to the next.
+In the 60 people of three populations of C<t/data/popgen.vcf>, variants
+20 kb or more apart were still in strong linkage disequilibrium: 97 pairs of
+210 such variants had an r² of 0.5 or more.
+
+=head3 pca(%args)
+
+The principal components of the samples, PLINK 2's C<--pca>: the leading
+eigenvectors of the variance-standardized relationship matrix.
+
+ my $p = pca(vcf => 'cohort.vcf.gz', n => 4);
+ # { eigenvalues => [10.79, 6.01, 5.40, ...], variants => 270,
+ #   samples => { NA06984 => [-0.0847, -0.0160, 0.0837, ...], ... } }
+
+=over
+
+=item * C<n>: how many components, 10 by default, as PLINK 2 has it.
+
+=back
+
+It returns a hash ref of C<eigenvalues> (an array, largest first), C<samples>
+(each sample's components, an array in the eigenvalues' order), and
+C<variants>, how many variants were read. A component's sign is arbitrary, as
+an eigenvector's is. PLINK 2 needs 50 samples or more to estimate the allele
+frequencies it standardizes by, and fewer die with its message. For more than
+about 5,000 samples, PLINK 2's help advises its randomized algorithm (C<--pca
+approx>), which this function does not use.
+
+=head3 fst(%args)
+
+Fst between every two populations, PLINK 2's C<--fst>.
+
+ my $f = fst(vcf => 'cohort.vcf.gz', populations => { NA06984 => 'CEU', NA18486 => 'YRI', ... });
+ print $f->{fst}{CEU}{YRI};   # 0.170396; and $f->{fst}{YRI}{CEU} is the same
+
+=over
+
+=item * C<populations> (required): a hash ref of sample => population. A sample of
+the VCF that it leaves out is left out of the estimate, a sample it names
+that the VCF lacks is ignored, and a population of none of the VCF's
+samples is not counted. Two populations with samples are needed. A name may
+be anything that is not empty, a number or a phrase with spaces included.
+
+=item * C<method>: C<hudson> (the default, as in PLINK 2), the estimator of Bhatia,
+Patterson, Sankararaman and Price (2013), or C<wc>, Weir and Cockerham's
+(1984). Either is a ratio of averages over the variants.
+
+=item * C<per_variant>: 1 also returns each variant's Fst; 0 (the default) does not.
+
+=back
+
+It returns a hash ref of C<method>, C<populations> (each population with
+samples in the VCF, and how many), C<fst> (C<< { A =E<gt> { B =E<gt> Fst } } >>, given both
+ways round), and C<variants>. C<variants> is undef unless C<per_variant> is 1,
+and is then C<< { A =E<gt> { B =E<gt> [ variant, ... ] } } >>, one list for each pair,
+given both ways round, with each variant's C<fst> (undef where it cannot be
+estimated).
+
+=head3 hardy_weinberg(%args)
+
+Tests each variant's genotypes for Hardy-Weinberg equilibrium, by the exact
+test of Wigginton, Cutler and Abecasis (2005), PLINK 2's C<--hardy>.
+
+ my $h = hardy_weinberg(vcf => 'cohort.vcf.gz');
+ # [ { chrom => 1, pos => 30028088, id => '.', ref => 'A', alt => 'G',
+ #     hom_ref => 13, het => 23, hom_alt => 24,
+ #     observed_het => 0.383333, expected_het => 0.483194, p => 0.113585 }, ... ]
+
+=over
+
+=item * C<midp>: 1 gives the mid-p (Graffelman and Moreno 2013), which is less
+conservative; 0 (the default, as in PLINK 2) gives the exact test's own p.
+
+=back
+
+It returns an array ref of the variants, each with C<hom_ref>, C<het> and
+C<hom_alt> (the samples called with each genotype), C<observed_het> and
+C<expected_het> (the share of those samples that are heterozygous, and the
+share Hardy-Weinberg proportions would give) and C<p>. All the samples are
+tested together, so in a cohort of several populations a variant whose
+frequency differs between them shows too few heterozygotes; test each
+population's VCF alone for that.
+
+=head3 ld(%args)
+
+Linkage disequilibrium between every two variants of a chromosome within a
+window, PLINK 2's C<--r2-unphased> or C<--r2-phased>.
+
+ my $pairs = ld(vcf => 'cohort.vcf.gz', window_kb => 250, min_r2 => 0.8);
+ # [ { a => { chrom => 22, pos => 20000428, ... }, b => { chrom => 22, pos => 20003731, ... },
+ #     r2 => 0.287761, dprime => undef }, ... ]
+
+=over
+
+=item * C<window_kb>: the farthest apart two variants of a pair are, in kb; 1000 by
+default, as in PLINK 2.
+
+=item * C<window>: the most variants apart they are, 1 being adjacent variants; no
+limit by default.
+
+=item * C<min_r2>: the least r² of a pair returned, 0.2 by default, as in PLINK 2;
+0 returns every pair in the window.
+
+=item * C<phased>: 0 (the default) gives the r² of the two variants' allele counts
+(genotype dosages), which needs no phase. 1 gives the r² of the haplotypes,
+and D′, PLINK 2's C<--r2-phased>, which uses each genotype's phase where the
+VCF gives it (C<0|1>). D′ is signed, positive where the two variants' major
+alleles go together.
+
+=back
+
+It returns an array ref of pairs, each a hash of C<a> and C<b> (the two
+variants), C<r2> and C<dprime> (undef unless C<phased> is 1). The pairs are
+PLINK 2's, in the order of their first variant. On a whole genome with a low
+C<min_r2> there are a great many; give a high one, or a smaller window.
+
+=head3 ld_prune(%args)
+
+The variants to keep so that no two in a window are in strong linkage
+disequilibrium, PLINK 2's C<--indep-pairwise>: within each window, of two
+variants whose r² is above C<r2>, one is removed, and the window then moves on.
+
+ my $r = ld_prune(vcf => 'cohort.vcf.gz');   # windows of 50 variants, moved on 5, r² 0.5
+ my %keep = map { ("$_->{chrom}:$_->{pos}" => 1) } @{ $r->{keep} };
+
+=over
+
+=item * C<window>: the variants in each window, 50 by default.
+
+=item * C<window_kb>: a window in kb instead, which PLINK 2 moves on one variant at a
+time. Give one of C<window> and C<window_kb>.
+
+=item * C<step>: the variants the window moves on by, 5 by default, or 1 (the only
+value PLINK 2 takes) with C<window_kb>.
+
+=item * C<r2>: the r² above which one of two variants is removed, 0.5 by default.
+
+=back
+
+The defaults, 50, 5 and 0.5, are the example the PLINK 1.9 manual gives for
+C<--indep-pairwise>; PLINK 2 requires a window and an r² and has no defaults
+for them. It returns a hash ref of C<keep> and C<remove>, each an array ref of
+variants, which between them hold every variant read. Like C<pca>, it needs 50
+samples or more, and fewer die with PLINK 2's message; C<ld> does not.
+
+=head3 gwas(%args)
+
+Tests every variant for association with a phenotype, PLINK 2's C<--glm>: a
+linear regression of a quantitative phenotype, or a logistic regression of a
+case-control one, on each sample's count of the ALT allele (0, 1 or 2), with
+any covariates.
+
+ my $g = gwas(vcf => 'cohort.vcf.gz', phenotypes => 'pheno.tsv', phenotype => 'height',
+              covariates => [qw(age sex PC1 PC2)]);
+ my ($top) = sort { $a->{p} <=> $b->{p} } grep { defined $_->{p} } @{ $g->{variants} };
+ print "$top->{chrom}:$top->{pos} beta $top->{beta} p $top->{p}\n";
+
+=over
+
+=item * C<phenotypes> (required): the phenotypes and covariates, one row for each
+sample, as a tab-separated file whose first line is its header (it may
+begin with C<#>, as PLINK 2's own files do), or as a data frame. A column
+C<IID> (or C<#IID>) names each row's sample by the VCF's name for it. A value
+that is empty, undef or C<NA> is missing, and a sample missing the phenotype
+or a covariate is left out, as is a sample with no row.
+
+=item * C<phenotype> (required): the column to test. Its values must be numbers.
+
+=item * C<covariates>: an array ref of the columns to adjust for. A column of numbers
+is a quantitative covariate, and any other is categorical, which PLINK 2
+turns into an indicator for each value but one. A categorical value may not
+hold whitespace. The principal components from C<pca> are the usual
+covariates for ancestry; put them in C<phenotypes> as columns.
+
+=item * C<model>: C<linear> or C<logistic>. By default a phenotype of exactly two
+values, 1 and 2 (PLINK's control and case) or 0 and 1 (control and case),
+is case-control and tested by logistic regression, and any other is
+quantitative and tested by linear regression. C<logistic> takes only a
+phenotype of those two kinds. PLINK 2 falls back on Firth's penalized
+regression for a variant where the plain logistic regression does not
+converge.
+
+=back
+
+PLINK 2 takes any column whose values are all 0, 1 and 2 as case-control,
+reading a 0 as missing. A quantitative phenotype or covariate of those values
+(a count of something, say) is therefore given to it with 3 added, which
+changes no variant's test, since in a linear regression neither the slopes nor
+their standard errors depend on where the phenotype's or covariates' zeroes
+are. Quantitative covariates are standardized (PLINK 2's
+C<--covar-variance-standardize>), which leaves the variants' tests as they are
+too, and keeps a covariate of large values, such as a year, from making the
+regression too ill-conditioned for PLINK 2 to solve.
+
+It returns a hash ref of C<model> (C<linear> or C<logistic>), C<samples> (those
+of the VCF that have a value of the phenotype) and C<variants>, an array ref
+of the variants, each with:
+
+=over
+
+=item * C<beta>: the change in the phenotype for each copy of the ALT allele, or,
+for a logistic regression, in its log odds, so that C<exp(beta)> is the odds
+ratio.
+
+=item * C<se>: the standard error of C<beta>.
+
+=item * C<stat>: the t statistic (linear) or z statistic (logistic).
+
+=item * C<p>: its p-value, not corrected for the number of variants tested (5e-8 is
+the usual genome-wide threshold).
+
+=item * C<n>: the samples in the regression.
+
+=item * C<alt_freq>: the ALT allele's frequency among them.
+
+=item * C<firth>: 1 where Firth's regression was used, and 0 otherwise.
+
+=item * C<error>: undef, or PLINK 2's code (its C<ERRCODE>) for why the variant
+could not be tested, when C<beta>, C<se>, C<stat> and C<p> are undef.
+
+=back
+
+=head2 admixture(%args)
+
+Estimates each sample's ancestry as fractions of C<k> ancestral populations,
+and each population's allele frequencies, by the model of
+L<ADMIXTURE|https://dalexander.github.io/admixture/> (Alexander, Novembre and
+Lange 2009): a sample's count of a variant's ALT allele is binomial, with the
+probability its fractions give, averaged over the populations' frequencies.
+Unlike the functions above, it needs no PLINK 2: C<Bioinf.xs> reads the VCF and
+fits the model, by the EM algorithm of Tang et al. (2005), accelerated by
+SQUAREM (Varadhan and Roland 2008).
+
+ my $a = admixture(vcf => 'cohort.vcf.gz', k => 3);
+ # { k => 3, loglik => -15257.557473, converged => 1, iterations => 234,
+ #   starts => [-15257.557474, -15321.242788, ...],
+ #   samples => { NA06984 => [0.544524, 0.000010, 0.455466], ... },
+ #   variants => [ { chrom => 1, pos => 30028088, id => '.', ref => 'A', alt => 'G',
+ #                   freq => [0.29, 0.94, 0.57] }, ... ] }
+
+=over
+
+=item * C<vcf> (required): a C<.vcf>, C<.vcf.gz>, C<.vcf.bgz> or C<.vcf.bz2> file, as
+C<sex_check> takes. Only biallelic records on the autosomes (1 to 22) are
+read, as for the functions above; a call of one allele, or with a missing
+allele, is missing.
+
+=item * C<k> (required): the ancestral populations, 2 or more, and fewer than the
+samples. Which C<k> fits best is not chosen here; compare the fits of
+several.
+
+=item * C<starts>: the random starts fitted, 10 by default, of which the one with the
+highest likelihood is kept. The likelihood has local maxima: on the 60
+people of three populations in C<t/data/popgen.vcf>, ADMIXTURE 1.3.0 itself
+stopped at the lesser of two from 2 of 6 seeds.
+
+=item * C<seed>: start C<s> (counting from 0) is drawn from C<seed + s>; 1 by default.
+The starts are drawn from integers alone, so a seed gives the same start on
+every platform.
+
+=item * C<tolerance>: a start stops when an iteration raises its log-likelihood by
+less than this, 1e-10 by default. ADMIXTURE's own default is 1e-4, which is
+too loose for EM steps, which creep where the likelihood is flat. On that
+file, 1e-4 stopped 1.1e-3 below ADMIXTURE's maximum, with fractions 8e-4
+from ADMIXTURE's; at 1e-8, starts that reached the log-likelihood to 1e-6
+still had fractions up to 1.4e-4 from it; and at 1e-10 every start that
+reached the greater maximum had every fraction within 1.9e-5, which is
+ADMIXTURE's own precision. A looser tolerance is faster, and may serve on
+a large file.
+
+=item * C<max_iterations>: the iterations (of three EM steps each) after which a
+start stops, 10,000 by default. When the best start stopped so, it warns.
+
+=item * C<min_depth>: a genotype whose C<DP> is below this is missing; 0 (the
+default) keeps every one.
+
+=back
+
+It returns a hash ref of C<k>, C<loglik> (the best start's log-likelihood, as
+ADMIXTURE prints it, without the binomial coefficients), C<converged> (1 or
+0), C<iterations>, C<starts> (each start's log-likelihood, in order),
+C<samples> (each sample's fractions, an array of C<k> that sums to 1) and
+C<variants> (each variant, with C<freq>, its ALT allele's frequency in each
+population). The populations are unnamed, and come in the order of their
+share of the samples, the largest first, so that two fits of the same data
+give them in the same order. No fraction or frequency is below 1e-5 or above
+1 - 1e-5, ADMIXTURE's bounds. A sample with no called genotype gets an even
+share of each population, with a warning.
+
+All the genotypes are held, a byte each, so a cohort of 1,000 people at a
+million variants takes 1 GB. Prune the variants first, as ADMIXTURE's manual
+(section 2.3) advises, since the model takes no account of linkage
+disequilibrium; its example, C<plink --indep-pairwise 50 10 0.1>, is
+C<< ld_prune(vcf =E<gt> $vcf, window =E<gt> 50, step =E<gt> 10, r2 =E<gt> 0.1) >>. Each iteration takes time in proportion to the
+samples, the variants and C<k>, times the starts.
 
 =head2 sex_check(%args)
 

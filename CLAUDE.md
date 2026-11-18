@@ -22,13 +22,21 @@ from the markers in `share/blood_type_panel.tsv`, which
 `share/make_blood_type_panel.pl` chose from 1000 Genomes), and a search of
 the RCSB PDB's structures for a sequence (`pdb_search`, since 2026-10-21),
 which asks RCSB's search and data APIs over HTTPS with HTTP::Tiny and is
-tested offline by replaying `t/data/pdb_search.json`. Since 2026-11-11 it
+tested offline by replaying `t/data/pdb_search.json`. Since 2026-11-17 it has
+a cohort's principal components, Fst, Hardy-Weinberg tests, linkage
+disequilibrium and its pruning, and association tests (`pca`, `fst`,
+`hardy_weinberg`, `ld`, `ld_prune` and `gwas`), each computed by PLINK 2 on
+the autosomes' biallelic variants alone and tested by `t/popgen.t` against
+PLINK 2's own output, and each sample's admixture proportions (`admixture`),
+fitted in XS from the same VCF reader by ADMIXTURE's model and tested by
+`t/admixture.t` against ADMIXTURE 1.3.0's fit. Since 2026-11-11 it
 also has the everyday operations on a sequence held as a string (`complement`,
 `reverse_complement`, `transcribe`, `back_transcribe`, `translate`,
 `translate_six_frames`, `find_orfs`, `gc_content`, `kmer_count`,
 `assembly_stats`, `molecular_weight`, `isoelectric_point`, `protein_charge`,
 `subseq` and `motif_search`) and samtools's FASTA index (`fasta_index`,
-`fasta_region`). Of those only the codon loop and the k-mer count are in XS;
+`fasta_region`). Of those only the codon loop, the k-mer count and (since
+2026-11-18) the scan that builds a FASTA index are in XS;
 the genetic codes are `share/genetic_codes.tsv`, which
 `share/make_genetic_codes.pl` writes from NCBI's gc.prt. It is meant for CPAN,
 so it has to work on perls and platforms that are not this one.
@@ -246,11 +254,16 @@ nothing.
 ## C in `Bioinf.xs`
 
 This section is taken from `~/Scripts/stats/CLAUDE.md`, whose `LikeR.xs` is
-the house style. The only floating-point arithmetic in `Bioinf.xs` is
+the house style. The floating-point arithmetic in `Bioinf.xs` is
 `concordance`'s ratios (`conc_ratio()`, since 2026-10-19), one `NV` division
 each, which `t/concordance.t` compares within a relative 1e-15 so that
-long-double and quadmath perls pass; follow the `NV` rules for anything
-more. The sequence functions' floating point (`gc_content`,
+long-double and quadmath perls pass, and `admixture`'s EM fit (the `admix_*`
+functions, since 2026-11-17), which calls `log()` and `sqrt()` through
+`nv_log()` and `nv_sqrt()`. Those two are the only part of `LikeR.xs`'s
+`nv_*` block copied, and `Makefile.PL` (and the `dist.ini` header) link-test
+`logl()` and `sqrtl()` on a long-double perl, as `~/Scripts/stats` tests its
+whole set; a new libm call needs its macro and a place in that probe. Follow
+the `NV` rules for anything more. The sequence functions' floating point (`gc_content`,
 `molecular_weight`, `isoelectric_point`, `protein_charge`) is in perl on
 purpose (2026-11-11): perl's own `**` and `/` are already the width of an
 `NV`, so none of the `nv_*` libm block was needed.
@@ -473,7 +486,14 @@ On 2026-11-11 the same command gave the same result: seven perls passed
 (2,342 tests where Alien::Bioinf is installed, 1,760 on `5.44.0-i686`) and
 those two failed at `perl Makefile.PL` for that reason. On 2026-11-16
 `5.44.0-debug` had been added too, with the same gap and the same failure;
-the other seven passed (2,398 tests, 1,815 on `5.44.0-i686`).
+the other seven passed (2,398 tests, 1,815 on `5.44.0-i686`). On 2026-11-17, with
+`pca` to `gwas` and `admixture` added, the same seven passed (2,676 tests,
+1,943 on `5.44.0-i686`) and the same three still lacked
+File::ShareDir::Install. `5.44.0-quadmath` took 62 s where the others took
+about 20, most of it `t/admixture.t`, whose fit runs in software
+`__float128` there; keep that file's fits few. On 2026-11-18, with `_fai_scan`
+in XS, the same seven passed (2,702 tests, 1,947 on `5.44.0-i686`) and the
+same three failed at `perl Makefile.PL` for want of File::ShareDir::Install.
 
 `./test.all.perls.pl` builds and tests against all of them, installing
 Alien::Bioinf into any perl that lacks it, and with `-p` against chosen ones.

@@ -20,6 +20,13 @@ use Cn::Bioinf qw(fasta_index fasta_region fasta2hash);
 # - samtools 1.19.2 (htslib 1.19): what "samtools faidx" printed for the other
 #   regions, and how it took each file that cannot be indexed.
 #   t/data/faidx_reference.pl runs it and prints both.
+# - fai_build_core() of htslib's faidx.c (state IN_NAME), read on 2026-11-18
+#   in the source at ~/prog/htslib (1.21-34-gb14fffb4): a name ends at any
+#   byte that isspace() takes, '\v' among them.
+# - By construction, for the file larger than one of Bioinf.xs's 64 KiB
+#   FASTA_BLOCK reads (since 2026-11-18, when the scan moved to Bioinf.xs):
+#   its offsets are counted from the lengths it is built of, and its
+#   sequences checked against what fasta2hash reads.
 
 my $dir = tempdir(CLEANUP => 1);
 sub spew {
@@ -203,6 +210,28 @@ my $shapes = spew('shapes.fa', ">one\nACGTAC\nGTACGT\nAC\n\n\n>two\nGGGG\n>three
 is_deeply fasta_region($shapes, 'one', 'one:5-9', 'two:2-3', 'three', 'three:5-7'),
 	{ one => 'ACGTACGTACGTAC', 'one:5-9' => 'ACGTA', 'two:2-3' => 'GG', three => 'TTTTTTT', 'three:5-7' => 'TTT' },
 	'a last line with no line feed, and blank lines between sequences';
+
+# A defline and sequence lines that cross the 64 KiB blocks Bioinf.xs reads in:
+# the name alone is 70,000 bytes, so it is cut by the first block's end, and
+# the 2,000 lines of 61 bytes that follow from byte 70,007 are cut by the
+# second's, at 131,072.
+my $long_name = 'n' x 70_000;
+my $first = 'ACGTACGTAC' x 12_000;
+my $blocks = spew('blocks.fa', ">$long_name desc\n" . join('', map { substr($first, 60 * $_, 60) . "\n" } 0 .. 1_999)
+	. ">second\n" . ('TTGCA' x 13) . "\n");
+stdout_of(sub { fasta_index($blocks) });
+is slurp("$blocks.fai"), "$long_name\t120000\t70007\t60\t61\n" . "second\t65\t" . (70_007 + 2_000 * 61 + 8) . "\t65\t66\n",
+	'a defline and lines cut by the ends of the blocks it is read in';
+unlink "$blocks.fai" or die "$blocks.fai: $!";
+my $read = fasta2hash($blocks);
+is_deeply fasta_region($blocks, "$long_name:65001-65010", "$long_name:119991-", 'second'),
+	{ "$long_name:65001-65010" => substr($first, 65_000, 10), "$long_name:119991-" => substr($first, -10), second => $read->{second} },
+	'and the bases there are the ones fasta2hash reads, with no index file';
+is $read->{"$long_name desc"}, $first, 'which reads the first sequence whole';
+# htslib: isspace() ends a name, and takes '\v' (0x0b) as space; perl's \s,
+# which the loop before Bioinf.xs used, did not before perl 5.18
+my $vt = spew('vt.fa', ">x\x0by\nACGT\n");
+is_deeply fasta_region($vt, 'x'), { x => 'ACGT' }, 'a name ends at a vertical tab, as htslib ends it, on every perl';
 
 dies_like(sub { fasta_region(catfile($dir, 'none.fa'), 'a') }, qr/^fasta_region: ".*none\.fa" doesn't exist or isn't a readable file/, 'a file that is not there dies');
 my $gz = spew('x.fa.gz', 'not really gzip');

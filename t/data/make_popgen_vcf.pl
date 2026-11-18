@@ -19,9 +19,13 @@
 # minor allele's frequency among those 60 is 0.1 or more:
 #
 #   - the first 10 such on each of chromosomes 1 to 21 from position
-#     30,000,000 on that are at least 20,000 bases from the one before, which
-#     are 210 variants in no linkage disequilibrium to speak of, for pca, fst
-#     and admixture;
+#     30,000,000 on that are at least 20,000 bases from the one before, 210
+#     variants for pca, fst and admixture. They were meant to be in no linkage
+#     disequilibrium to speak of, and are not: on 2026-11-17 PLINK 2's
+#     --r2-unphased found 233 pairs of them (all within a chromosome's 10) at
+#     r^2 0.2 or more, 97 at 0.5 or more, and some at 1, such as 5:30140659 and
+#     5:30182596. That is strong LD over 20 to 60 kb in 60 people of three
+#     populations, and t/popgen.t's tests count on it as it is;
 #   - the first 60 such on chromosome 22 from position 20,000,000 on, which lie
 #     within a few thousand bases of one another, for ld.
 #

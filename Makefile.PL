@@ -29,6 +29,26 @@ unless ($Config{cc} =~ /(?:^|[\/\\])cl(?:\.exe)?$/i) {
 	}
 }
 
+# On a long-double perl, admixture's fit in Bioinf.xs wants logl() and sqrtl(),
+# so that an NV is not computed at a double's precision. They are C99, but some
+# libms (the thinner BSD ones especially) lack them, so they are link-tested,
+# and without them Bioinf.xs uses log() and sqrt(). __float128 needs no probe:
+# quadmath.h and -lquadmath come with the quadmath perl itself. This is the
+# probe of ~/Scripts/stats, cut down to the two functions used.
+my $define = '';
+if ($Config{nvtype} eq 'long double') {
+	my $dir = File::Temp::tempdir(CLEANUP => 1);
+	my $src = File::Spec->catfile($dir, 'ldmath.c');
+	my $bin = File::Spec->catfile($dir, 'ldmath');
+	if (open my $ld_fh, '>', $src) {
+		print {$ld_fh} "#include <math.h>\nint main(void) { volatile long double x = 2.0L; volatile long double r = logl(x) + sqrtl(x); return (int)r * 0; }\n";
+		close $ld_fh;
+		my $quiet = File::Spec->devnull;
+		$define = '-DBIOINF_HAVE_LONG_DOUBLE_MATH'
+			if system("$Config{cc}$std -o \"$bin\" \"$src\" -lm > $quiet 2> $quiet") == 0;
+	}
+}
+
 WriteMakefile(
 	NAME             => 'Cn::Bioinf',
 	DISTNAME         => 'Cn-Bioinf',
@@ -43,6 +63,8 @@ WriteMakefile(
 	LICENSE          => 'perl_5',
 	MIN_PERL_VERSION => '5.012',
 	CCFLAGS          => $Config{ccflags} . $std,
+	DEFINE           => $define,
+	LIBS             => ['-lm'],
 	CONFIGURE_REQUIRES => { 'ExtUtils::MakeMaker' => '6.64', 'File::ShareDir::Install' => '0.06' },
 	PREREQ_PM        => { 'File::ShareDir' => '1.00', 'HTTP::Tiny' => '0.056', 'JSON::MaybeXS' => '0' },
 	TEST_REQUIRES    => { 'Test::More' => '0.88' },

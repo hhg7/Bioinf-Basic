@@ -39,6 +39,17 @@
     # a polygenic score for each sample of a VCF, from a PGS Catalog scoring file
     my $scores = pgs_score(vcf => 'genome.vcf.gz', weights => 'PGS000138.txt.gz');
 
+    # population genetics of a cohort's VCF, by PLINK 2
+    my $pruned = ld_prune(vcf => 'cohort.vcf.gz');                 # { keep => [...], remove => [...] }
+    my $pcs    = pca(vcf => 'cohort.vcf.gz', n => 4);              # { samples => { sample => [PC1 .. PC4] }, ... }
+    my $fst    = fst(vcf => 'cohort.vcf.gz', populations => \%population_of);
+    print $fst->{fst}{CEU}{YRI};
+    my $hwe    = hardy_weinberg(vcf => 'cohort.vcf.gz');           # [ { chrom, pos, het, p, ... }, ... ]
+    my $ld     = ld(vcf => 'cohort.vcf.gz', window_kb => 250);      # [ { a => {...}, b => {...}, r2 }, ... ]
+    my $gwas   = gwas(vcf => 'cohort.vcf.gz', phenotypes => 'pheno.tsv', phenotype => 'height',
+                      covariates => [qw(age sex)]);                # [ { beta, se, p, ... }, ... ]
+    my $anc    = admixture(vcf => 'cohort.vcf.gz', k => 3);        # { samples => { sample => [3 fractions] }, ... }
+
     # each sample's sex, from its heterozygosity on X
     my $sex = sex_check(vcf => 'cohort.vcf.bz2'); # { sample => { sex => 'female', ... } }
 
@@ -71,12 +82,12 @@ everyday operations on a sequence (its reverse complement, its translation
 under any of NCBI's genetic codes, its open reading frames, GC content, k-mers,
 motifs, molecular weight and isoelectric point, and an assembly's N50); BLAST
 hit ranking, a search of the PDB's structures for a
-sequence, and multiple-sequence-alignment plots and LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; and, from VCFs, each sample's sex, whether two people are parent and child, how every two people are related, how well one VCF's calls agree with another's, each sample's ABO and RhD blood type, and the genotypes of the HIrisPlex-S eye, hair and skin colour panel, with a trait predictor for any multinomial logistic model you supply.
+sequence, and multiple-sequence-alignment plots and LaTeX tables; polygenic scores from a VCF and a PGS Catalog scoring file; a cohort's principal components, Fst between populations, Hardy-Weinberg tests, linkage disequilibrium and its pruning, and association tests (GWAS), by PLINK 2; admixture proportions; and, from VCFs, each sample's sex, whether two people are parent and child, how every two people are related, how well one VCF's calls agree with another's, each sample's ABO and RhD blood type, and the genotypes of the HIrisPlex-S eye, hair and skin colour panel, with a trait predictor for any multinomial logistic model you supply.
 
 Nothing is exported by default; ask for functions by name or with `:all`.
 Every function dies (via `Carp::croak`) on bad arguments, with a message that
 starts with the name of the function that raised it, as in
-`fasta2hash: couldn't find "four" in x.fa`. `pdb_search`, `pgs_score`, `sex_check`,
+`fasta2hash: couldn't find "four" in x.fa`. `pdb_search`, `pgs_score`, `pca`, `fst`, `hardy_weinberg`, `ld`, `ld_prune`, `gwas`, `admixture`, `sex_check`,
 `parent`, `relatedness`, `concordance`, `blood_type`, `hirisplex_genotypes`, `trait_predict`, `plot_msa`, `plot_phylo` and `msa_quality_table`
 take `name => value` pairs, not a hash ref; `view_alignment` takes the
 alignment first, as a hash ref or a file name, and `name => value` pairs after
@@ -717,6 +728,281 @@ download and score:
     	printf "%s\t%s\t%g\t%d variants\n", $pgs->{'Polygenic Score ID & Name'}, $_, @{ $s->{$_} }{qw(score variants)}
     		foreach sort keys %{ $s };
     }
+
+## Population genetics: pca, fst, hardy\_weinberg, ld, ld\_prune and gwas
+
+Six functions of a cohort's genotypes, each of which hands them to
+[PLINK 2](https://www.cog-genomics.org/plink/2.0/), which `Alien::Bioinf`
+installs, and returns what it computes as perl data. The genotypes are never
+held in perl. What they share:
+
+- `vcf` (required) is given as to `pgs_score`: a `.vcf`, `.vcf.gz`,
+  `.vcf.bgz` or `.bcf` file, a PLINK 2 fileset given by its `.pgen`, or a data
+  frame, as Stats::LikeR's `read_table` returns one, whose genotypes are
+  columns named `<sample>.GT`.
+- Only the biallelic variants on the autosomes (1 to 22) are read. A
+  multi-allelic record is left out, and so are X, Y and the mitochondrion,
+  which PLINK 2 reads only once told each sample's sex. A VCF with no
+  biallelic variant on the autosomes dies.
+- Only `GT` is read, and a genotype that is partly missing (`./1`) is
+  missing.
+- `memory` and `threads` are the MiB of memory (640 or more) and the CPUs
+  PLINK 2 may use, as for `pgs_score`.
+- A variant is returned as a hash of `chrom`, `pos`, `id`, `ref` and `alt`,
+  plus what the function says. `chrom` is PLINK 2's name for the chromosome,
+  1 to 22 without a `chr` prefix, whatever the VCF calls it, and `id` is the
+  VCF's `ID`, `.` included. Variants come in the VCF's order.
+- Samples are named by their IIDs: a VCF's sample names, or a fileset's IIDs.
+  A fileset in which two samples share an IID, in different families, dies.
+  A fileset's `.psam` may name each sample's parents, and PLINK 2 then counts
+  only the founders for allele frequencies and for `hardy_weinberg`; a VCF
+  names none, so every sample is a founder.
+- PLINK 2 prints its numbers to 6 significant figures, so that is what each
+  number returned is good to. A `NA` or `nan` of PLINK 2's is undef.
+
+The usual order is to prune first, and to compute principal components or Fst
+on the variants kept, since PLINK 2's own help advises a set of variants in
+approximate linkage equilibrium for `--pca`, with no very rare ones. The
+functions take no list of variants, so filter the VCF with the variants
+`ld_prune` keeps, or with `bcftools view -i`, before handing it to the next.
+In the 60 people of three populations of `t/data/popgen.vcf`, variants
+20 kb or more apart were still in strong linkage disequilibrium: 97 pairs of
+210 such variants had an r² of 0.5 or more.
+
+### pca(%args)
+
+The principal components of the samples, PLINK 2's `--pca`: the leading
+eigenvectors of the variance-standardized relationship matrix.
+
+    my $p = pca(vcf => 'cohort.vcf.gz', n => 4);
+    # { eigenvalues => [10.79, 6.01, 5.40, ...], variants => 270,
+    #   samples => { NA06984 => [-0.0847, -0.0160, 0.0837, ...], ... } }
+
+- `n`: how many components, 10 by default, as PLINK 2 has it.
+
+It returns a hash ref of `eigenvalues` (an array, largest first), `samples`
+(each sample's components, an array in the eigenvalues' order), and
+`variants`, how many variants were read. A component's sign is arbitrary, as
+an eigenvector's is. PLINK 2 needs 50 samples or more to estimate the allele
+frequencies it standardizes by, and fewer die with its message. For more than
+about 5,000 samples, PLINK 2's help advises its randomized algorithm (`--pca
+approx`), which this function does not use.
+
+### fst(%args)
+
+Fst between every two populations, PLINK 2's `--fst`.
+
+    my $f = fst(vcf => 'cohort.vcf.gz', populations => { NA06984 => 'CEU', NA18486 => 'YRI', ... });
+    print $f->{fst}{CEU}{YRI};   # 0.170396; and $f->{fst}{YRI}{CEU} is the same
+
+- `populations` (required): a hash ref of sample => population. A sample of
+  the VCF that it leaves out is left out of the estimate, a sample it names
+  that the VCF lacks is ignored, and a population of none of the VCF's
+  samples is not counted. Two populations with samples are needed. A name may
+  be anything that is not empty, a number or a phrase with spaces included.
+- `method`: `hudson` (the default, as in PLINK 2), the estimator of Bhatia,
+  Patterson, Sankararaman and Price (2013), or `wc`, Weir and Cockerham's
+  (1984). Either is a ratio of averages over the variants.
+- `per_variant`: 1 also returns each variant's Fst; 0 (the default) does not.
+
+It returns a hash ref of `method`, `populations` (each population with
+samples in the VCF, and how many), `fst` (`{ A => { B => Fst } }`, given both
+ways round), and `variants`. `variants` is undef unless `per_variant` is 1,
+and is then `{ A => { B => [ variant, ... ] } }`, one list for each pair,
+given both ways round, with each variant's `fst` (undef where it cannot be
+estimated).
+
+### hardy\_weinberg(%args)
+
+Tests each variant's genotypes for Hardy-Weinberg equilibrium, by the exact
+test of Wigginton, Cutler and Abecasis (2005), PLINK 2's `--hardy`.
+
+    my $h = hardy_weinberg(vcf => 'cohort.vcf.gz');
+    # [ { chrom => 1, pos => 30028088, id => '.', ref => 'A', alt => 'G',
+    #     hom_ref => 13, het => 23, hom_alt => 24,
+    #     observed_het => 0.383333, expected_het => 0.483194, p => 0.113585 }, ... ]
+
+- `midp`: 1 gives the mid-p (Graffelman and Moreno 2013), which is less
+  conservative; 0 (the default, as in PLINK 2) gives the exact test's own p.
+
+It returns an array ref of the variants, each with `hom_ref`, `het` and
+`hom_alt` (the samples called with each genotype), `observed_het` and
+`expected_het` (the share of those samples that are heterozygous, and the
+share Hardy-Weinberg proportions would give) and `p`. All the samples are
+tested together, so in a cohort of several populations a variant whose
+frequency differs between them shows too few heterozygotes; test each
+population's VCF alone for that.
+
+### ld(%args)
+
+Linkage disequilibrium between every two variants of a chromosome within a
+window, PLINK 2's `--r2-unphased` or `--r2-phased`.
+
+    my $pairs = ld(vcf => 'cohort.vcf.gz', window_kb => 250, min_r2 => 0.8);
+    # [ { a => { chrom => 22, pos => 20000428, ... }, b => { chrom => 22, pos => 20003731, ... },
+    #     r2 => 0.287761, dprime => undef }, ... ]
+
+- `window_kb`: the farthest apart two variants of a pair are, in kb; 1000 by
+  default, as in PLINK 2.
+- `window`: the most variants apart they are, 1 being adjacent variants; no
+  limit by default.
+- `min_r2`: the least r² of a pair returned, 0.2 by default, as in PLINK 2;
+  0 returns every pair in the window.
+- `phased`: 0 (the default) gives the r² of the two variants' allele counts
+  (genotype dosages), which needs no phase. 1 gives the r² of the haplotypes,
+  and D′, PLINK 2's `--r2-phased`, which uses each genotype's phase where the
+  VCF gives it (`0|1`). D′ is signed, positive where the two variants' major
+  alleles go together.
+
+It returns an array ref of pairs, each a hash of `a` and `b` (the two
+variants), `r2` and `dprime` (undef unless `phased` is 1). The pairs are
+PLINK 2's, in the order of their first variant. On a whole genome with a low
+`min_r2` there are a great many; give a high one, or a smaller window.
+
+### ld\_prune(%args)
+
+The variants to keep so that no two in a window are in strong linkage
+disequilibrium, PLINK 2's `--indep-pairwise`: within each window, of two
+variants whose r² is above `r2`, one is removed, and the window then moves on.
+
+    my $r = ld_prune(vcf => 'cohort.vcf.gz');   # windows of 50 variants, moved on 5, r² 0.5
+    my %keep = map { ("$_->{chrom}:$_->{pos}" => 1) } @{ $r->{keep} };
+
+- `window`: the variants in each window, 50 by default.
+- `window_kb`: a window in kb instead, which PLINK 2 moves on one variant at a
+  time. Give one of `window` and `window_kb`.
+- `step`: the variants the window moves on by, 5 by default, or 1 (the only
+  value PLINK 2 takes) with `window_kb`.
+- `r2`: the r² above which one of two variants is removed, 0.5 by default.
+
+The defaults, 50, 5 and 0.5, are the example the PLINK 1.9 manual gives for
+`--indep-pairwise`; PLINK 2 requires a window and an r² and has no defaults
+for them. It returns a hash ref of `keep` and `remove`, each an array ref of
+variants, which between them hold every variant read. Like `pca`, it needs 50
+samples or more, and fewer die with PLINK 2's message; `ld` does not.
+
+### gwas(%args)
+
+Tests every variant for association with a phenotype, PLINK 2's `--glm`: a
+linear regression of a quantitative phenotype, or a logistic regression of a
+case-control one, on each sample's count of the ALT allele (0, 1 or 2), with
+any covariates.
+
+    my $g = gwas(vcf => 'cohort.vcf.gz', phenotypes => 'pheno.tsv', phenotype => 'height',
+                 covariates => [qw(age sex PC1 PC2)]);
+    my ($top) = sort { $a->{p} <=> $b->{p} } grep { defined $_->{p} } @{ $g->{variants} };
+    print "$top->{chrom}:$top->{pos} beta $top->{beta} p $top->{p}\n";
+
+- `phenotypes` (required): the phenotypes and covariates, one row for each
+  sample, as a tab-separated file whose first line is its header (it may
+  begin with `#`, as PLINK 2's own files do), or as a data frame. A column
+  `IID` (or `#IID`) names each row's sample by the VCF's name for it. A value
+  that is empty, undef or `NA` is missing, and a sample missing the phenotype
+  or a covariate is left out, as is a sample with no row.
+- `phenotype` (required): the column to test. Its values must be numbers.
+- `covariates`: an array ref of the columns to adjust for. A column of numbers
+  is a quantitative covariate, and any other is categorical, which PLINK 2
+  turns into an indicator for each value but one. A categorical value may not
+  hold whitespace. The principal components from `pca` are the usual
+  covariates for ancestry; put them in `phenotypes` as columns.
+- `model`: `linear` or `logistic`. By default a phenotype of exactly two
+  values, 1 and 2 (PLINK's control and case) or 0 and 1 (control and case),
+  is case-control and tested by logistic regression, and any other is
+  quantitative and tested by linear regression. `logistic` takes only a
+  phenotype of those two kinds. PLINK 2 falls back on Firth's penalized
+  regression for a variant where the plain logistic regression does not
+  converge.
+
+PLINK 2 takes any column whose values are all 0, 1 and 2 as case-control,
+reading a 0 as missing. A quantitative phenotype or covariate of those values
+(a count of something, say) is therefore given to it with 3 added, which
+changes no variant's test, since in a linear regression neither the slopes nor
+their standard errors depend on where the phenotype's or covariates' zeroes
+are. Quantitative covariates are standardized (PLINK 2's
+`--covar-variance-standardize`), which leaves the variants' tests as they are
+too, and keeps a covariate of large values, such as a year, from making the
+regression too ill-conditioned for PLINK 2 to solve.
+
+It returns a hash ref of `model` (`linear` or `logistic`), `samples` (those
+of the VCF that have a value of the phenotype) and `variants`, an array ref
+of the variants, each with:
+
+- `beta`: the change in the phenotype for each copy of the ALT allele, or,
+  for a logistic regression, in its log odds, so that `exp(beta)` is the odds
+  ratio.
+- `se`: the standard error of `beta`.
+- `stat`: the t statistic (linear) or z statistic (logistic).
+- `p`: its p-value, not corrected for the number of variants tested (5e-8 is
+  the usual genome-wide threshold).
+- `n`: the samples in the regression.
+- `alt_freq`: the ALT allele's frequency among them.
+- `firth`: 1 where Firth's regression was used, and 0 otherwise.
+- `error`: undef, or PLINK 2's code (its `ERRCODE`) for why the variant
+  could not be tested, when `beta`, `se`, `stat` and `p` are undef.
+
+## admixture(%args)
+
+Estimates each sample's ancestry as fractions of `k` ancestral populations,
+and each population's allele frequencies, by the model of
+[ADMIXTURE](https://dalexander.github.io/admixture/) (Alexander, Novembre and
+Lange 2009): a sample's count of a variant's ALT allele is binomial, with the
+probability its fractions give, averaged over the populations' frequencies.
+Unlike the functions above, it needs no PLINK 2: `Bioinf.xs` reads the VCF and
+fits the model, by the EM algorithm of Tang et al. (2005), accelerated by
+SQUAREM (Varadhan and Roland 2008).
+
+    my $a = admixture(vcf => 'cohort.vcf.gz', k => 3);
+    # { k => 3, loglik => -15257.557473, converged => 1, iterations => 234,
+    #   starts => [-15257.557474, -15321.242788, ...],
+    #   samples => { NA06984 => [0.544524, 0.000010, 0.455466], ... },
+    #   variants => [ { chrom => 1, pos => 30028088, id => '.', ref => 'A', alt => 'G',
+    #                   freq => [0.29, 0.94, 0.57] }, ... ] }
+
+- `vcf` (required): a `.vcf`, `.vcf.gz`, `.vcf.bgz` or `.vcf.bz2` file, as
+  `sex_check` takes. Only biallelic records on the autosomes (1 to 22) are
+  read, as for the functions above; a call of one allele, or with a missing
+  allele, is missing.
+- `k` (required): the ancestral populations, 2 or more, and fewer than the
+  samples. Which `k` fits best is not chosen here; compare the fits of
+  several.
+- `starts`: the random starts fitted, 10 by default, of which the one with the
+  highest likelihood is kept. The likelihood has local maxima: on the 60
+  people of three populations in `t/data/popgen.vcf`, ADMIXTURE 1.3.0 itself
+  stopped at the lesser of two from 2 of 6 seeds.
+- `seed`: start `s` (counting from 0) is drawn from `seed + s`; 1 by default.
+  The starts are drawn from integers alone, so a seed gives the same start on
+  every platform.
+- `tolerance`: a start stops when an iteration raises its log-likelihood by
+  less than this, 1e-10 by default. ADMIXTURE's own default is 1e-4, which is
+  too loose for EM steps, which creep where the likelihood is flat. On that
+  file, 1e-4 stopped 1.1e-3 below ADMIXTURE's maximum, with fractions 8e-4
+  from ADMIXTURE's; at 1e-8, starts that reached the log-likelihood to 1e-6
+  still had fractions up to 1.4e-4 from it; and at 1e-10 every start that
+  reached the greater maximum had every fraction within 1.9e-5, which is
+  ADMIXTURE's own precision. A looser tolerance is faster, and may serve on
+  a large file.
+- `max_iterations`: the iterations (of three EM steps each) after which a
+  start stops, 10,000 by default. When the best start stopped so, it warns.
+- `min_depth`: a genotype whose `DP` is below this is missing; 0 (the
+  default) keeps every one.
+
+It returns a hash ref of `k`, `loglik` (the best start's log-likelihood, as
+ADMIXTURE prints it, without the binomial coefficients), `converged` (1 or
+0), `iterations`, `starts` (each start's log-likelihood, in order),
+`samples` (each sample's fractions, an array of `k` that sums to 1) and
+`variants` (each variant, with `freq`, its ALT allele's frequency in each
+population). The populations are unnamed, and come in the order of their
+share of the samples, the largest first, so that two fits of the same data
+give them in the same order. No fraction or frequency is below 1e-5 or above
+1 - 1e-5, ADMIXTURE's bounds. A sample with no called genotype gets an even
+share of each population, with a warning.
+
+All the genotypes are held, a byte each, so a cohort of 1,000 people at a
+million variants takes 1 GB. Prune the variants first, as ADMIXTURE's manual
+(section 2.3) advises, since the model takes no account of linkage
+disequilibrium; its example, `plink --indep-pairwise 50 10 0.1`, is
+`ld_prune(vcf => $vcf, window => 50, step => 10, r2 => 0.1)`. Each iteration takes time in proportion to the
+samples, the variants and `k`, times the starts.
 
 ## sex_check(%args)
 
