@@ -1,0 +1,3 @@
+# t/data/faidx.fa is htslib's test file byte for byte: part of it has CRLF line
+# endings, and t/faidx.t checks byte offsets into it, so git must not convert it.
+t/data/faidx.fa -text
