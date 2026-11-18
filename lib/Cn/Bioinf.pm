@@ -31,7 +31,7 @@ use File::Spec;
 use Sys::Hostname 'hostname';
 use Exporter 'import';
 use XSLoader;
-our $VERSION = '0.03';
+our $VERSION = '0.031';
 our @EXPORT_OK = qw(
 	admixture assembly_stats back_transcribe blood_type complement concordance fasta2hash fasta_index
 	fasta_region find_orfs fst gc_content get_best_alignment_hit gwas hardy_weinberg hash2fasta_file hirisplex_genotypes
@@ -2464,7 +2464,7 @@ sub admixture {
 	}
 	my ($q, $p, $ll, $iterations, $converged) = @{ $best };
 	carp "$sub: the best of the $r{starts} start" . ($r{starts} == 1 ? '' : 's') . " stopped after $iterations iterations without converging"
-		. " (its log-likelihood still rising by $r{tolerance} or more); give a larger \"max_iterations\"" unless $converged;
+		. ' (its log-likelihood still rising by ' . _two_digit_exponent("$r{tolerance}") . ' or more); give a larger "max_iterations"' unless $converged;
 	my @none = grep { !$called->[$_] } 0 .. $n - 1;
 	carp "$sub: " . scalar(@none) . ' sample' . (@none == 1 ? ' has' : 's have') . ' no called genotype, and so an even share of each population: '
 		. join(', ', map { "\"$names->[$_]\"" } @none[0 .. ($#none < 4 ? $#none : 4)]) . (@none > 5 ? ', ...' : '') if @none;
@@ -4066,7 +4066,9 @@ sub _pdb_method {
 # are enough, as C99's printf writes one. The C runtime under Strawberry Perl
 # 5.24.4 writes three, so pdb_search's report read "1.6e-089" there (CPAN
 # Testers report 620bc624-ddea-11f1-b231-87fe50e89311, 2026-11-11) and
-# "1.6e-89" everywhere else. An exponent that needs three digits keeps them.
+# "1.6e-89" everywhere else, and admixture's warning gave its default tolerance
+# as "1e-010" there in 0.03-TRIAL (report 363318e0-e362-11f1-808f-855b4a25bcf6,
+# 2026-11-18). An exponent that needs three digits keeps them.
 sub _two_digit_exponent {
 	my ($text) = @_;
 	$text =~ s/([eE][-+])0(\d\d)\z/$1$2/;
@@ -7732,7 +7734,7 @@ such as C<a: K2, alignment column 2>.
 Its provenance is where Matplotlib::Simple puts it, as the only metadata in
 the file, in C<< E<lt>dc:creatorE<gt>E<lt>cc:AgentE<gt>E<lt>dc:titleE<gt> >>, on one line:
 
- /home/me/view.pl called using "view_alignment" in .../Cn/Bioinf.pm version 0.03 by user me on host box (linux) with Perl 5.44.0 (/usr/bin/perl), written as SVG by .../Cn/Bioinf.pm itself; from the FASTA file /home/me/orthologs.fa (SHA-256 781f...) of 4 sequences; showing 4 of 4 sequences in blocks of 100 columns, tracking S.cerevisiae, coloring 3 columns
+ /home/me/view.pl called using "view_alignment" in .../Cn/Bioinf.pm version 0.031 by user me on host box (linux) with Perl 5.44.0 (/usr/bin/perl), written as SVG by .../Cn/Bioinf.pm itself; from the FASTA file /home/me/orthologs.fa (SHA-256 781f...) of 4 sequences; showing 4 of 4 sequences in blocks of 100 columns, tracking S.cerevisiae, coloring 3 columns
 
 When the sequences had to be aligned, the clause after "itself" says how, as
 C<plot_msa>'s does: the ungapped file clustalo read, the Clustal Omega and

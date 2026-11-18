@@ -494,6 +494,10 @@ about 20, most of it `t/admixture.t`, whose fit runs in software
 `__float128` there; keep that file's fits few. On 2026-11-18, with `_fai_scan`
 in XS, the same seven passed (2,702 tests, 1,947 on `5.44.0-i686`) and the
 same three failed at `perl Makefile.PL` for want of File::ShareDir::Install.
+Later that day, with 0.03-TRIAL's one CPAN Testers failure fixed (admixture's
+warning wrote its tolerance as "1e-010" on Strawberry Perl 5.24.4), the same
+seven passed (2,703 tests, 1,948 on `5.44.0-i686`) and the same three failed
+for the same reason.
 
 `./test.all.perls.pl` builds and tests against all of them, installing
 Alien::Bioinf into any perl that lacks it, and with `-p` against chosen ones.

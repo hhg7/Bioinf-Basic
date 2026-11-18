@@ -167,7 +167,9 @@ ok $mean{YRI}[ $top{YRI} ] > 0.85 && $mean{CHB}[ $top{CHB} ] > 0.85 && $mean{CEU
 my $one = admixture(vcf => $vcf, k => 3, starts => 1, seed => 2);
 is scalar @{ $one->{starts} }, 1, 'starts 1 fits once';
 ok abs($one->{loglik} - -15321.242786) < 0.01, 'and from seed 2 stops at the lesser maximum';
-my @again = map { admixture(vcf => $vcf, k => 3, starts => 1, seed => 2, max_iterations => 3, tolerance => 1e-300) } 1, 2;
+# Each of these warns that it did not converge; caught, so that the warnings
+# stay off the terminal.
+my @again = map { (warnings_of(sub { admixture(vcf => $vcf, k => 3, starts => 1, seed => 2, max_iterations => 3, tolerance => 1e-300) }))[0] } 1, 2;
 is_deeply $again[1], $again[0], 'the same seed gives the same fit';
 my ($short, $w) = warnings_of(sub { admixture(vcf => $vcf, k => 3, max_iterations => 1) });
 is scalar @{ $short->{starts} }, 10, 'ten starts by default';
@@ -176,6 +178,13 @@ is $short->{iterations}, 1, 'and stops after 1';
 is scalar @{ $w }, 1, 'with one warning';
 like $w->[0], qr/^admixture: the best of the 10 starts stopped after 1 iterations without converging \(its log-likelihood still rising by 1e-10 or more\); give a larger "max_iterations"/,
 	'which says so';
+# Strawberry Perl 5.24.4's C runtime writes 1e-10 as "1e-010", which the
+# warning above gave there in 0.03-TRIAL (CPAN Testers report
+# 363318e0-e362-11f1-808f-855b4a25bcf6, 2026-11-18). A tolerance given as that
+# text shows the same thing on any perl.
+(undef, $w) = warnings_of(sub { admixture(vcf => $vcf, k => 3, starts => 1, max_iterations => 1, tolerance => '1e-010') });
+like $w->[0], qr/ \(its log-likelihood still rising by 1e-10 or more\);/,
+	'the tolerance is shown with a two-digit exponent, rather than as "1e-010" from a C runtime that writes three';
 my $loose = admixture(vcf => $vcf, k => 3, starts => 1, tolerance => 1);
 ok $loose->{converged} && $loose->{iterations} < $fit->{iterations}, 'a loose tolerance converges sooner';
 

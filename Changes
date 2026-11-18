@@ -1,5 +1,19 @@
 Revision history for Cn-Bioinf
 
+0.031 2026-11-18 CST
+
+ [Bug fixes]
+
+ - admixture's warning that a fit stopped before converging wrote its
+   tolerance as the C runtime writes the number, which under Strawberry
+   Perl 5.24.4 is "1e-010" rather than "1e-10", so t/admixture.t failed
+   there (CPAN Testers report 363318e0-e362-11f1-808f-855b4a25bcf6, the
+   only failure of 32 reports for 0.03-TRIAL). The module was at fault:
+   the tolerance is now written with a two-digit exponent, as pdb_search's
+   E-values have been since 0.02. A new test in t/admixture.t shows the
+   same thing on any perl, and the file no longer prints two of those
+   warnings while it runs.
+
 0.03 2026-11-18 CST
 
  [Incompatible changes]
